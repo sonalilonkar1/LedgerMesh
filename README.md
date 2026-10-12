@@ -34,43 +34,45 @@ Although LedgerMesh uses rewards redemption as its business scenario, the same t
 flowchart TD
     U[Rewards Member] --> UI[Web Interface]
     UI --> C[Redemption Coordinator]
-    LG[Load Generator] --> C
+    LG[Locust Load Generator] --> C
 
     C --> CDB[(Coordinator PostgreSQL)]
 
-    C -->|"2PC: Prepare, Commit, Abort + fencing token"| W[Wallet Service]
-    C -->|"2PC: Prepare, Commit, Abort + fencing token"| R[Rewards Catalog Service]
+    C -->|"2PC: Prepare, Commit, Abort + Optional Fencing Token"| W[Wallet Service]
+    C -->|"2PC: Prepare, Commit, Abort + Optional Fencing Token"| R[Rewards Catalog Service]
+    C -->|"Final 2PC Outcome"| L[Audit Ledger Service]
 
-    C -->|"Saga Commands + fencing token"| K[Kafka]
+    C -->|"Saga Commands + Optional Fencing Token"| K[Kafka]
     K -->|"Wallet Commands keyed by User ID"| W
     K -->|"Catalog Commands keyed by Reward ID"| R
+
     W -->|"Wallet Result Events"| K
     R -->|"Catalog Result Events"| K
     K -->|"Wallet and Catalog Result Events"| C
-    K -->|"Transaction Events"| L[Audit Ledger Service]
+    K -->|"Saga Transaction Events"| L
 
     W --> WDB[(Wallet PostgreSQL)]
     R --> RDB[(Catalog PostgreSQL)]
     L --> LDB[(Ledger PostgreSQL)]
 
-    FI[Fault Injection Tool] -.->|"Crashes and network faults"| C
-    FI -.->|"Latency and connection faults"| W
-    FI -.->|"Latency and connection faults"| R
-    FI -.->|"Broker connection faults"| K
+    FI[Fault Injection Tool] -.->|"Crashes and Network Faults"| C
+    FI -.->|"Latency and Connection Faults"| W
+    FI -.->|"Latency and Connection Faults"| R
+    FI -.->|"Broker Connection Faults"| K
 
-    subgraph SERVICES[Instrumented Services]
-        C
-        W
-        R
-        L
-    end
-
-    SERVICES -.->|Traces| O[OpenTelemetry Collector]
+    C -.->|"Traces"| O[OpenTelemetry Collector]
+    W -.->|"Traces"| O
+    R -.->|"Traces"| O
+    L -.->|"Traces"| O
     O --> J[Jaeger]
-    SERVICES -.->|Metrics| P[Prometheus]
+
+    C -.->|"Exposes Metrics"| P[Prometheus]
+    W -.->|"Exposes Metrics"| P
+    R -.->|"Exposes Metrics"| P
+    L -.->|"Exposes Metrics"| P
     P --> G[Grafana]
 
-    subgraph STRETCH[Stretch Goal]
+    subgraph STRETCH["Stretch Goal"]
         E[etcd Cluster]
     end
 
@@ -98,4 +100,3 @@ flowchart TD
 | **Toxiproxy and Docker controls** | Network latency, connection failures, service pauses, and crash injection |
 | **Pytest** | Unit, integration, concurrency, idempotency, and recovery testing |
 | **etcd — Stretch Goal** | Lease-based leader election, linearizable Coordinator state, quorum-loss detection, and fencing tokens |
-
