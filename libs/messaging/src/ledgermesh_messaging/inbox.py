@@ -29,7 +29,7 @@ async def process_once(
     envelope: EventEnvelope,
     handler: Handler,
     *,
-    republish_on_duplicate: bool = True,
+    republish_on_duplicate: bool = False,
 ) -> ProcessResult:
     """Run ``handler`` for ``envelope`` at most once per ``consumer``.
 
@@ -41,9 +41,12 @@ async def process_once(
     key: the second insert waits for the first transaction, then conflicts and
     is reported as a duplicate.
 
-    For a duplicate, the stored result events are optionally queued for
-    publication again, so a sender that never saw the original reply (for
-    example after a timeout) receives the same outcome with the same event ids.
+    A duplicate always returns the stored result event ids. Re-queueing those
+    events for publication is opt-in through ``republish_on_duplicate``: enable
+    it only where a sender retries with the same event id and needs the
+    original reply. Every replayed event is itself a duplicate for its
+    receiver, so replay enabled throughout a workflow re-sends the whole
+    downstream chain for each duplicate it sees.
     """
     async with session_factory() as session, session.begin():
         claimed = await session.scalar(
