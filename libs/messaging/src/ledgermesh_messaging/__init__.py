@@ -3,10 +3,11 @@ from .envelope import EnvelopeError, EventEnvelope
 from .inbox import Handler, ProcessResult, process_once
 from .kafka import create_consumer, create_producer
 from .outbox import OutgoingMessage, enqueue
-from .publisher import OutboxPublisher
+from .publisher import BatchResult, OutboxPublisher
 from .schema import inbox, metadata, outbox
 
 __all__ = [
+    "BatchResult",
     "EnvelopeError",
     "EventEnvelope",
     "Handler",

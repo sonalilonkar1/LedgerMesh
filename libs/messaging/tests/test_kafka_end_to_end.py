@@ -5,6 +5,7 @@ import pytest
 from aiokafka.admin import AIOKafkaAdminClient, NewTopic
 
 from ledgermesh_messaging import (
+    BatchResult,
     EventEnvelope,
     InboxConsumer,
     OutboxPublisher,
@@ -59,7 +60,8 @@ async def next_record(consumer, timeout: float = 20.0):
 
 async def test_outbox_to_inbox_preserves_per_key_order(session_factory, topic, producer):
     envelopes = await stage(session_factory, topic, 10, key="user-42")
-    assert await OutboxPublisher(session_factory, producer, name="e2e").publish_batch() == 10
+    result = await OutboxPublisher(session_factory, producer, name="e2e").publish_batch()
+    assert result == BatchResult(published=10, failed=False)
 
     seen: list[int] = []
 

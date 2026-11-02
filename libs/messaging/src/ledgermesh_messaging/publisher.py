@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from aiokafka.errors import KafkaError
@@ -33,16 +34,31 @@ def _advisory_lock_key(name: str) -> int:
     return int.from_bytes(hashlib.blake2b(name.encode(), digest_size=8).digest(), "big", signed=True)
 
 
+@dataclass(frozen=True)
+class BatchResult:
+    published: int
+    failed: bool = False
+
+
 class OutboxPublisher:
-    """Publishes unpublished outbox rows in insertion order.
+    """Publishes committed, unpublished outbox rows in ascending id order.
 
     Delivery is at-least-once: if the process dies after Kafka acknowledges a
     send but before the row is marked published, the row is sent again on the
     next batch with the same event id, and the receiving inbox discards it.
 
-    A PostgreSQL advisory lock allows only one active publisher per ``name``,
-    so running several replicas of a service cannot reorder its messages.
-    A send failure stops the batch at that row for the same reason.
+    Ordering: a PostgreSQL advisory lock allows only one active publisher per
+    ``name``, and a send failure stops the batch at that row, so the publisher
+    never reorders the rows it can see. Rows written in one transaction, or by
+    transactions that commit one after another, therefore keep their order.
+    It does not give causal order across concurrent transactions: ids are
+    assigned at insert time, so a transaction holding a lower id can commit
+    after a higher id has already been sent. Consumers that need strict
+    per-aggregate or per-workflow order must check versions and causation
+    (LM-026).
+
+    ``run`` doubles its delay after each failed batch, up to ``max_backoff``,
+    and returns to ``poll_interval`` after the next successful batch.
     """
 
     def __init__(
@@ -62,12 +78,16 @@ class OutboxPublisher:
         self._poll_interval = poll_interval
         self._max_backoff = max_backoff
 
-    async def publish_batch(self) -> int:
-        """Publish up to ``batch_size`` rows and return how many succeeded."""
+    async def publish_batch(self) -> BatchResult:
+        """Publish up to ``batch_size`` rows.
+
+        A Kafka error stops the batch and is reported as ``failed`` so the
+        caller can back off; rows sent before the error stay marked published.
+        """
         async with self._session_factory() as session, session.begin():
             acquired = await session.scalar(select(func.pg_try_advisory_xact_lock(self._lock_key)))
             if not acquired:
-                return 0
+                return BatchResult(published=0)
 
             rows = (
                 await session.execute(
@@ -94,7 +114,7 @@ class OutboxPublisher:
                         .values(attempts=outbox.c.attempts + 1, last_error=repr(exc)[:2000])
                     )
                     logger.warning("outbox publish failed for event %s: %r", row.event_id, exc)
-                    break
+                    return BatchResult(published=published, failed=True)
 
                 await session.execute(
                     update(outbox)
@@ -102,21 +122,27 @@ class OutboxPublisher:
                     .values(published_at=func.now(), attempts=outbox.c.attempts + 1)
                 )
                 published += 1
-            return published
+            return BatchResult(published=published)
 
     async def run(self, stop: asyncio.Event) -> None:
         backoff = self._poll_interval
         while not stop.is_set():
             try:
-                published = await self.publish_batch()
-                backoff = self._poll_interval
+                result = await self.publish_batch()
             except Exception:
                 logger.exception("outbox publisher batch failed")
-                published = 0
-                backoff = min(backoff * 2, self._max_backoff)
+                result = BatchResult(published=0, failed=True)
 
-            if published < self._batch_size:
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=backoff)
-                except TimeoutError:
-                    pass
+            if result.failed:
+                backoff = min(backoff * 2, self._max_backoff)
+                await self._pause(stop, backoff)
+            else:
+                backoff = self._poll_interval
+                if result.published < self._batch_size:
+                    await self._pause(stop, self._poll_interval)
+
+    async def _pause(self, stop: asyncio.Event, delay: float) -> None:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=delay)
+        except TimeoutError:
+            pass
