@@ -1,0 +1,72 @@
+# Runs the libs/messaging test suite, including the PostgreSQL and Kafka
+# integration tests. Scoped to this library until the repository-wide CI
+# from LM-002 exists, which can absorb this job.
+name: messaging
+
+on:
+  pull_request:
+    paths:
+      - "libs/messaging/**"
+      - ".github/workflows/messaging.yml"
+  push:
+    branches: [main]
+    paths:
+      - "libs/messaging/**"
+      - ".github/workflows/messaging.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: libs/messaging
+
+    # Same images, credentials and host ports as docker-compose.test.yml, so the
+    # tests use their default connection settings.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ledgermesh
+          POSTGRES_PASSWORD: ledgermesh
+          POSTGRES_DB: messaging_test
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U ledgermesh -d messaging_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+
+      kafka:
+        image: apache/kafka:3.8.0
+        env:
+          KAFKA_NODE_ID: "1"
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:59092
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+        ports:
+          - 59092:9092
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies
+        run: uv sync --python 3.12 --locked
+
+      - name: Run tests
+        run: uv run pytest -v
