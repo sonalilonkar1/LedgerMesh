@@ -99,3 +99,42 @@ The **etcd cluster is a stretch goal** for Coordinator leadership and split-brai
 | **Toxiproxy and Docker controls** | Introduce network delays, disconnections, service pauses, and crashes to evaluate behavior during partial failures. |
 | **etcd — Stretch Goal** | Provide lease-based Coordinator leadership, linearizable state operations, and fencing tokens to protect against stale leaders during quorum loss or network partitions. |
 | **Kubernetes — Stretch Goal** | Deploy the services after the Docker Compose baseline is stable and extend deployment and failure demonstrations to a cluster environment. |
+
+## Repository Structure
+
+```text
+services/
+  coordinator/       Redemption workflow and coordination
+  wallet/            Points balance operations
+  catalog/           Reward inventory operations
+  audit_ledger/      Immutable transaction history
+libs/
+  contracts/         Shared API and event contracts
+  messaging/         Kafka messaging library
+infra/               Local and deployment infrastructure
+tests/               Cross-service and experiment tests
+docs/
+  architecture/      Architecture decisions and diagrams
+```
+
+## Development
+
+LedgerMesh requires Python 3.12 and [uv](https://docs.astral.sh/uv/). Install the core service dependencies and run all local checks with:
+
+```bash
+uv sync --python 3.12
+make check
+```
+
+Run a service locally, then call its health endpoint:
+
+```bash
+make run-coordinator
+curl http://localhost:8000/health
+```
+
+The Coordinator, Wallet, Catalog, and Audit Ledger services use ports 8000, 8001, 8002, and 8003 respectively. More commands are documented in [docs/development.md](docs/development.md).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming, commit guidance, testing requirements, and the pull-request workflow.
