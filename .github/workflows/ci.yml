@@ -1,0 +1,44 @@
+name: core-ci
+
+on:
+  pull_request:
+    paths:
+      - "services/**"
+      - "libs/contracts/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "Makefile"
+      - ".github/workflows/ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "services/**"
+      - "libs/contracts/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "Makefile"
+      - ".github/workflows/ci.yml"
+
+jobs:
+  quality:
+    name: Format, lint, and unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install Python and dependencies
+        run: uv sync --python 3.12
+
+      - name: Check formatting
+        run: uv run ruff format --check services
+
+      - name: Run linting
+        run: uv run ruff check services
+
+      - name: Run service unit tests
+        run: uv run pytest services -q
