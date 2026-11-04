@@ -27,6 +27,39 @@ consumer = InboxConsumer(
 
 Run one `OutboxPublisher(session_factory, create_producer(bootstrap), name="wallet")` per service. An advisory lock keeps a second replica idle.
 
+## Kafka topics (LM-018)
+
+All topics are declared in `topics.py`. Services import them instead of typing names, and build messages with `spec.message(envelope)` so the key is always right:
+
+```python
+from ledgermesh_messaging import WALLET_COMMANDS, enqueue
+
+await enqueue(session, WALLET_COMMANDS.message(deduct_points_command))
+```
+
+| Topic | Key | Producer | Consumer group |
+|---|---|---|---|
+| `wallet.commands` | user ID (`aggregate_id` of a `wallet` envelope) | Coordinator | `wallet-saga` |
+| `wallet.results` | `transaction_id` | Wallet | `coordinator-saga` |
+| `catalog.commands` | reward ID (`aggregate_id` of a `reward` envelope) | Coordinator | `catalog-saga` |
+| `catalog.results` | `transaction_id` | Catalog | `coordinator-saga` |
+| `redemption.events` | `transaction_id` | Coordinator | `audit-ledger` |
+
+- Commands are keyed by the wallet or reward they change, so every command for one user (or one reward) lands on the same partition and is applied in order. Sending a `reward` envelope to `wallet.commands` raises `TopicKeyError`.
+- Results and events are keyed by `transaction_id`, so the Coordinator sees each transaction's results in order.
+- Every topic above also has `<topic>.retry`, with the same key and partition count and consumed by `<group>.retry`, and `<topic>.dlq`, with 1 partition and no consumer group. LM-024 ([#26](https://github.com/sonalilonkar1/LedgerMesh/issues/26)) adds the retry and dead-letter logic that uses them.
+- Main and retry topics: 6 partitions, 7 days retention. Dead-letter topics: 30 days retention. All topics use `cleanup.policy=delete` and `min.insync.replicas` of 2, or 1 when the replication factor is 1.
+
+### Creating the topics
+
+```bash
+uv run ledgermesh-topics --bootstrap-servers localhost:9092 --replication-factor 1
+```
+
+The command is safe to run any number of times. It creates missing topics, re-applies retention and replica settings to existing ones, and prints `created` or `ok` for each topic. If an existing topic has a different partition count, it stops with `TopicMismatchError` instead of adding partitions, because adding partitions would move keys to other partitions and break per-key ordering for messages already in flight.
+
+Run it before starting any service, and disable `auto.create.topics.enable` on the broker, so that a typo in a topic name fails instead of silently creating a 1-partition topic.
+
 ## Ordering guarantees and limits
 
 What the publisher **does** guarantee:
@@ -88,6 +121,10 @@ This PR adds no service migrations because no services exist yet. Each service a
 | Only one publisher per service is active | `test_only_one_publisher_runs_at_a_time` |
 | Crash after the database commit but before the offset commit is deduplicated on redelivery | `test_redelivery_after_crash_before_offset_commit_is_deduplicated` |
 | Per-key order survives the full outbox → Kafka → inbox path | `test_outbox_to_inbox_preserves_per_key_order` |
+| Wallet commands are keyed by user ID, Catalog commands by reward ID, results by transaction | `test_wallet_commands_are_keyed_by_user_id`, `test_catalog_commands_are_keyed_by_reward_id`, `test_results_and_events_are_keyed_by_transaction_id` |
+| Each consumer group owns a documented set of topics | `test_consumer_group_ownership` |
+| Topic bootstrap is repeatable and fixes setting drift | `test_second_run_is_a_no_op`, `test_rerun_restores_retention_drift` |
+| A topic with the wrong partition count is reported, not changed | `test_existing_topic_with_wrong_partition_count_is_reported_not_changed` |
 
 ## Running the tests
 
@@ -101,7 +138,7 @@ uv run pytest
 docker compose -f docker-compose.test.yml down -v
 ```
 
-`uv run pytest -m "not integration"` runs only the envelope tests and needs no Docker.
+`uv run pytest -m "not integration"` runs only the envelope and topic catalog tests and needs no Docker.
 
 GitHub Actions runs the full suite, including the PostgreSQL and Kafka integration tests, on every pull request that changes `libs/messaging` (`.github/workflows/messaging.yml`).
 
