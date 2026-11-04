@@ -87,6 +87,8 @@ Every Kafka command and event must contain:
 
 For commands, `aggregate_version` is `null`. Commands identify the redemption with `transaction_id` and their expected position with `workflow_step`. The owning service assigns the next aggregate version to the event it emits after a successful state change. The Coordinator must not read another service's database or manufacture a version for a Wallet or Catalog aggregate.
 
+`causation_id` is nullable only for the root message that creates a redemption because that message has no preceding cause. Every later command or event must set `causation_id` to the `event_id` of the message that directly caused it. This matches the nullable field in `libs/messaging`.
+
 ## 6. Two-Phase Commit state models
 
 Coordinator state model:
@@ -125,6 +127,8 @@ Rules:
 - If the Coordinator crashes after receiving all YES votes but before durably recording COMMIT, recovery uses presumed abort: the recovered Coordinator records ABORT and tells prepared participants to roll back.
 - If a durable COMMIT record exists, recovery continues sending COMMIT until every participant acknowledges it.
 - Repeated final-decision messages return the already stored outcome.
+- If a participant receives ABORT for a transaction it has not prepared, it atomically records an `ABORTED` tombstone. A later PREPARE for that transaction must vote NO and must not acquire or retain locks.
+- PostgreSQL prepared transactions require `max_prepared_transactions` to be greater than zero. LM-003 must enable and verify this setting for every 2PC participant database.
 
 ## 7. Saga state model
 
@@ -138,8 +142,8 @@ stateDiagram-v2
     DEDUCTING_POINTS --> FAILED: deduction rejected
     DEDUCTING_POINTS --> COMPENSATING: timeout or unknown outcome
     RESERVING_INVENTORY --> COMPENSATING: rejected, timeout, or unknown outcome
-    COMPENSATING --> COMPENSATED: inventory released and points refunded as applicable
-    COMPENSATING --> COMPENSATION_FAILED: bounded retries exhausted
+    COMPENSATING --> COMPENSATING: retry with backoff
+    COMPENSATING --> COMPENSATED: required compensations confirmed
 ```
 
 Rules:
@@ -148,8 +152,27 @@ Rules:
 - A timeout does not prove that an operation failed. The Wallet may deduct points, or the Catalog may reserve inventory, before its response is lost or delayed.
 - A future event is deferred or retried until its causal predecessor arrives; after bounded retries it enters the dead-letter topic.
 - When an outcome is unknown, the Coordinator enters compensation and requests inventory release and point refund as applicable.
-- Compensation commands are idempotent. If the corresponding forward operation did not occur, the owning service records or returns a safe no-op result.
-- `COMPLETED`, `FAILED`, and `COMPENSATED` are terminal outcomes. `COMPENSATION_FAILED` requires operator attention and is not reported as successful.
+- Compensation commands are idempotent. If the corresponding forward operation did not occur, the owning service records a compensation tombstone and returns a safe no-op result.
+- Compensation is retried until every required compensation is confirmed. Retries use bounded exponential backoff between attempts, but there is no terminal `COMPENSATION_FAILED` state.
+- After the configured alert threshold is reached, the system raises an operator alert and continues retrying. The transaction remains non-terminal in `COMPENSATING` and is not reported as failed, compensated, or successful until recovery completes.
+- `COMPLETED`, `FAILED`, and `COMPENSATED` are terminal Saga outcomes. `COMPENSATING` is not terminal, even after an operator alert has been raised.
+
+### 7.1 Compensation tombstones and late forward commands
+
+A compensation can arrive before the forward command whose effect it is intended to reverse. Treating that compensation as an unrecorded no-op would allow the delayed forward command to create an unmatched deduction or reservation later.
+
+When a participant receives a compensation and finds no corresponding forward effect, it must atomically store a compensation tombstone keyed by `transaction_id`, operation type, and affected aggregate. The tombstone permanently cancels that forward operation for the transaction.
+
+If the original forward command arrives after the tombstone:
+
+- The participant rejects it without changing business state.
+- The participant returns or emits a deterministic cancelled or compensated result.
+- The participant logs the late command with its transaction and event identifiers for observability.
+- Repeated forward or compensation commands return the previously recorded result.
+
+For example, if `ReleaseInventory` arrives before `ReserveInventory`, the Catalog records the release tombstone and a later reservation cannot allocate inventory. If `RefundPoints` arrives before `DeductPoints`, the Wallet records the refund tombstone and a later deduction cannot reduce the balance.
+
+The tombstone, inbox record, and no-op compensation result must be committed in the same local database transaction. This rule prevents late forward commands from violating INV-06.
 
 ## 8. Ordering, idempotency, and concurrency decisions
 
@@ -166,6 +189,10 @@ Rules:
 6. Redis Redlock is not required for the baseline. Database constraints and optimistic concurrency are the authoritative correctness mechanism.
 
 Two redemptions for the same user or reward are independent transactions. Database-level optimistic concurrency control serializes conflicting business mutations inside the owning service without forcing the Coordinator to know or predict another service's current aggregate version.
+
+The Coordinator enforces a unique database constraint on the client-provided idempotency key. A repeated request with the same key returns the existing `transaction_id` and current transaction status instead of creating another redemption.
+
+Concrete Kafka topic names and partition keys are defined by LM-018 (#20). Retry, backoff, alert, and dead-letter policies are defined by LM-024 (#26). Ordering and concurrency behavior are implemented and tested under LM-026 (#28).
 
 ## 9. Audit Ledger delivery and availability
 
@@ -203,7 +230,7 @@ After recovery finishes, an aborted, failed, or compensated transaction cannot r
 
 ### Terminal-state event rule
 
-After a transaction reaches `COMMITTED`, `COMPLETED`, `ABORTED`, `FAILED`, or `COMPENSATED`, a late, reordered, or duplicate event cannot alter its terminal outcome. The consumer logs the ignored event with its `transaction_id` and `event_id`, increments an observability metric, and acknowledges or records it as ignored so that it is not processed repeatedly.
+After a transaction reaches `COMMITTED`, `COMPLETED`, `ABORTED`, `FAILED`, or `COMPENSATED`, a late, reordered, or duplicate event cannot alter its terminal outcome. The consumer logs the ignored event with its `transaction_id` and `event_id`, increments an observability metric, and acknowledges or records it as ignored so that it is not processed repeatedly. A transaction in `COMPENSATING` is non-terminal and continues retrying until all required compensations are confirmed.
 
 ## 11. Planned invariant tests
 
@@ -214,7 +241,7 @@ After a transaction reaches `COMMITTED`, `COMPLETED`, `ABORTED`, `FAILED`, or `C
 | INV-03 | Same event processed by multiple consumer threads; repeated API request using one idempotency key |
 | INV-04 | Coordinator crash before and after decision; conflicting, duplicate, or late result event injection after every terminal state |
 | INV-05 | 2PC and Saga happy paths followed by cross-service state verification |
-| INV-06 | Catalog failure after deduction; compensation retry; participant and Coordinator restart |
+| INV-06 | Catalog failure after deduction; compensation retry; participant and Coordinator restart; compensation arriving before its forward command; late deduction or reservation after a compensation tombstone |
 
 The invariant checker will run after every integration test and controlled experiment. Any invariant violation fails the run, even if the API returned a nominally successful response.
 
