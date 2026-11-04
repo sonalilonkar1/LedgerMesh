@@ -32,13 +32,13 @@ jobs:
       - uses: astral-sh/setup-uv@v6
 
       - name: Install Python and dependencies
-        run: uv sync --python 3.12
+        run: uv sync --python 3.12 --locked
 
       - name: Check formatting
-        run: uv run ruff format --check services
+        run: uv run ruff format --check services libs/contracts tests
 
       - name: Run linting
-        run: uv run ruff check services
+        run: uv run ruff check services libs/contracts tests
 
       - name: Run service unit tests
         run: uv run pytest services -q
