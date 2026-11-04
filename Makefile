@@ -4,12 +4,12 @@ install:
 	uv sync --python 3.12
 
 format:
-	uv run ruff format services
-	uv run ruff check --fix services
+	uv run ruff format services libs/contracts tests
+	uv run ruff check --fix services libs/contracts tests
 
 lint:
-	uv run ruff format --check services
-	uv run ruff check services
+	uv run ruff format --check services libs/contracts tests
+	uv run ruff check services libs/contracts tests
 
 test:
 	uv run pytest services -q
