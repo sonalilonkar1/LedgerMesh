@@ -53,8 +53,10 @@ await enqueue(session, WALLET_COMMANDS.message(deduct_points_command))
 ### Creating the topics
 
 ```bash
-uv run ledgermesh-topics --bootstrap-servers localhost:9092 --replication-factor 1
+uv run ledgermesh-topics --bootstrap-servers localhost:29092 --replication-factor 1
 ```
+
+`localhost:29092` is the Kafka port of the local stack (`make infra-up`) and is also the default, so `uv run ledgermesh-topics` alone works against it. Set `LM_KAFKA_BOOTSTRAP` or pass `--bootstrap-servers` for any other broker.
 
 The command is safe to run any number of times. It creates missing topics, re-applies retention and replica settings to existing ones, and prints `created` or `ok` for each topic. If an existing topic has a different partition count, it stops with `TopicMismatchError` instead of adding partitions, because adding partitions would move keys to other partitions and break per-key ordering for messages already in flight.
 

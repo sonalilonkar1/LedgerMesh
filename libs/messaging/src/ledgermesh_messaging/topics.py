@@ -228,7 +228,8 @@ async def _bootstrap(bootstrap_servers: str, replication_factor: int) -> Bootstr
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Create or update the LedgerMesh Kafka topics.")
-    parser.add_argument("--bootstrap-servers", default=os.environ.get("LM_KAFKA_BOOTSTRAP", "localhost:9092"))
+    # 29092 is the host port of the Kafka broker in infra/compose.yaml (LM-003).
+    parser.add_argument("--bootstrap-servers", default=os.environ.get("LM_KAFKA_BOOTSTRAP", "localhost:29092"))
     parser.add_argument("--replication-factor", type=int, default=1)
     args = parser.parse_args()
 
