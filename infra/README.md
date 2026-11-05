@@ -118,6 +118,12 @@ docker compose -f infra/compose.yaml logs kafka
 
 If a host port is already in use, stop the conflicting process or override that port in `infra/.env`.
 
+If a health check returns an unexpected status or identifies the wrong service, another application may already be using that host port. Override the port in `infra/.env`, or provide the same override to both commands:
+
+```bash
+WALLET_PORT=18001 make infra-up
+WALLET_PORT=18001 make infra-smoke
+
 After changing `max_prepared_transactions` or database initialization settings, use `make infra-reset` so PostgreSQL starts with fresh local volumes.
 
 ## Two-machine verification

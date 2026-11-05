@@ -2,21 +2,56 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ENV_FILE="$ROOT_DIR/infra/.env"
+
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+fi
+
 COMPOSE=(docker compose -f "$ROOT_DIR/infra/compose.yaml")
+
+check_health() {
+  local expected_service="$1"
+  local port="$2"
+  local endpoint="http://localhost:${port}/health"
+  local response
+  local actual_service
+
+  if ! response="$(curl --fail --silent --show-error "$endpoint")"; then
+    echo "Health check failed for $expected_service at $endpoint" >&2
+    echo "Another application may be using port $port." >&2
+    return 1
+  fi
+
+  if ! actual_service="$(
+    python3 -c \
+      'import json, sys; print(json.load(sys.stdin).get("service", ""))' \
+      <<<"$response"
+  )"; then
+    echo "Invalid JSON returned by $endpoint: $response" >&2
+    return 1
+  fi
+
+  if [[ "$actual_service" != "$expected_service" ]]; then
+    echo "Expected $expected_service at $endpoint, but response identified '$actual_service'." >&2
+    echo "Another application may be using port $port." >&2
+    return 1
+  fi
+
+  echo "$response"
+}
 
 echo "Checking Compose service state..."
 "${COMPOSE[@]}" ps
 
 echo "Checking HTTP health endpoints..."
-for endpoint in \
-  "http://localhost:${COORDINATOR_PORT:-8000}/health" \
-  "http://localhost:${WALLET_PORT:-8001}/health" \
-  "http://localhost:${CATALOG_PORT:-8002}/health" \
-  "http://localhost:${AUDIT_LEDGER_PORT:-8003}/health"
-do
-  curl --fail --silent --show-error "$endpoint"
-  echo
-done
+check_health "coordinator" "${COORDINATOR_PORT:-8000}"
+check_health "wallet" "${WALLET_PORT:-8001}"
+check_health "catalog" "${CATALOG_PORT:-8002}"
+check_health "audit-ledger" "${AUDIT_LEDGER_PORT:-8003}"
 
 echo "Checking Kafka broker..."
 "${COMPOSE[@]}" exec -T kafka \
