@@ -21,7 +21,25 @@ Run a single service's health tests while developing:
 | Catalog | `uv run pytest services/catalog/tests -q` |
 | Audit Ledger | `uv run pytest services/audit_ledger/tests -q` |
 
-## Run one service
+## Run the complete local stack
+
+Docker Desktop must be running.
+
+```bash
+make infra-up
+make infra-status
+make infra-smoke
+```
+
+Stop the stack while preserving its named volumes:
+
+```bash
+make infra-down
+```
+
+For ports, credentials, volume behavior, configuration overrides, and troubleshooting, see [the infrastructure guide](../infra/README.md).
+
+## Run one service without Compose
 
 | Service | Command | Default port |
 |---|---|---:|
@@ -44,6 +62,8 @@ Expected response:
 
 ## Messaging-library tests
 
+The messaging library retains its independent test environment:
+
 ```bash
 cd libs/messaging
 docker compose -f docker-compose.test.yml up -d --wait
@@ -51,3 +71,4 @@ uv sync --python 3.12 --locked
 uv run pytest
 docker compose -f docker-compose.test.yml down -v
 ```
+

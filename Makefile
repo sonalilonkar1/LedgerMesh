@@ -1,4 +1,7 @@
-.PHONY: install format lint test check run-coordinator run-wallet run-catalog run-ledger
+.PHONY: install format lint test check run-coordinator run-wallet run-catalog run-ledger infra-up infra-status infra-smoke infra-logs infra-down infra-reset
+
+COMPOSE_FILE ?= infra/compose.yaml
+COMPOSE := docker compose -f $(COMPOSE_FILE)
 
 install:
 	uv sync --python 3.12
@@ -27,3 +30,22 @@ run-catalog:
 
 run-ledger:
 	uv run uvicorn services.audit_ledger.app.main:app --reload --port 8003
+
+infra-up:
+	$(COMPOSE) up --build -d --wait
+
+infra-status:
+	$(COMPOSE) ps
+
+infra-smoke:
+	bash infra/scripts/smoke-test.sh
+
+infra-logs:
+	$(COMPOSE) logs --follow --tail=200
+
+infra-down:
+	$(COMPOSE) down --remove-orphans
+
+infra-reset:
+	$(COMPOSE) down --volumes --remove-orphans
+

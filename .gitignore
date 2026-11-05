@@ -7,6 +7,7 @@ Thumbs.db
 .env.*
 !.env.example
 !.env.*.example
+infra/.env
 
 # Python bytecode, virtual environments, and packaging output
 __pycache__/
