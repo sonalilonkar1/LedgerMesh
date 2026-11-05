@@ -1,101 +1,213 @@
-# LedgerMesh: Distributed Transaction Coordination for a Rewards System
+# LedgerMesh
 
-## Abstract
+LedgerMesh is a distributed rewards-redemption system for comparing **Two-Phase Commit (2PC)** and the **Saga pattern** under the same workloads and failure conditions.
 
-LedgerMesh is a distributed rewards-redemption system that compares **Two-Phase Commit (2PC)** and the **Saga pattern** for coordinating transactions across independently deployed services. A reward redemption requires the system to deduct customer points, reserve reward inventory, and record the transaction outcome. These operations span separate databases, so a service crash, network timeout, or concurrent request can leave a customer charged without a reward or allow the same inventory to be allocated more than once.
+A redemption spans independently owned Wallet, Rewards Catalog, Coordinator, and Audit Ledger services. The project focuses on transaction correctness during partial failures, duplicate or out-of-order messages, concurrent requests, retries, and service recovery.
 
-The project will implement the same redemption workflow using both coordination approaches. In 2PC mode, a Redemption Coordinator will use synchronous REST requests and PostgreSQL prepared transactions to obtain participant votes, durably record a commit or abort decision, and recover unfinished transactions. In Saga mode, services will exchange asynchronous Kafka commands and events, using compensating actions such as refunding points and releasing inventory when a later step fails. Idempotent processing, message ordering checks, and database concurrency controls will address duplicate messages, out-of-order delivery, and simultaneous redemptions.
+> LedgerMesh is under active development. Features are implemented incrementally through the project's LM issues.
 
-Both approaches will be evaluated under equivalent workloads and controlled failures, including service crashes, delayed messages, and network interruptions. The comparison will measure transaction correctness, availability, throughput, latency, and recovery time, with particular attention to blocking in 2PC and compensation in Saga. The intended result is a working application and experimental evidence explaining the tradeoffs between the two approaches.
+## Project Documentation
 
-## Business Value
+- [Project Proposal](Project_Proposal.md) — project motivation, business value, proposed architecture, technologies, experiments, and expected deliverables
+- [ADR-001: Architecture Decisions and Correctness Invariants](docs/architecture/ADR-001-ledgermesh-architecture-and-correctness.md) — canonical service boundaries, state models, recovery rules, message semantics, and correctness invariants
+- [Local Development Guide](docs/development.md) — setup, service commands, and testing instructions
+- [Contributing Guide](CONTRIBUTING.md) — branch naming, commits, reviews, and pull-request expectations
 
-Rewards programs used by retailers, airlines, banks, and employee-recognition platforms depend on accurate customer balances and reliable reward fulfillment. An incomplete transaction can deduct points without reserving a reward, while duplicate or concurrent requests can cause double-spending or overselling. These failures create customer disputes, manual reconciliation work, and financial losses.
+## Architecture Overview
 
-LedgerMesh aims to protect customer balances and reward inventory during partial failures and provide a traceable record of each redemption. Operators will be able to inspect transaction status, identify failed steps, and observe recovery through logs, metrics, and distributed traces. An audit history will support investigation of whether a transaction completed, aborted, or required compensation.
+LedgerMesh uses strict service ownership:
 
-The comparison will help engineering teams assess the availability and performance costs of 2PC against the recovery complexity and temporary inconsistencies of Saga. Rather than assuming one approach fits every application, the project will demonstrate their behavior under the same conditions. These findings can also inform distributed workflows in e-commerce orders, payment processing, and travel reservations.
+- **Redemption Coordinator** manages redemption workflow state and executes either 2PC or Saga.
+- **Wallet Service** owns customer point balances, deductions, refunds, and Wallet idempotency records.
+- **Rewards Catalog Service** owns reward inventory, reservations, releases, and Catalog idempotency records.
+- **Audit Ledger Service** stores an append-only transaction history.
+- **Messaging Library** provides the shared Kafka envelope, publishing, inbox, and outbox infrastructure.
 
-## Proposed Architecture Diagram
+No service directly reads or modifies another service's database.
 
-```mermaid
-flowchart TD
-    U[Rewards Member] --> UI[Web Interface]
-    UI --> C[Redemption Coordinator]
-    LG[Locust Load Generator] --> C
+In the Saga workflow, commands identify work using `transaction_id` and `workflow_step`. Wallet and Catalog assign `aggregate_version` to events describing their own successful state changes. Database constraints, idempotency records, and optimistic concurrency control protect balances and inventory during concurrent transactions.
 
-    C --> CDB[(Coordinator PostgreSQL)]
+In the 2PC workflow, the Coordinator durably records COMMIT or ABORT before notifying participants. Audit events are delivered asynchronously through a transactional outbox, so an Audit Ledger outage cannot block or reverse the transaction decision.
 
-    C -->|"2PC: Prepare, Commit, Abort + Optional Fencing Token"| W[Wallet Service]
-    C -->|"2PC: Prepare, Commit, Abort + Optional Fencing Token"| R[Rewards Catalog Service]
-    C -->|"Final 2PC Outcome"| L[Audit Ledger Service]
+Detailed architecture rules are maintained in ADR-001 rather than duplicated in this README.
 
-    C -->|"Saga Commands + Optional Fencing Token"| K[Kafka]
-    K -->|"Wallet Commands keyed by User ID"| W
-    K -->|"Catalog Commands keyed by Reward ID"| R
+## Repository Structure
 
-    W -->|"Wallet Result Events"| K
-    R -->|"Catalog Result Events"| K
-    K -->|"Wallet and Catalog Result Events"| C
-    K -->|"Saga Transaction Events"| L
-
-    W --> WDB[(Wallet PostgreSQL)]
-    R --> RDB[(Catalog PostgreSQL)]
-    L --> LDB[(Ledger PostgreSQL)]
-
-    FI[Fault Injection Tool] -.->|"Crashes and Network Faults"| C
-    FI -.->|"Latency and Connection Faults"| W
-    FI -.->|"Latency and Connection Faults"| R
-    FI -.->|"Broker Connection Faults"| K
-
-    C -.->|"Traces"| O[OpenTelemetry Collector]
-    W -.->|"Traces"| O
-    R -.->|"Traces"| O
-    L -.->|"Traces"| O
-    O --> J[Jaeger]
-
-    C -.->|"Exposes Metrics"| P[Prometheus]
-    W -.->|"Exposes Metrics"| P
-    R -.->|"Exposes Metrics"| P
-    L -.->|"Exposes Metrics"| P
-    P --> G[Grafana]
-
-    subgraph STRETCH["Stretch Goal"]
-        E[etcd Cluster]
-    end
-
-    C -.->|"Lease, Linearizable State, Fencing Token"| E
+```text
+LedgerMesh/
+├── .github/
+│   ├── pull_request_template.md
+│   └── workflows/
+│       ├── ci.yml
+│       └── messaging.yml
+├── docs/
+│   ├── architecture/
+│   │   └── ADR-001-ledgermesh-architecture-and-correctness.md
+│   └── development.md
+├── infra/
+├── libs/
+│   ├── contracts/
+│   └── messaging/
+├── services/
+│   ├── audit_ledger/
+│   ├── catalog/
+│   ├── coordinator/
+│   └── wallet/
+├── tests/
+├── CONTRIBUTING.md
+├── Makefile
+├── Project_Proposal.md
+├── pyproject.toml
+├── README.md
+└── uv.lock
 ```
 
-The architecture separates customer balances, reward inventory, workflow coordination, and auditing into services that each own a PostgreSQL database:
+The root Python environment owns the core service scaffold and its unit tests. The messaging library maintains a separate `pyproject.toml`, lockfile, and integration-test environment under `libs/messaging`.
 
-- **Web Interface:** Lets a rewards member view available points and rewards, submit a redemption, and check its transaction status.
-- **Redemption Coordinator:** Creates a transaction ID, tracks workflow progress, and executes either the 2PC or Saga workflow. Its database stores transaction state and durable coordination decisions used during recovery.
-- **Wallet Service:** Validates available points and applies deductions or refunds. Idempotency checks and database concurrency controls will prevent repeated deductions and negative balances.
-- **Rewards Catalog Service:** Validates availability and reserves or releases reward inventory. Concurrent requests will be checked to prevent overselling.
-- **Audit Ledger Service:** Records transaction outcomes and relevant events, allowing a redemption to be traced across services.
-- **Kafka:** Carries Saga commands and result events between the Coordinator and participant services, and delivers Saga events to the Audit Ledger.
+## Prerequisites
 
-In **2PC mode**, the Coordinator asks the Wallet and Catalog services to prepare their changes. It records the final commit or abort decision before notifying both participants, then records the outcome through the Audit Ledger. In **Saga mode**, the Coordinator drives the workflow through Kafka, deducting points before reserving inventory. If a later step fails, it requests compensation for completed steps. Each mode uses the same business operations so their behavior can be compared fairly.
+Install the following tools before starting:
 
-The diagram also shows the tools used to evaluate the workflows. Locust submits repeatable redemption workloads to the Coordinator. Toxiproxy and Docker controls introduce network faults, delays, pauses, and crashes affecting the Coordinator, participant services, and Kafka. Services send traces to the OpenTelemetry Collector for visualization in Jaeger and expose metrics for Prometheus, which Grafana displays in comparison dashboards.
+- Git
+- Python 3.12
+- [uv](https://docs.astral.sh/uv/)
+- Docker Desktop with Docker Compose
 
-The **etcd cluster is a stretch goal** for Coordinator leadership and split-brain protection. A renewable lease will identify the active Coordinator, while linearizable state operations and fencing tokens will help prevent a stale leader from changing transaction state. The Coordinator will step down if it loses its lease or quorum access, and participants will reject commands with stale fencing tokens. The optional fencing tokens shown on the transaction paths apply when this extension is enabled.
+`uv` creates and manages the repository's `.venv` automatically. Manual virtual-environment creation or activation is not required.
 
-## Proposed Technologies Used
+## Initial Setup
 
-| Technology | Proposed use |
+Clone the repository and install the core dependencies:
+
+```bash
+git clone https://github.com/sonalilonkar1/LedgerMesh.git
+cd LedgerMesh
+uv sync --python 3.12
+```
+
+Run all core formatting, linting, and unit-test checks:
+
+```bash
+make check
+```
+
+Expected baseline result:
+
+```text
+Ruff formatting check passed
+Ruff linting passed
+4 service health tests passed
+```
+
+A dependency deprecation warning from FastAPI/Starlette's test client may be displayed without failing the test suite.
+
+## Running the Core Services
+
+| Service | Command | Port | Health endpoint |
+|---|---|---:|---|
+| Redemption Coordinator | `make run-coordinator` | 8000 | `http://localhost:8000/health` |
+| Wallet | `make run-wallet` | 8001 | `http://localhost:8001/health` |
+| Rewards Catalog | `make run-catalog` | 8002 | `http://localhost:8002/health` |
+| Audit Ledger | `make run-ledger` | 8003 | `http://localhost:8003/health` |
+
+For example:
+
+```bash
+make run-coordinator
+```
+
+In another terminal:
+
+```bash
+curl http://localhost:8000/health
+```
+
+Expected response:
+
+```json
+{"status":"ok","service":"coordinator"}
+```
+
+The current service applications are initial skeletons. Business APIs, persistence, transaction coordination, and observability will be added through their assigned LM issues.
+
+## Core Development Commands
+
+| Command | Purpose |
 |---|---|
-| **Python and FastAPI** | Implement the Coordinator, Wallet, Catalog, and Audit Ledger services, with REST endpoints for redemption requests, transaction status, and 2PC coordination. |
-| **PostgreSQL** | Maintain separate service-owned databases for balances, inventory, workflow state, and audit records. Prepared transactions support 2PC; constraints and version checks protect against conflicting updates. |
-| **SQLAlchemy and psycopg** | Provide database access and local transaction management, including the PostgreSQL operations needed for prepared transactions. |
-| **Kafka and aiokafka** | Exchange asynchronous Saga commands and result events. Partition keys preserve per-entity message order, while application checks handle duplicate and stale messages. |
-| **HTML, CSS, and JavaScript** | Build a lightweight interface for viewing balances and rewards, submitting redemptions, and inspecting transaction progress. |
-| **Docker and Docker Compose** | Package the services and run them with PostgreSQL, Kafka, and observability tools in a reproducible local environment. |
-| **OpenTelemetry Collector and Jaeger** | Instrument services and propagate transaction context across REST requests and Kafka messages. The Collector receives and exports traces to Jaeger for visualization of delays and failures. |
-| **Prometheus and Grafana** | Collect and display throughput, latency, failure, retry, compensation, and recovery metrics for the 2PC-versus-Saga comparison. |
-| **Pytest** | Verify business rules, idempotency, concurrency handling, and recovery behavior through unit and integration tests. |
-| **Locust** | Generate repeatable redemption workloads, including simultaneous requests for the same customer or reward. |
-| **Toxiproxy and Docker controls** | Introduce network delays, disconnections, service pauses, and crashes to evaluate behavior during partial failures. |
-| **etcd — Stretch Goal** | Provide lease-based Coordinator leadership, linearizable state operations, and fencing tokens to protect against stale leaders during quorum loss or network partitions. |
-| **Kubernetes — Stretch Goal** | Deploy the services after the Docker Compose baseline is stable and extend deployment and failure demonstrations to a cluster environment. |
+| `make install` | Install or synchronize root dependencies |
+| `make format` | Format the service code and apply safe lint fixes |
+| `make lint` | Check formatting and linting |
+| `make test` | Run core service unit tests |
+| `make check` | Run linting and unit tests |
+
+Run an individual service's health tests with:
+
+```bash
+uv run pytest services/coordinator/tests -q
+uv run pytest services/wallet/tests -q
+uv run pytest services/catalog/tests -q
+uv run pytest services/audit_ledger/tests -q
+```
+
+## Messaging Library
+
+The messaging library is isolated under `libs/messaging`. It contains the shared event envelope, Kafka publisher, transactional inbox behavior, and messaging integration tests.
+
+Run its tests separately:
+
+```bash
+cd libs/messaging
+
+docker compose -f docker-compose.test.yml up -d --wait
+uv sync --python 3.12 --locked
+uv run pytest
+docker compose -f docker-compose.test.yml down -v
+```
+
+Always run the final `docker compose ... down -v` command after testing so the temporary Kafka test environment and volumes are removed.
+
+## Continuous Integration
+
+The repository currently uses two GitHub Actions workflows:
+
+- **`ci.yml`** checks formatting, linting, and core service unit tests.
+- **`messaging.yml`** runs messaging-library unit and Kafka integration tests.
+
+Before opening or updating a pull request, run the relevant local checks and include the results in the PR description.
+
+## Development Workflow
+
+1. Assign the GitHub issue to yourself and move it to **In Progress**.
+2. Create a focused branch from the latest `main`.
+3. Implement only the scope of the assigned issue.
+4. Add or update tests for behavioral changes.
+5. Run the relevant local checks.
+6. Push the branch and open a pull request.
+7. Link the issue using `Closes #<issue-number>`.
+8. Resolve review comments and obtain the required teammate approval before merging.
+
+Branch naming examples:
+
+```text
+feat/lm-007-wallet-core
+fix/lm-019-inbox-race
+docs/lm-001-architecture
+test/lm-026-concurrency
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the complete workflow.
+
+## Correctness Principles
+
+All implementations must preserve the canonical invariants in ADR-001, including:
+
+- Wallet balances never become negative.
+- Reward inventory never becomes negative or oversold.
+- A logical operation produces at most one business effect.
+- A redemption reaches at most one terminal outcome.
+- A successful redemption has both its point deduction and inventory allocation.
+- An unsuccessful redemption leaves no uncompensated deduction or ghost allocation.
+- Late or duplicate events cannot change an existing terminal outcome.
+
+If this README conflicts with ADR-001, ADR-001 is authoritative.
+
