@@ -1,0 +1,213 @@
+name: ledgermesh
+
+x-postgres-healthcheck: &postgres-healthcheck
+  test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+  interval: 5s
+  timeout: 5s
+  retries: 12
+  start_period: 10s
+
+x-service-healthcheck: &service-healthcheck
+  interval: 5s
+  timeout: 3s
+  retries: 12
+  start_period: 10s
+
+services:
+  kafka:
+    image: apache/kafka:4.4.0
+    restart: unless-stopped
+    ports:
+      - "${KAFKA_PORT:-29092}:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_LISTENERS: CONTROLLER://:29093,INTERNAL://:19092,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,EXTERNAL://localhost:${KAFKA_PORT:-29092}
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    networks: [backend]
+
+  coordinator-db:
+    image: postgres:17.11-alpine
+    restart: unless-stopped
+    shm_size: 128mb
+    command: ["postgres", "-c", "max_prepared_transactions=100"]
+    ports:
+      - "${COORDINATOR_DB_PORT:-54321}:5432"
+    environment:
+      POSTGRES_USER: coordinator
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ledgermesh_dev}
+      POSTGRES_DB: coordinator
+    volumes:
+      - coordinator_db_data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *postgres-healthcheck
+    networks: [backend]
+
+  wallet-db:
+    image: postgres:17.11-alpine
+    restart: unless-stopped
+    shm_size: 128mb
+    command: ["postgres", "-c", "max_prepared_transactions=100"]
+    ports:
+      - "${WALLET_DB_PORT:-54322}:5432"
+    environment:
+      POSTGRES_USER: wallet
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ledgermesh_dev}
+      POSTGRES_DB: wallet
+    volumes:
+      - wallet_db_data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *postgres-healthcheck
+    networks: [backend]
+
+  catalog-db:
+    image: postgres:17.11-alpine
+    restart: unless-stopped
+    shm_size: 128mb
+    command: ["postgres", "-c", "max_prepared_transactions=100"]
+    ports:
+      - "${CATALOG_DB_PORT:-54323}:5432"
+    environment:
+      POSTGRES_USER: catalog
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ledgermesh_dev}
+      POSTGRES_DB: catalog
+    volumes:
+      - catalog_db_data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *postgres-healthcheck
+    networks: [backend]
+
+  audit-ledger-db:
+    image: postgres:17.11-alpine
+    restart: unless-stopped
+    shm_size: 128mb
+    command: ["postgres", "-c", "max_prepared_transactions=100"]
+    ports:
+      - "${AUDIT_LEDGER_DB_PORT:-54324}:5432"
+    environment:
+      POSTGRES_USER: audit_ledger
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ledgermesh_dev}
+      POSTGRES_DB: audit_ledger
+    volumes:
+      - audit_ledger_db_data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *postgres-healthcheck
+    networks: [backend]
+
+  coordinator:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.service
+    command: ["python", "-m", "uvicorn", "services.coordinator.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    init: true
+    ports:
+      - "${COORDINATOR_PORT:-8000}:8000"
+    environment:
+      SERVICE_NAME: coordinator
+      DATABASE_URL: postgresql+psycopg://coordinator:${POSTGRES_PASSWORD:-ledgermesh_dev}@coordinator-db:5432/coordinator
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+    depends_on:
+      coordinator-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      <<: *service-healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+    networks: [backend]
+
+  wallet:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.service
+    command: ["python", "-m", "uvicorn", "services.wallet.app.main:app", "--host", "0.0.0.0", "--port", "8001"]
+    init: true
+    ports:
+      - "${WALLET_PORT:-8001}:8001"
+    environment:
+      SERVICE_NAME: wallet
+      DATABASE_URL: postgresql+psycopg://wallet:${POSTGRES_PASSWORD:-ledgermesh_dev}@wallet-db:5432/wallet
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+    depends_on:
+      wallet-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      <<: *service-healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=2)"]
+    networks: [backend]
+
+  catalog:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.service
+    command: ["python", "-m", "uvicorn", "services.catalog.app.main:app", "--host", "0.0.0.0", "--port", "8002"]
+    init: true
+    ports:
+      - "${CATALOG_PORT:-8002}:8002"
+    environment:
+      SERVICE_NAME: catalog
+      DATABASE_URL: postgresql+psycopg://catalog:${POSTGRES_PASSWORD:-ledgermesh_dev}@catalog-db:5432/catalog
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+    depends_on:
+      catalog-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      <<: *service-healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=2)"]
+    networks: [backend]
+
+  audit-ledger:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.service
+    command: ["python", "-m", "uvicorn", "services.audit_ledger.app.main:app", "--host", "0.0.0.0", "--port", "8003"]
+    init: true
+    ports:
+      - "${AUDIT_LEDGER_PORT:-8003}:8003"
+    environment:
+      SERVICE_NAME: audit-ledger
+      DATABASE_URL: postgresql+psycopg://audit_ledger:${POSTGRES_PASSWORD:-ledgermesh_dev}@audit-ledger-db:5432/audit_ledger
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+    depends_on:
+      audit-ledger-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      <<: *service-healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=2)"]
+    networks: [backend]
+
+networks:
+  backend:
+    name: ledgermesh-backend
+
+volumes:
+  kafka_data:
+  coordinator_db_data:
+  wallet_db_data:
+  catalog_db_data:
+  audit_ledger_db_data:
+
