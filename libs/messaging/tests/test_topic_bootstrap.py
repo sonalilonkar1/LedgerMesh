@@ -40,12 +40,15 @@ async def retention(admin, name):
     [response] = await admin.describe_configs(
         [ConfigResource(ConfigResourceType.TOPIC, name, configs={"retention.ms": None})]
     )
-    [(_code, _message, _type, _name, entries)] = response.resources
-    return {entry[0]: entry[1] for entry in entries}["retention.ms"]
+    [(code, _message, _type, _name, entries)] = response.resources
+    if code:
+        return None
+    return {entry[0]: entry[1] for entry in entries}.get("retention.ms")
 
 
 async def wait_for_retention(admin, name, expected, timeout=10.0):
-    # Config changes reach the broker shortly after the controller accepts them.
+    # Config changes reach the broker shortly after the controller accepts them,
+    # and until then the broker can answer with an error or no entries at all.
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while (value := await retention(admin, name)) != expected and loop.time() < deadline:
