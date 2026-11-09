@@ -23,7 +23,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .consumer import TransientError
+from .consumer import PermanentError, TransientError
 from .envelope import EventEnvelope
 from .inbox import Handler
 from .schema import aggregate_versions
@@ -42,6 +42,13 @@ class SequenceCheck:
     decision: SequenceDecision
     # The latest applied version before this event was checked.
     latest: int
+
+
+class MissingVersionError(PermanentError, ValueError):
+    """The event has no aggregate_version, so it cannot be ordered.
+
+    Permanent, so ``InboxConsumer`` dead-letters it instead of stopping.
+    """
 
 
 class FutureEventError(TransientError):
@@ -66,7 +73,7 @@ async def check_and_advance(
     """
     version = envelope.aggregate_version
     if version is None:
-        raise ValueError(f"{envelope.event_type} has no aggregate_version to order by")
+        raise MissingVersionError(f"{envelope.event_type} has no aggregate_version to order by")
 
     key = (
         aggregate_versions.c.consumer == consumer,
