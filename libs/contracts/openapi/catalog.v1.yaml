@@ -1,0 +1,130 @@
+openapi: 3.1.0
+info:
+  title: LedgerMesh Catalog Participant API
+  version: 1.0.0
+  description: Internal synchronous 2PC API owned by the Rewards Catalog Service.
+servers:
+  - url: http://catalog:8002
+paths:
+  /v1/transactions/{transaction_id}/prepare:
+    post:
+      operationId: prepareInventoryReservation
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogPrepareRequest"
+      responses:
+        "200":
+          description: Durable participant vote
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ParticipantResponse"
+        "409":
+          $ref: "#/components/responses/Problem"
+  /v1/transactions/{transaction_id}/commit:
+    post:
+      operationId: commitInventoryReservation
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+      responses:
+        "200":
+          description: Idempotent commit result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ParticipantResponse"
+  /v1/transactions/{transaction_id}/abort:
+    post:
+      operationId: abortInventoryReservation
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+      responses:
+        "200":
+          description: Idempotent abort result or abort tombstone
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ParticipantResponse"
+  /v1/transactions/{transaction_id}:
+    get:
+      operationId: getCatalogTransaction
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+      responses:
+        "200":
+          description: Participant transaction state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ParticipantResponse"
+        "404":
+          $ref: "#/components/responses/Problem"
+components:
+  parameters:
+    TransactionId:
+      name: transaction_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    Problem:
+      description: Participant request failed
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+  schemas:
+    CatalogPrepareRequest:
+      type: object
+      additionalProperties: false
+      required: [correlation_id, reward_id, quantity]
+      properties:
+        correlation_id:
+          type: string
+          format: uuid
+        reward_id:
+          type: string
+          minLength: 1
+        quantity:
+          type: integer
+          minimum: 1
+    ParticipantResponse:
+      type: object
+      additionalProperties: false
+      required: [transaction_id, participant, state, updated_at]
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        participant:
+          type: string
+          const: catalog
+        state:
+          type: string
+          enum: [PREPARED, COMMITTED, ABORTED, IN_DOUBT]
+        updated_at:
+          type: string
+          format: date-time
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, detail]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string

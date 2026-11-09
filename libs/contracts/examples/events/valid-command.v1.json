@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "event_id": "b3507b2e-f580-4c9c-9428-e1e16f94cc85",
+  "event_type": "wallet.deduct_points",
+  "transaction_id": "aa594328-beba-41d5-b41d-2155839ff479",
+  "correlation_id": "4b7f8f68-991d-46ce-bfad-3709e448640d",
+  "causation_id": null,
+  "aggregate_type": "wallet",
+  "aggregate_id": "user-123",
+  "aggregate_version": null,
+  "workflow_step": 1,
+  "fencing_token": null,
+  "occurred_at": "2026-11-05T01:00:00Z",
+  "payload": {"user_id": "user-123", "points": 500}
+}
