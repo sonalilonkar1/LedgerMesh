@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 
 from ledgermesh_messaging import InboxConsumer, inbox, process_once
 from ledgermesh_messaging.schema import aggregate_versions
-from ledgermesh_messaging.sequence import FutureEventError, in_version_order
+from ledgermesh_messaging.sequence import FutureEventError, MissingVersionError, in_version_order
 
 from .conftest import increment_and_reply, make_envelope, read_counter
 
@@ -141,6 +141,22 @@ async def test_event_without_a_version_is_rejected(session_factory):
         await deliver(session_factory, command)
 
     assert await inbox_rows(session_factory) == 0
+
+
+async def test_consumer_dead_letters_an_event_without_a_version(session_factory):
+    dead_letters = []
+
+    async def capture(record, exc):
+        dead_letters.append(exc)
+
+    consumer = InboxConsumer(
+        None, session_factory, name=CONSUMER, handler=ordered, on_dead_letter=capture
+    )
+
+    result = await consumer.handle(SimpleNamespace(value=make_envelope().to_bytes()))
+
+    assert result is None
+    assert [type(exc) for exc in dead_letters] == [MissingVersionError]
 
 
 async def test_consumer_retries_a_future_event_then_dead_letters_it(session_factory):
