@@ -1,4 +1,4 @@
-.PHONY: install format lint test contracts-check check run-coordinator run-wallet run-catalog run-ledger infra-up infra-status infra-smoke infra-logs infra-down infra-reset
+.PHONY: install format lint test check run-coordinator run-wallet run-catalog run-ledger infra-up infra-status infra-smoke infra-logs infra-down infra-reset
 
 COMPOSE_FILE ?= infra/compose.yaml
 COMPOSE := docker compose -f $(COMPOSE_FILE)
@@ -53,3 +53,4 @@ infra-down:
 
 infra-reset:
 	$(COMPOSE) down --volumes --remove-orphans
+
