@@ -13,8 +13,10 @@ from ledgermesh_messaging import (
     TopicKeyError,
     consumer_groups,
     dead_letter_topic,
+    ensure_topics,
     retry_topic,
 )
+from ledgermesh_messaging.topics import DAY_MS, MAIN_TOPICS, parse_args
 
 from .conftest import make_envelope
 
@@ -85,3 +87,39 @@ def test_consumer_group_ownership():
 def test_min_insync_replicas_never_exceeds_replication_factor():
     assert WALLET_COMMANDS.configs(1)["min.insync.replicas"] == "1"
     assert WALLET_COMMANDS.configs(3)["min.insync.replicas"] == "2"
+
+
+@pytest.mark.parametrize("spec", MAIN_TOPICS, ids=lambda spec: spec.name)
+def test_declared_configs_of_main_retry_and_dead_letter_topics(spec):
+    retry, dlq = retry_topic(spec), dead_letter_topic(spec)
+
+    assert spec.configs(3) == retry.configs(3) == {
+        "cleanup.policy": "delete",
+        "retention.ms": str(7 * DAY_MS),
+        "min.insync.replicas": "2",
+    }
+    assert dlq.configs(3) == {
+        "cleanup.policy": "delete",
+        "retention.ms": str(30 * DAY_MS),
+        "min.insync.replicas": "2",
+    }
+    assert (retry.key_by, retry.partitions) == (spec.key_by, spec.partitions)
+    assert dlq.partitions == 1
+
+
+@pytest.mark.parametrize("replication_factor", [0, -1])
+async def test_ensure_topics_rejects_a_replication_factor_below_one(replication_factor):
+    # Rejected before the admin client is used, so no broker is needed.
+    with pytest.raises(ValueError, match="at least 1"):
+        await ensure_topics(None, replication_factor=replication_factor)
+
+
+@pytest.mark.parametrize("value", ["0", "-2"])
+def test_cli_rejects_a_replication_factor_below_one(value):
+    with pytest.raises(SystemExit):
+        parse_args(["--replication-factor", value])
+
+
+def test_cli_defaults():
+    args = parse_args([])
+    assert args.replication_factor == 1
