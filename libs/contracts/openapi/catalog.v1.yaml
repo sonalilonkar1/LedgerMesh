@@ -6,6 +6,25 @@ info:
 servers:
   - url: http://catalog:8002
 paths:
+  /v1/rewards/{reward_id}:
+    get:
+      operationId: getRewardQuote
+      summary: Read the authoritative reward point cost and version
+      parameters:
+        - $ref: "#/components/parameters/RewardId"
+      responses:
+        "200":
+          description: Current reward quote used by the Coordinator before starting a redemption
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RewardQuote"
+        "404":
+          description: Reward does not exist
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
   /v1/transactions/{transaction_id}/prepare:
     post:
       operationId: prepareInventoryReservation
@@ -19,13 +38,17 @@ paths:
               $ref: "#/components/schemas/CatalogPrepareRequest"
       responses:
         "200":
-          description: Durable participant vote
+          description: Durable YES (`PREPARED`) or NO (`ABORTED`) vote, repeated on retry
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ParticipantResponse"
         "409":
-          $ref: "#/components/responses/Problem"
+          description: Transaction ID already exists with a different prepare request
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
   /v1/transactions/{transaction_id}/commit:
     post:
       operationId: commitInventoryReservation
@@ -33,11 +56,23 @@ paths:
         - $ref: "#/components/parameters/TransactionId"
       responses:
         "200":
-          description: Idempotent commit result
+          description: Idempotent `COMMITTED` result
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ParticipantResponse"
+        "404":
+          description: Transaction is unknown to this participant
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "409":
+          description: Transaction was aborted or is not in a committable state
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
   /v1/transactions/{transaction_id}/abort:
     post:
       operationId: abortInventoryReservation
@@ -45,11 +80,17 @@ paths:
         - $ref: "#/components/parameters/TransactionId"
       responses:
         "200":
-          description: Idempotent abort result or abort tombstone
+          description: Idempotent `ABORTED` result; an unknown transaction creates an abort tombstone
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ParticipantResponse"
+        "409":
+          description: Transaction has already committed and cannot be aborted
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
   /v1/transactions/{transaction_id}:
     get:
       operationId: getCatalogTransaction
@@ -73,6 +114,13 @@ components:
       schema:
         type: string
         format: uuid
+    RewardId:
+      name: reward_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
   responses:
     Problem:
       description: Participant request failed
@@ -84,7 +132,12 @@ components:
     CatalogPrepareRequest:
       type: object
       additionalProperties: false
-      required: [correlation_id, reward_id, quantity]
+      required:
+        - correlation_id
+        - reward_id
+        - quantity
+        - expected_reward_version
+        - expected_point_cost
       properties:
         correlation_id:
           type: string
@@ -95,6 +148,29 @@ components:
         quantity:
           type: integer
           minimum: 1
+        expected_reward_version:
+          type: integer
+          minimum: 0
+        expected_point_cost:
+          type: integer
+          minimum: 1
+    RewardQuote:
+      type: object
+      additionalProperties: false
+      required: [reward_id, point_cost, available_inventory, version]
+      properties:
+        reward_id:
+          type: string
+          minLength: 1
+        point_cost:
+          type: integer
+          minimum: 1
+        available_inventory:
+          type: integer
+          minimum: 0
+        version:
+          type: integer
+          minimum: 0
     ParticipantResponse:
       type: object
       additionalProperties: false
@@ -128,3 +204,6 @@ components:
           maximum: 599
         detail:
           type: string
+        transaction_id:
+          type: [string, "null"]
+          format: uuid

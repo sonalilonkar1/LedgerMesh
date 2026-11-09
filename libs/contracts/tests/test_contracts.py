@@ -86,9 +86,51 @@ def test_runtime_envelope_fields_match_json_schema():
     assert set(EventEnvelope.model_fields) == schema_fields
 
 
+def test_runtime_created_envelope_matches_json_schema():
+    message = EventEnvelope(
+        event_type="wallet.points_deducted",
+        transaction_id="aa594328-beba-41d5-b41d-2155839ff479",
+        correlation_id="4b7f8f68-991d-46ce-bfad-3709e448640d",
+        aggregate_type="wallet",
+        aggregate_id="user-123",
+    )
+    envelope_validator().validate(message.to_json())
+
+
 @pytest.mark.parametrize(
     "example_path",
     [EXAMPLES_ROOT / "valid-command.v1.json", EXAMPLES_ROOT / "valid-event.v1.json"],
 )
 def test_runtime_envelope_accepts_schema_examples(example_path: Path):
-    EventEnvelope.model_validate(load_json(example_path))
+    EventEnvelope.model_validate(load_json(example_path), context={"wire": True})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", 2),
+        ("event_type", "PointsDeducted"),
+        ("event_id", "not-a-uuid"),
+        ("aggregate_version", -1),
+        ("occurred_at", "not-a-dateZ"),
+    ],
+)
+def test_schema_and_runtime_reject_the_same_invalid_values(field: str, value):
+    message = load_json(EXAMPLES_ROOT / "valid-event.v1.json")
+    message[field] = value
+
+    with pytest.raises(ValidationError):
+        envelope_validator().validate(message)
+    with pytest.raises(ValueError):
+        EventEnvelope.model_validate(message, context={"wire": True})
+
+
+@pytest.mark.parametrize("missing_field", ["workflow_step", "causation_id"])
+def test_schema_and_runtime_require_all_wire_keys(missing_field: str):
+    message = load_json(EXAMPLES_ROOT / "valid-event.v1.json")
+    del message[missing_field]
+
+    with pytest.raises(ValidationError):
+        envelope_validator().validate(message)
+    with pytest.raises(ValueError):
+        EventEnvelope.model_validate(message, context={"wire": True})

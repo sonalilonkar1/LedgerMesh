@@ -19,13 +19,17 @@ paths:
               $ref: "#/components/schemas/WalletPrepareRequest"
       responses:
         "200":
-          description: Durable participant vote
+          description: Durable YES (`PREPARED`) or NO (`ABORTED`) vote, repeated on retry
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ParticipantResponse"
         "409":
-          $ref: "#/components/responses/Problem"
+          description: Transaction ID already exists with a different prepare request
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
   /v1/transactions/{transaction_id}/commit:
     post:
       operationId: commitWalletDeduction
@@ -33,11 +37,23 @@ paths:
         - $ref: "#/components/parameters/TransactionId"
       responses:
         "200":
-          description: Idempotent commit result
+          description: Idempotent `COMMITTED` result
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ParticipantResponse"
+        "404":
+          description: Transaction is unknown to this participant
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "409":
+          description: Transaction was aborted or is not in a committable state
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
   /v1/transactions/{transaction_id}/abort:
     post:
       operationId: abortWalletDeduction
@@ -45,11 +61,17 @@ paths:
         - $ref: "#/components/parameters/TransactionId"
       responses:
         "200":
-          description: Idempotent abort result or abort tombstone
+          description: Idempotent `ABORTED` result; an unknown transaction creates an abort tombstone
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ParticipantResponse"
+        "409":
+          description: Transaction has already committed and cannot be aborted
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
   /v1/transactions/{transaction_id}:
     get:
       operationId: getWalletTransaction
@@ -128,3 +150,6 @@ components:
           maximum: 599
         detail:
           type: string
+        transaction_id:
+          type: [string, "null"]
+          format: uuid

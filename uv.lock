@@ -347,6 +347,7 @@ dev = [
     { name = "openapi-spec-validator" },
     { name = "pytest" },
     { name = "pyyaml" },
+    { name = "rfc3339-validator" },
     { name = "ruff" },
 ]
 
@@ -363,6 +364,7 @@ dev = [
     { name = "openapi-spec-validator", specifier = ">=0.7,<1" },
     { name = "pytest", specifier = ">=8.2,<10" },
     { name = "pyyaml", specifier = ">=6,<7" },
+    { name = "rfc3339-validator", specifier = ">=0.1.4,<1" },
     { name = "ruff", specifier = ">=0.8,<1" },
 ]
 
