@@ -1,0 +1,143 @@
+openapi: 3.1.0
+info:
+  title: LedgerMesh Redemption Coordinator API
+  version: 1.0.0
+  description: Public synchronous API for creating and querying reward redemptions.
+servers:
+  - url: http://localhost:8000
+paths:
+  /v1/redemptions:
+    post:
+      operationId: createRedemption
+      summary: Create or return an idempotent redemption
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRedemptionRequest"
+      responses:
+        "202":
+          description: Redemption accepted or an existing idempotent request returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RedemptionResponse"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+  /v1/redemptions/{transaction_id}:
+    get:
+      operationId: getRedemption
+      summary: Get the current redemption state
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+      responses:
+        "200":
+          description: Current redemption state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RedemptionResponse"
+        "404":
+          $ref: "#/components/responses/Problem"
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    TransactionId:
+      name: transaction_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    Problem:
+      description: Request could not be completed
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+  schemas:
+    CreateRedemptionRequest:
+      type: object
+      additionalProperties: false
+      required: [user_id, reward_id, quantity, coordination_mode]
+      properties:
+        user_id:
+          type: string
+          minLength: 1
+        reward_id:
+          type: string
+          minLength: 1
+        quantity:
+          type: integer
+          minimum: 1
+        coordination_mode:
+          type: string
+          enum: [two_phase_commit, saga]
+    RedemptionResponse:
+      type: object
+      additionalProperties: false
+      required: [transaction_id, correlation_id, status, coordination_mode, created_at, updated_at]
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        correlation_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - REQUESTED
+            - PREPARING
+            - COMMIT_DECIDED
+            - ABORT_DECIDED
+            - COMMITTED
+            - ABORTED
+            - DEDUCTING_POINTS
+            - POINTS_DEDUCTED
+            - RESERVING_INVENTORY
+            - COMPENSATING
+            - COMPLETED
+            - FAILED
+            - COMPENSATED
+        coordination_mode:
+          type: string
+          enum: [two_phase_commit, saga]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, detail]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+        transaction_id:
+          type: [string, "null"]
+          format: uuid

@@ -1,17 +1,20 @@
-"""Event envelope carried by every LedgerMesh command and event.
-
-Provisional: mirrors the fields required by LM-004 (#6). Once the shared
-contract package exists, this module should re-export it. The inbox and outbox
-only rely on ``event_id``, ``transaction_id``, ``event_type`` and the JSON form.
-"""
+"""Event envelope carried by every LedgerMesh command and event."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, ClassVar, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 
 class EnvelopeError(ValueError):
@@ -19,11 +22,39 @@ class EnvelopeError(ValueError):
 
 
 class EventEnvelope(BaseModel):
+    """Strict wire envelope with convenient defaults for local construction.
+
+    Producers may omit generated/defaulted values while constructing an envelope;
+    serialization always emits every field. Consumers validate with ``wire`` context,
+    which rejects a serialized message that omitted any required contract key.
+    """
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: int = Field(default=1, ge=1)
+    WIRE_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "schema_version",
+            "event_id",
+            "event_type",
+            "transaction_id",
+            "correlation_id",
+            "causation_id",
+            "aggregate_type",
+            "aggregate_id",
+            "aggregate_version",
+            "workflow_step",
+            "fencing_token",
+            "occurred_at",
+            "payload",
+        }
+    )
+
+    schema_version: Literal[1] = 1
     event_id: UUID = Field(default_factory=uuid4)
-    event_type: str = Field(min_length=1)
+    event_type: str = Field(
+        min_length=1,
+        pattern=r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$",
+    )
     transaction_id: UUID
     correlation_id: UUID
     causation_id: UUID | None = None
@@ -32,8 +63,18 @@ class EventEnvelope(BaseModel):
     aggregate_version: int | None = Field(default=None, ge=0)
     workflow_step: int | None = Field(default=None, ge=0)
     fencing_token: int | None = Field(default=None, ge=0)
-    occurred_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    occurred_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _require_all_wire_fields(cls, value: Any, info: ValidationInfo) -> Any:
+        if info.context and info.context.get("wire") and isinstance(value, dict):
+            missing = cls.WIRE_FIELDS.difference(value)
+            if missing:
+                names = ", ".join(sorted(missing))
+                raise ValueError(f"wire envelope is missing required fields: {names}")
+        return value
 
     @field_validator("occurred_at")
     @classmethod
@@ -53,6 +94,6 @@ class EventEnvelope(BaseModel):
         if not raw:
             raise EnvelopeError("message has no value")
         try:
-            return cls.model_validate_json(raw)
+            return cls.model_validate_json(raw, context={"wire": True})
         except ValidationError as exc:
             raise EnvelopeError(str(exc)) from exc

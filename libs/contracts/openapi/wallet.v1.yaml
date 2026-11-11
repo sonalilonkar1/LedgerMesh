@@ -1,0 +1,155 @@
+openapi: 3.1.0
+info:
+  title: LedgerMesh Wallet Participant API
+  version: 1.0.0
+  description: Internal synchronous 2PC API owned by the Wallet Service.
+servers:
+  - url: http://wallet:8001
+paths:
+  /v1/transactions/{transaction_id}/prepare:
+    post:
+      operationId: prepareWalletDeduction
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WalletPrepareRequest"
+      responses:
+        "200":
+          description: Durable YES (`PREPARED`) or NO (`ABORTED`) vote, repeated on retry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ParticipantResponse"
+        "409":
+          description: Transaction ID already exists with a different prepare request
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  /v1/transactions/{transaction_id}/commit:
+    post:
+      operationId: commitWalletDeduction
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+      responses:
+        "200":
+          description: Idempotent `COMMITTED` result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ParticipantResponse"
+        "404":
+          description: Transaction is unknown to this participant
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "409":
+          description: Transaction was aborted or is not in a committable state
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  /v1/transactions/{transaction_id}/abort:
+    post:
+      operationId: abortWalletDeduction
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+      responses:
+        "200":
+          description: Idempotent `ABORTED` result; an unknown transaction creates an abort tombstone
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ParticipantResponse"
+        "409":
+          description: Transaction has already committed and cannot be aborted
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  /v1/transactions/{transaction_id}:
+    get:
+      operationId: getWalletTransaction
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+      responses:
+        "200":
+          description: Participant transaction state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ParticipantResponse"
+        "404":
+          $ref: "#/components/responses/Problem"
+components:
+  parameters:
+    TransactionId:
+      name: transaction_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    Problem:
+      description: Participant request failed
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+  schemas:
+    WalletPrepareRequest:
+      type: object
+      additionalProperties: false
+      required: [correlation_id, user_id, points]
+      properties:
+        correlation_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          minLength: 1
+        points:
+          type: integer
+          minimum: 1
+    ParticipantResponse:
+      type: object
+      additionalProperties: false
+      required: [transaction_id, participant, state, updated_at]
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        participant:
+          type: string
+          const: wallet
+        state:
+          type: string
+          enum: [PREPARED, COMMITTED, ABORTED, IN_DOUBT]
+        updated_at:
+          type: string
+          format: date-time
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, detail]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+        transaction_id:
+          type: [string, "null"]
+          format: uuid
