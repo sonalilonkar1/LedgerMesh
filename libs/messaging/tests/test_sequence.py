@@ -19,7 +19,7 @@ ordered = in_version_order(increment_and_reply, consumer=CONSUMER)
 
 def wallet_event(version: int, aggregate_id: str = "user-1"):
     return make_envelope(
-        event_type="PointsDeducted", aggregate_id=aggregate_id, aggregate_version=version
+        event_type="wallet.points_deducted", aggregate_id=aggregate_id, aggregate_version=version
     )
 
 
@@ -135,7 +135,7 @@ async def test_custom_first_version(session_factory):
 
 
 async def test_event_without_a_version_is_rejected(session_factory):
-    command = make_envelope(event_type="DeductPoints")
+    command = make_envelope(event_type="wallet.deduct_points")
 
     with pytest.raises(ValueError, match="no aggregate_version"):
         await deliver(session_factory, command)
