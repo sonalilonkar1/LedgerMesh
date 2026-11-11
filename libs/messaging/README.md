@@ -40,7 +40,92 @@ What it does **not** guarantee:
 - **Causal order across concurrent transactions.** Outbox ids are assigned when a row is inserted, not when it commits. If transaction A gets id 10 and transaction B gets id 11, and B commits first, id 11 is published before id 10.
 - **Order across different keys or topics.** Kafka only orders messages within one partition.
 
-Strict per-aggregate and per-workflow ordering is therefore enforced by the receiver, using `aggregate_version`, `workflow_step` and `causation_id` (LM-026, [#28](https://github.com/sonalilonkar1/LedgerMesh/issues/28)).
+Strict per-aggregate and per-workflow ordering is therefore enforced by the receiver, using `aggregate_version`, `workflow_step` and `causation_id` (LM-026, [#28](https://github.com/sonalilonkar1/LedgerMesh/issues/28)), as described in the next section.
+
+## Out-of-order messages (LM-026)
+
+Three wrappers check a message before its handler runs. Each wraps an ordinary handler and runs inside the same database transaction as the inbox row, so the check, the business change and the replies commit together.
+
+| Wrapper | Used by | Orders by |
+|---|---|---|
+| `in_version_order` | consumers of owner-emitted events, such as the Audit Ledger | `aggregate_version` per aggregate |
+| `in_workflow_order` | participants: Wallet and Catalog command consumers | `workflow_step` per transaction |
+| `matching_workflow_step` | the Coordinator's result consumer | the step and command each transaction is waiting for |
+
+Per ADR-001, commands carry `aggregate_version: null` and are never ordered by version. Only events from the aggregate's owner are.
+
+Import `in_version_order` from `ledgermesh_messaging.sequence`, and the other two (with `Expectation`) from `ledgermesh_messaging.workflow`.
+
+### Events: `in_version_order`
+
+```python
+handler = in_version_order(record_event, consumer="audit-ledger")
+```
+
+Each consumer stores the latest version it applied for each aggregate in `aggregate_versions`.
+
+| Incoming version | Outcome |
+|---|---|
+| at or below the latest | **stale**: ignored, recorded in the inbox |
+| the next version | **applied**, and becomes the latest |
+| further ahead | **future**: raises `FutureEventError`, which is retried and dead-lettered after `max_attempts` |
+
+An event with no version raises `MissingVersionError` and is dead-lettered.
+
+### Participants: `in_workflow_order`
+
+```python
+handler = in_workflow_order(handle_wallet_command, consumer="wallet-saga", on_stale=recorded_result)
+```
+
+A participant sees only its own steps of a transaction, so gaps between steps are normal. A compensation can also arrive before the forward command it cancels (ADR-001 section 7.1), so a participant cannot wait for missing steps. Instead it stores the highest step it has applied per transaction in `workflow_steps`:
+
+- A **higher step** is applied, gaps included.
+- A step **at or below** it is **stale** and never applied. Examples: a `wallet.deduct_points` arriving after its `wallet.refund_points`, or the same command resent with a new `event_id`.
+
+A stale command runs `on_stale` instead of the handler. Its writes and replies commit with the inbox row, so the service can return its recorded result or the deterministic cancelled result of a compensation tombstone. The tombstone itself is service logic (LM-020, LM-021). By default a stale command is only logged and recorded.
+
+### Coordinator: `matching_workflow_step`
+
+```python
+async def waiting_for(session, envelope):
+    saga = await load_saga_for_update(session, envelope.transaction_id)
+    if saga is None or saga.is_terminal:
+        return None
+    return Expectation(step=saga.current_step, causation_id=saga.current_command_id)
+
+handler = matching_workflow_step(apply_result, expectation=waiting_for)
+```
+
+The Coordinator knows from its own state which step each transaction is waiting for and which command it sent for it. The lookup reads that state inside the same transaction and should lock the row.
+
+| Incoming result | Outcome |
+|---|---|
+| the awaited step, caused by the awaited command | **applied** |
+| an earlier step | **stale**: ignored, recorded in the inbox |
+| the awaited step, but caused by another command | **wrong cause**: ignored, for example a reply to an earlier attempt |
+| a later step | **future**: raises `FutureStepError`, which is retried and then dead-lettered (ADR-001 section 7) |
+| a finished or unknown transaction (lookup returns `None`) | **ignored** (terminal-state rule, ADR-001 section 10) |
+
+### Causation and malformed messages
+
+`causation_id` may be null only for the root message (step 1). A later message without one raises `MissingCausationError`. A message without `workflow_step` raises `MissingWorkflowStepError`. Both are `PermanentError`s, so `InboxConsumer` dead-letters them instead of retrying.
+
+Ignored messages are logged with their `transaction_id`, `event_id`, step and causation, and recorded in the inbox. A redelivery is then a plain duplicate.
+
+### Tests
+
+| Guarantee | Test |
+|---|---|
+| Events apply in version order; stale ones are ignored and recorded | `test_in_order_events_are_applied_and_the_latest_version_is_stored`, `test_older_version_is_ignored_without_running_the_handler`, `test_ignored_stale_event_is_recorded_so_redelivery_is_a_duplicate` |
+| A future event waits for its predecessor, then is dead-lettered after bounded retries | `test_future_version_succeeds_after_its_predecessor_arrives`, `test_consumer_retries_a_future_event_then_dead_letters_it` |
+| Concurrent events with one version apply once | `test_concurrent_events_with_the_same_version_apply_once` |
+| A late forward command after its compensation is not applied, and `on_stale` can reply | `test_late_forward_command_after_its_compensation_is_not_applied`, `test_stale_command_runs_on_stale_and_publishes_its_reply` |
+| A command resent with a new `event_id`, or delivered concurrently, applies once | `test_same_step_resent_with_a_new_event_id_is_not_applied_twice`, `test_concurrent_commands_for_one_step_apply_once` |
+| The Coordinator applies only the awaited result | `test_coordinator_applies_the_awaited_result`, `test_coordinator_ignores_a_result_for_an_earlier_step`, `test_coordinator_ignores_a_result_caused_by_a_different_command` |
+| A future result waits for its step, then is dead-lettered | `test_coordinator_defers_a_future_result_until_its_step`, `test_coordinator_dead_letters_a_result_that_never_becomes_current` |
+| Results for finished transactions are ignored | `test_coordinator_ignores_results_for_finished_transactions` |
+| Only the root message may lack `causation_id`; malformed messages are dead-lettered | `test_later_command_without_causation_is_rejected`, `test_message_without_a_workflow_step_is_dead_lettered`, `test_consumer_dead_letters_an_event_without_a_version` |
 
 ## Duplicate replay is opt-in
 
@@ -69,7 +154,7 @@ alembic revision --autogenerate -m "Add inbox and outbox tables"
 alembic upgrade head
 ```
 
-Check that the generated migration creates both tables and the partial index `ix_outbox_unpublished`.
+Check that the generated migration creates both tables and the partial index `ix_outbox_unpublished`. The metadata also contains the LM-026 tables `aggregate_versions` and `workflow_steps`. They are created by the same migration, and are only written by consumers that use the ordering wrappers.
 
 This PR adds no service migrations because no services exist yet. Each service adds its migration when it starts using the library, using the migration setup from LM-005 ([#7](https://github.com/sonalilonkar1/LedgerMesh/issues/7)): Wallet in LM-020 ([#22](https://github.com/sonalilonkar1/LedgerMesh/issues/22)), Catalog in LM-021 ([#23](https://github.com/sonalilonkar1/LedgerMesh/issues/23)), and the Coordinator with LM-022 ([#24](https://github.com/sonalilonkar1/LedgerMesh/issues/24)).
 
@@ -109,5 +194,4 @@ GitHub Actions runs the full suite, including the PostgreSQL and Kafka integrati
 
 - `EventEnvelope` is provisional until the shared contracts from LM-004 exist.
 - Dead-letter topics and retry topics come with LM-024. Until then `on_dead_letter` defaults to re-raising, which stops the consumer instead of skipping a message.
-- Ordering and causation checks (`aggregate_version`, `workflow_step`) come with LM-026.
 - Trace propagation: `headers` are carried through, and LM-033 will fill in `traceparent`.
