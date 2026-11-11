@@ -1,0 +1,12 @@
+examples:
+  - path: events/valid-command.v1.json
+    schema: schemas/events/event-envelope.v1.json
+    valid: true
+  - path: events/valid-event.v1.json
+    schema: schemas/events/event-envelope.v1.json
+    valid: true
+  - path: events/invalid-missing-transaction-id.v1.json
+    schema: schemas/events/event-envelope.v1.json
+    valid: false
+    expected_validator: required
+    expected_message: transaction_id
