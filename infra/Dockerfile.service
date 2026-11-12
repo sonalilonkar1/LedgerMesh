@@ -11,6 +11,8 @@ ENV PATH="/app/.venv/bin:$PATH" \
     UV_LINK_MODE=copy
 
 COPY pyproject.toml uv.lock ./
+# Services depend on the messaging library through a local path source.
+COPY libs/messaging ./libs/messaging
 RUN uv sync --locked --no-dev --no-install-project
 
 COPY services ./services

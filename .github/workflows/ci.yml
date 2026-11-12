@@ -5,6 +5,7 @@ on:
     paths:
       - "services/**"
       - "libs/contracts/**"
+      - "libs/messaging/src/**"
       - "tests/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -15,6 +16,7 @@ on:
     paths:
       - "services/**"
       - "libs/contracts/**"
+      - "libs/messaging/src/**"
       - "tests/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -42,3 +44,37 @@ jobs:
 
       - name: Run service unit tests
         run: uv run pytest services -q
+
+  migrations:
+    name: Database migrations and constraints
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17.11-alpine
+        env:
+          POSTGRES_USER: ledgermesh
+          POSTGRES_PASSWORD: ledgermesh
+          POSTGRES_DB: ledgermesh
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ledgermesh"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      # Set explicitly, so an unreachable database fails the job instead of skipping.
+      LM_TEST_POSTGRES_URL: postgresql+psycopg://ledgermesh:ledgermesh@localhost:5432/ledgermesh
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install Python and dependencies
+        run: uv sync --python 3.12 --locked
+
+      - name: Migrate every service and check its constraints
+        run: uv run pytest tests/db -q

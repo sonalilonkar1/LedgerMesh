@@ -1,4 +1,4 @@
-.PHONY: install format lint test check run-coordinator run-wallet run-catalog run-ledger infra-up infra-status infra-smoke infra-logs infra-down infra-reset
+.PHONY: install format lint test check run-coordinator run-wallet run-catalog run-ledger infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test
 
 COMPOSE_FILE ?= infra/compose.yaml
 COMPOSE := docker compose -f $(COMPOSE_FILE)
@@ -48,4 +48,22 @@ infra-down:
 
 infra-reset:
 	$(COMPOSE) down --volumes --remove-orphans
+
+# Database migrations (LM-005). They target the Compose databases on their host
+# ports; pass SERVICES="wallet catalog" to limit them. Rolling back deletes data,
+# so it only runs when LEDGERMESH_ENV is local (the default here) or test.
+SERVICES ?=
+LEDGERMESH_ENV ?= local
+
+db-upgrade:
+	uv run python infra/scripts/db.py upgrade $(SERVICES)
+
+db-downgrade:
+	LEDGERMESH_ENV=$(LEDGERMESH_ENV) uv run python infra/scripts/db.py downgrade $(SERVICES)
+
+db-reset:
+	LEDGERMESH_ENV=$(LEDGERMESH_ENV) uv run python infra/scripts/db.py reset $(SERVICES)
+
+db-test:
+	uv run pytest tests/db -q
 

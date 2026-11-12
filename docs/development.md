@@ -39,6 +39,8 @@ make infra-down
 
 For ports, credentials, volume behavior, configuration overrides, and troubleshooting, see [the infrastructure guide](../infra/README.md).
 
+Each service applies its database migrations when its container starts. For schemas, safety constraints, `make db-upgrade` / `db-reset` and the migration tests, see [the database guide](database.md).
+
 ## Run one service without Compose
 
 | Service | Command | Default port |
