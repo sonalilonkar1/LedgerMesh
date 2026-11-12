@@ -2,10 +2,9 @@ import os
 from uuid import uuid4
 
 import pytest
+from ledgermesh_messaging import EventEnvelope, OutgoingMessage, metadata
 from sqlalchemy import Column, Integer, MetaData, String, Table, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
-from ledgermesh_messaging import EventEnvelope, OutgoingMessage, metadata
 
 DATABASE_URL = os.environ.get(
     "LM_TEST_DATABASE_URL",
@@ -43,7 +42,7 @@ async def read_counter(session_factory: async_sessionmaker[AsyncSession]) -> int
 
 def make_envelope(**overrides) -> EventEnvelope:
     fields = dict(
-        event_type="WalletDeductRequested",
+        event_type="wallet.deduct_requested",
         transaction_id=uuid4(),
         correlation_id=uuid4(),
         aggregate_type="wallet",
@@ -54,15 +53,19 @@ def make_envelope(**overrides) -> EventEnvelope:
     return EventEnvelope(**fields)
 
 
-async def increment_and_reply(session: AsyncSession, envelope: EventEnvelope) -> list[OutgoingMessage]:
+async def increment_and_reply(
+    session: AsyncSession, envelope: EventEnvelope
+) -> list[OutgoingMessage]:
     """Handler used by the tests: one business write and one reply event."""
     await session.execute(
         update(counters).where(counters.c.name == "applied").values(value=counters.c.value + 1)
     )
     reply = make_envelope(
-        event_type="WalletDeducted",
+        event_type="wallet.deducted",
         transaction_id=envelope.transaction_id,
         correlation_id=envelope.correlation_id,
         causation_id=envelope.event_id,
     )
-    return [OutgoingMessage(topic="wallet.results", key=str(envelope.transaction_id), envelope=reply)]
+    return [
+        OutgoingMessage(topic="wallet.results", key=str(envelope.transaction_id), envelope=reply)
+    ]

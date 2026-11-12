@@ -15,7 +15,12 @@ lint:
 	uv run ruff check services libs/contracts tests
 
 test:
-	uv run pytest services -q
+	uv run pytest services libs/contracts/tests tests -q
+
+contracts-check:
+	uv run ruff format --check libs/contracts
+	uv run ruff check libs/contracts
+	uv run pytest libs/contracts/tests -q
 
 check: lint test
 

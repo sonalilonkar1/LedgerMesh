@@ -1,0 +1,40 @@
+name: Contract validation
+
+on:
+  pull_request:
+    paths:
+      - "libs/contracts/**"
+      - "libs/messaging/src/ledgermesh_messaging/envelope.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/contracts.yml"
+  push:
+    branches: [main]
+    paths:
+      - "libs/contracts/**"
+      - "libs/messaging/src/ledgermesh_messaging/envelope.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/contracts.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.13.6"
+          enable-cache: true
+      - name: Install locked dependencies
+        run: uv sync --python 3.12 --locked
+      - name: Check contract formatting and lint
+        run: |
+          uv run ruff format --check libs/contracts
+          uv run ruff check libs/contracts
+      - name: Validate API and event contracts
+        run: uv run pytest libs/contracts/tests -q
