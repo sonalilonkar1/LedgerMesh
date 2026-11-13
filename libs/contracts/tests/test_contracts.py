@@ -6,12 +6,23 @@ from pathlib import Path
 import pytest
 import yaml
 from jsonschema import Draft202012Validator, FormatChecker, ValidationError
-from openapi_spec_validator import validate
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 CONTRACTS_ROOT = REPOSITORY_ROOT / "libs" / "contracts"
 SCHEMA_PATH = CONTRACTS_ROOT / "schemas" / "events" / "event-envelope.v1.json"
 EXAMPLES_ROOT = CONTRACTS_ROOT / "examples" / "events"
+EXAMPLE_MANIFEST_PATH = CONTRACTS_ROOT / "examples" / "manifest.yaml"
+CONTRACTS_SRC = CONTRACTS_ROOT / "src"
+sys.path.insert(0, str(CONTRACTS_SRC))
+
+from ledgermesh_contracts.validation import (  # noqa: E402
+    ContractValidationError,
+    load_document,
+    operation_ids,
+    validate_json_schema,
+    validate_local_references,
+    validate_openapi_document,
+)
 
 # LM-019 owns the runtime messaging implementation. Load only envelope.py instead
 # of importing the package initializer, which also imports optional Kafka and
@@ -41,7 +52,69 @@ def envelope_validator() -> Draft202012Validator:
 
 @pytest.mark.parametrize("spec_path", sorted((CONTRACTS_ROOT / "openapi").glob("*.yaml")))
 def test_openapi_document_is_valid(spec_path: Path):
-    validate(yaml.safe_load(spec_path.read_text()))
+    validate_openapi_document(load_document(spec_path), spec_path)
+
+
+@pytest.mark.parametrize("schema_path", sorted((CONTRACTS_ROOT / "schemas").rglob("*.json")))
+def test_json_schema_is_valid(schema_path: Path):
+    validate_json_schema(load_document(schema_path), schema_path)
+
+
+def test_operation_ids_are_unique_across_all_openapi_documents():
+    owners: dict[str, str] = {}
+    duplicates = []
+    for spec_path in sorted((CONTRACTS_ROOT / "openapi").glob("*.yaml")):
+        for operation, operation_id in operation_ids(load_document(spec_path)):
+            owner = f"{spec_path.relative_to(REPOSITORY_ROOT)}:{operation}"
+            if operation_id in owners:
+                duplicates.append(f"{operation_id}: {owners[operation_id]} and {owner}")
+            owners[operation_id] = owner
+    assert not duplicates, "duplicate operationId values:\n" + "\n".join(duplicates)
+
+
+def test_every_example_is_declared_and_has_expected_result():
+    manifest = yaml.safe_load(EXAMPLE_MANIFEST_PATH.read_text())["examples"]
+    declared = {entry["path"] for entry in manifest}
+    actual = {
+        str(path.relative_to(CONTRACTS_ROOT / "examples"))
+        for path in (CONTRACTS_ROOT / "examples").rglob("*.json")
+    }
+    assert declared == actual
+
+    for entry in manifest:
+        example_path = CONTRACTS_ROOT / "examples" / entry["path"]
+        schema_path = CONTRACTS_ROOT / entry["schema"]
+        validator = Draft202012Validator(load_document(schema_path), format_checker=FormatChecker())
+        errors = list(validator.iter_errors(load_document(example_path)))
+        if entry["valid"]:
+            assert not errors, f"{example_path}: {errors}"
+        else:
+            assert errors, f"{example_path}: expected validation failure"
+            assert any(
+                error.validator == entry["expected_validator"]
+                and entry["expected_message"] in error.message
+                for error in errors
+            ), f"{example_path}: failed for the wrong reason: {errors}"
+
+
+def test_unresolved_or_external_references_are_rejected_without_network_access():
+    for reference in ("#/components/schemas/Missing", "https://example.com/schema.json"):
+        with pytest.raises(ContractValidationError):
+            validate_local_references({"$ref": reference}, Path("test-contract.yaml"))
+
+
+def test_invalid_openapi_reports_its_file_path():
+    path = Path("libs/contracts/openapi/broken.v1.yaml")
+    with pytest.raises(ContractValidationError, match="broken.v1.yaml"):
+        validate_openapi_document({"openapi": "3.1.0", "paths": []}, path)
+
+
+def test_invalid_json_schema_reports_its_file_path():
+    path = Path("libs/contracts/schemas/events/broken.v1.json")
+    with pytest.raises(ContractValidationError, match="broken.v1.json"):
+        validate_json_schema(
+            {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": 7}, path
+        )
 
 
 @pytest.mark.parametrize(

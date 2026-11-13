@@ -1,4 +1,5 @@
-"""Versioned LedgerMesh API and event contracts.
+"""Versioned LedgerMesh API and event contracts."""
 
-Concrete contracts are introduced by LM-004.
-"""
+from .validation import ContractValidationError
+
+__all__ = ["ContractValidationError"]
