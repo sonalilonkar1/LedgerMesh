@@ -56,18 +56,19 @@ infra-reset:
 
 # Database migrations (LM-005). They target the Compose databases on their host
 # ports; pass SERVICES="wallet catalog" to limit them. Rolling back deletes data,
-# so it only runs when LEDGERMESH_ENV is local (the default here) or test.
+# so it only runs when LEDGERMESH_ENV is explicitly local or test.
 SERVICES ?=
-LEDGERMESH_ENV ?= local
 
 db-upgrade:
 	uv run python infra/scripts/db.py upgrade $(SERVICES)
 
+# Destructive: the caller must say so explicitly, e.g. LEDGERMESH_ENV=local make db-reset.
+# There is deliberately no default, so a URL override can never be reset by accident.
 db-downgrade:
-	LEDGERMESH_ENV=$(LEDGERMESH_ENV) uv run python infra/scripts/db.py downgrade $(SERVICES)
+	uv run python infra/scripts/db.py downgrade $(SERVICES)
 
 db-reset:
-	LEDGERMESH_ENV=$(LEDGERMESH_ENV) uv run python infra/scripts/db.py reset $(SERVICES)
+	uv run python infra/scripts/db.py reset $(SERVICES)
 
 db-test:
 	uv run pytest tests/db -q

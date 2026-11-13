@@ -5,7 +5,7 @@ schema drift test fails if the two disagree. Safety rules from ADR-001 are
 enforced by the database itself:
 
 - INV-02: available inventory is never negative and never exceeds the total.
-- INV-03: at most one reservation per transaction and reward.
+- INV-03: at most one reservation per transaction (a redemption has one reward).
 - ADR-001 7.1: a release that arrives before its reservation is stored as a
   ``tombstone`` row, so the late reservation conflicts instead of applying.
 """
@@ -70,7 +70,9 @@ reservations = Table(
         name="ck_reservations_status",
     ),
     CheckConstraint("quantity > 0", name="ck_reservations_quantity_positive"),
-    UniqueConstraint("transaction_id", "reward_id", name="uq_reservations_transaction_reward"),
+    # A redemption has exactly one reward (LM-004), so a transaction can reserve
+    # once in total: never twice, and never a second, different reward.
+    UniqueConstraint("transaction_id", name="uq_reservations_transaction"),
 )
 
 Index("ix_reservations_reward_id", reservations.c.reward_id)
@@ -95,10 +97,14 @@ participant_transactions = Table(
     CheckConstraint(
         "quantity IS NULL OR quantity > 0", name="ck_participant_transactions_quantity_positive"
     ),
-    # Only an abort tombstone (ABORT before PREPARE) may lack the prepared request.
+    # Exactly two shapes: an empty abort tombstone (ABORT before any PREPARE), or
+    # a row that carries the full prepared request, whatever its state.
     CheckConstraint(
-        "state = 'ABORTED' OR (reward_id IS NOT NULL AND quantity IS NOT NULL)",
-        name="ck_participant_transactions_prepared_request",
+        "(state = 'ABORTED' AND correlation_id IS NULL AND request_hash IS NULL "
+        "AND reward_id IS NULL AND quantity IS NULL) "
+        "OR (correlation_id IS NOT NULL AND request_hash IS NOT NULL "
+        "AND reward_id IS NOT NULL AND quantity IS NOT NULL)",
+        name="ck_participant_transactions_request_identity",
     ),
 )
 

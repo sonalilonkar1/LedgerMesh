@@ -125,12 +125,20 @@ def test_wallet_allows_one_deduction_and_one_refund_per_transaction(wallet_db):
     assert_rejected(wallet_db, wallet_operation(transaction_id=transaction_id))
 
 
-def test_wallet_refund_tombstone_blocks_a_late_deduction(wallet_db):
-    # ADR-001 7.1: the refund arrived first and stored a tombstone for the deduction.
+def test_early_refund_creates_a_deduction_tombstone_that_blocks_the_late_deduction(wallet_db):
+    # ADR-001 7.1: the refund arrived first, so it stored a tombstone for the
+    # deduction it cancels; the delayed deduction then hits the same unique key.
     transaction_id = uuid4()
-    run(wallet_db, wallet_operation(transaction_id=transaction_id, status="tombstone"))
+    run(
+        wallet_db,
+        wallet_operation(transaction_id=transaction_id, operation="deduct", status="tombstone"),
+    )
 
     assert_rejected(wallet_db, wallet_operation(transaction_id=transaction_id))
+
+
+def test_wallet_rejects_a_refund_tombstone_because_it_would_block_nothing(wallet_db):
+    assert_rejected(wallet_db, wallet_operation(operation="refund", status="tombstone"))
 
 
 @pytest.mark.parametrize(
@@ -142,19 +150,71 @@ def test_wallet_rejects_invalid_operations(wallet_db, overrides):
     assert_rejected(wallet_db, wallet_operation(**overrides))
 
 
-def test_wallet_prepared_transaction_needs_its_request_but_abort_tombstone_does_not(wallet_db):
-    participant = wallet.participant_transactions
+# 2PC participants (Wallet and Catalog): stored request identity
 
-    assert_rejected(
-        wallet_db, participant.insert().values(transaction_id=uuid4(), state="PREPARED")
-    )
-    run(wallet_db, participant.insert().values(transaction_id=uuid4(), state="ABORTED"))
-    run(
-        wallet_db,
-        participant.insert().values(
-            transaction_id=uuid4(), state="PREPARED", user_id="user-1", points=10
-        ),
-    )
+PARTICIPANT_REQUEST = {
+    "wallet": {"user_id": "user-1", "points": 10},
+    "catalog": {"reward_id": "reward-1", "quantity": 1},
+}
+NO_REQUEST = {"correlation_id": None, "request_hash": None}
+
+
+def participant(service: str, state: str, **overrides):
+    values = {
+        "transaction_id": uuid4(),
+        "state": state,
+        "correlation_id": uuid4(),
+        "request_hash": "hash",
+        **PARTICIPANT_REQUEST[service],
+    }
+    table = SCHEMAS[service].participant_transactions
+    return table.insert().values(**(values | overrides))
+
+
+def empty_request(service: str) -> dict:
+    return NO_REQUEST | dict.fromkeys(PARTICIPANT_REQUEST[service])
+
+
+@pytest.mark.parametrize("service", ["wallet", "catalog"])
+@pytest.mark.parametrize("state", ["PREPARED", "COMMITTED", "IN_DOUBT", "ABORTED"])
+def test_participant_row_with_the_full_request_is_accepted(service, state, database_url, engine):
+    upgrade(service, database_url)
+
+    run(engine, participant(service, state))
+
+
+@pytest.mark.parametrize("service", ["wallet", "catalog"])
+def test_empty_abort_tombstone_is_accepted(service, database_url, engine):
+    upgrade(service, database_url)
+
+    run(engine, participant(service, "ABORTED", **empty_request(service)))
+
+
+@pytest.mark.parametrize("service", ["wallet", "catalog"])
+@pytest.mark.parametrize(
+    ("state", "missing"),
+    [
+        ("PREPARED", "request_hash"),
+        ("PREPARED", "correlation_id"),
+        ("PREPARED", "business"),
+        ("COMMITTED", "request_hash"),
+        ("IN_DOUBT", "correlation_id"),
+        ("ABORTED", "request_hash"),
+        ("ABORTED", "business"),
+    ],
+)
+def test_participant_row_with_a_partial_request_is_rejected(
+    service, state, missing, database_url, engine
+):
+    # Only the fully empty ABORTED tombstone may omit request fields; anything
+    # that was prepared must keep its whole request identity to detect reuse.
+    upgrade(service, database_url)
+    if missing == "business":
+        cleared = dict.fromkeys(PARTICIPANT_REQUEST[service])
+    else:
+        cleared = {missing: None}
+
+    assert_rejected(engine, participant(service, state, **cleared))
 
 
 # Catalog: INV-02 and INV-03
@@ -191,14 +251,40 @@ def test_catalog_reward_must_cost_points(catalog_db):
     assert_rejected(catalog_db, update(catalog.rewards).values(point_cost=0))
 
 
-def test_catalog_allows_one_reservation_per_transaction_and_reward(catalog_db):
-    transaction_id = uuid4()
-    reservation = catalog.reservations.insert().values(
-        transaction_id=transaction_id, reward_id="reward-1", quantity=1, status="reserved"
+def reservation(transaction_id, reward_id="reward-1"):
+    return catalog.reservations.insert().values(
+        transaction_id=transaction_id, reward_id=reward_id, quantity=1, status="reserved"
     )
-    run(catalog_db, reservation)
 
-    assert_rejected(catalog_db, reservation)
+
+def test_catalog_transaction_cannot_reserve_the_same_reward_twice(catalog_db):
+    transaction_id = uuid4()
+    run(catalog_db, reservation(transaction_id))
+
+    assert_rejected(catalog_db, reservation(transaction_id))
+
+
+def test_catalog_transaction_cannot_reserve_a_different_reward(catalog_db):
+    # A redemption has one reward; a reused transaction id must not allocate a second.
+    run(
+        catalog_db,
+        catalog.rewards.insert().values(
+            reward_id="reward-2",
+            name="Tea",
+            point_cost=300,
+            total_inventory=1,
+            available_inventory=1,
+        ),
+    )
+    transaction_id = uuid4()
+    run(catalog_db, reservation(transaction_id, "reward-1"))
+
+    assert_rejected(catalog_db, reservation(transaction_id, "reward-2"))
+
+
+def test_catalog_different_transactions_can_reserve_the_same_reward(catalog_db):
+    run(catalog_db, reservation(uuid4()))
+    run(catalog_db, reservation(uuid4()))
 
 
 def test_catalog_reservation_needs_a_positive_quantity(catalog_db):

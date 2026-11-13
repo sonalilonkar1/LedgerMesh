@@ -6,7 +6,7 @@ enforced by the database itself, not only by application code:
 
 - INV-01: ``available_points`` can never go below zero.
 - INV-03: at most one deduction and one refund per transaction.
-- ADR-001 7.1: a refund that arrives before its deduction is stored as a
+- ADR-001 7.1: a refund that arrives before its deduction stores a deduction
   ``tombstone`` row, so the late deduction conflicts instead of applying.
 """
 
@@ -58,6 +58,13 @@ wallet_operations = Table(
     CheckConstraint("operation IN ('deduct', 'refund')", name="ck_wallet_operations_operation"),
     CheckConstraint("status IN ('applied', 'tombstone')", name="ck_wallet_operations_status"),
     CheckConstraint("points > 0", name="ck_wallet_operations_points_positive"),
+    # A refund that arrives before its deduction stores a *deduction* tombstone,
+    # which occupies the deduction's unique key so the late deduction conflicts.
+    # A refund tombstone would block nothing, so the database rejects it.
+    CheckConstraint(
+        "status <> 'tombstone' OR operation = 'deduct'",
+        name="ck_wallet_operations_tombstone_blocks_deduct",
+    ),
     UniqueConstraint(
         "transaction_id", "operation", name="uq_wallet_operations_transaction_operation"
     ),
@@ -85,10 +92,14 @@ participant_transactions = Table(
     CheckConstraint(
         "points IS NULL OR points > 0", name="ck_participant_transactions_points_positive"
     ),
-    # Only an abort tombstone (ABORT before PREPARE) may lack the prepared request.
+    # Exactly two shapes: an empty abort tombstone (ABORT before any PREPARE), or
+    # a row that carries the full prepared request, whatever its state.
     CheckConstraint(
-        "state = 'ABORTED' OR (user_id IS NOT NULL AND points IS NOT NULL)",
-        name="ck_participant_transactions_prepared_request",
+        "(state = 'ABORTED' AND correlation_id IS NULL AND request_hash IS NULL "
+        "AND user_id IS NULL AND points IS NULL) "
+        "OR (correlation_id IS NOT NULL AND request_hash IS NOT NULL "
+        "AND user_id IS NOT NULL AND points IS NOT NULL)",
+        name="ck_participant_transactions_request_identity",
     ),
 )
 

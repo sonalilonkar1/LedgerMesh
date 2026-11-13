@@ -62,9 +62,7 @@ def upgrade() -> None:
             name="ck_reservations_status",
         ),
         sa.CheckConstraint("quantity > 0", name="ck_reservations_quantity_positive"),
-        sa.UniqueConstraint(
-            "transaction_id", "reward_id", name="uq_reservations_transaction_reward"
-        ),
+        sa.UniqueConstraint("transaction_id", name="uq_reservations_transaction"),
     )
     op.create_index("ix_reservations_reward_id", "reservations", ["reward_id"])
 
@@ -91,8 +89,11 @@ def upgrade() -> None:
             name="ck_participant_transactions_quantity_positive",
         ),
         sa.CheckConstraint(
-            "state = 'ABORTED' OR (reward_id IS NOT NULL AND quantity IS NOT NULL)",
-            name="ck_participant_transactions_prepared_request",
+            "(state = 'ABORTED' AND correlation_id IS NULL AND request_hash IS NULL "
+            "AND reward_id IS NULL AND quantity IS NULL) "
+            "OR (correlation_id IS NOT NULL AND request_hash IS NOT NULL "
+            "AND reward_id IS NOT NULL AND quantity IS NOT NULL)",
+            name="ck_participant_transactions_request_identity",
         ),
     )
 

@@ -14,10 +14,10 @@ Each service owns one PostgreSQL database (`infra/compose.yaml`) and the only co
 | Service | Table | Purpose |
 |---|---|---|
 | Wallet | `wallets` | Point balance and optimistic-concurrency `version` per user |
-| | `wallet_operations` | One row per deduction or refund of a transaction; `tombstone` rows cancel a late forward command |
+| | `wallet_operations` | One row per deduction or refund of a transaction; an early refund stores a deduction `tombstone` that cancels the late deduction |
 | | `participant_transactions` | 2PC participant state per transaction |
 | Catalog | `rewards` | Point cost, total and available inventory, `version` |
-| | `reservations` | One reservation per transaction and reward: `reserved`, `released`, `fulfilled` or `tombstone` |
+| | `reservations` | One reservation per transaction: `reserved`, `released`, `fulfilled` or `tombstone` |
 | | `participant_transactions` | 2PC participant state per transaction |
 | Coordinator | `redemptions` | One row per redemption: idempotency key, mode, status, current workflow step and command |
 | | `redemption_transitions` | History of status changes |
@@ -34,11 +34,12 @@ These hold even if application code has a bug, because PostgreSQL rejects the wr
 | INV-01: a balance never goes negative | `ck_wallets_available_points_non_negative` |
 | INV-02: inventory is never negative or above the total | `ck_rewards_available_inventory_non_negative`, `ck_rewards_available_within_total` |
 | INV-03: one deduction and one refund per transaction | `uq_wallet_operations_transaction_operation` |
-| INV-03: one reservation per transaction and reward | `uq_reservations_transaction_reward` |
-| A late forward command after its compensation cannot apply (ADR-001 7.1) | the `tombstone` row occupies the same unique key |
+| INV-03: one reservation per transaction (a redemption has exactly one reward) | `uq_reservations_transaction` |
+| A late forward command after its compensation cannot apply (ADR-001 7.1) | the compensation stores a tombstone for the *forward* operation, which occupies its unique key |
+| A Wallet tombstone always blocks a deduction (a refund tombstone would block nothing) | `ck_wallet_operations_tombstone_blocks_deduct` |
 | One redemption per client idempotency key | unique `redemptions.idempotency_key` |
 | A redemption's status belongs to its mode (no `COMMIT_DECIDED` Saga, no `COMPENSATION_FAILED`) | `ck_redemptions_status_matches_mode` |
-| A prepared 2PC participant row records its request; only an abort tombstone may omit it | `ck_participant_transactions_prepared_request` |
+| A 2PC participant row is either an empty abort tombstone or carries its full request (`correlation_id`, `request_hash` and the user and points, or the reward and quantity), so a reused transaction id with a different request is detectable | `ck_participant_transactions_request_identity` |
 | Audit history cannot be rewritten | trigger rejects `UPDATE`, `DELETE` and `TRUNCATE` on `audit_events` |
 | An event is audited once | unique `audit_events.event_id` |
 
@@ -48,12 +49,12 @@ These hold even if application code has a bug, because PostgreSQL rejects the wr
 
 ```bash
 make db-upgrade
-make db-downgrade
-make db-reset
-SERVICES="wallet catalog" make db-reset
+LEDGERMESH_ENV=local make db-downgrade
+LEDGERMESH_ENV=local make db-reset
+LEDGERMESH_ENV=local SERVICES="wallet catalog" make db-reset
 ```
 
-`db-downgrade` and `db-reset` delete data. They run only when `LEDGERMESH_ENV` is `local` (the Makefile default) or `test`, and refuse in any other environment.
+`db-downgrade` and `db-reset` delete data, so there is no default: they refuse to run unless you set `LEDGERMESH_ENV=local` or `LEDGERMESH_ENV=test` yourself. That also covers a `<SERVICE>_DATABASE_URL` override pointing somewhere else.
 
 ## Changing a schema
 

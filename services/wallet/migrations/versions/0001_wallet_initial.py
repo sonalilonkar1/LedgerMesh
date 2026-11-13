@@ -54,6 +54,10 @@ def upgrade() -> None:
             "status IN ('applied', 'tombstone')", name="ck_wallet_operations_status"
         ),
         sa.CheckConstraint("points > 0", name="ck_wallet_operations_points_positive"),
+        sa.CheckConstraint(
+            "status <> 'tombstone' OR operation = 'deduct'",
+            name="ck_wallet_operations_tombstone_blocks_deduct",
+        ),
         sa.UniqueConstraint(
             "transaction_id", "operation", name="uq_wallet_operations_transaction_operation"
         ),
@@ -82,8 +86,11 @@ def upgrade() -> None:
             "points IS NULL OR points > 0", name="ck_participant_transactions_points_positive"
         ),
         sa.CheckConstraint(
-            "state = 'ABORTED' OR (user_id IS NOT NULL AND points IS NOT NULL)",
-            name="ck_participant_transactions_prepared_request",
+            "(state = 'ABORTED' AND correlation_id IS NULL AND request_hash IS NULL "
+            "AND user_id IS NULL AND points IS NULL) "
+            "OR (correlation_id IS NOT NULL AND request_hash IS NOT NULL "
+            "AND user_id IS NOT NULL AND points IS NOT NULL)",
+            name="ck_participant_transactions_request_identity",
         ),
     )
 
