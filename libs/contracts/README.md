@@ -101,14 +101,23 @@ compares them with the pull request's base commit and rejects changes that would
 producers or consumers to change, including:
 
 - removing or renaming a published contract file, endpoint, operation, response, field or schema;
-- changing `operationId`, field type, `const`, or a validation pattern;
-- removing an enum value or supported media type;
+- changing `operationId`, `const`, a schema reference, format, or validation pattern;
+- narrowing a request type or widening a response/event type (including adding `null`);
+- removing an accepted request enum value or adding a produced response/event enum value;
 - adding a required field or parameter, or making an optional request body required; and
-- tightening numeric, string, array, or `additionalProperties` constraints.
+- making a guaranteed response/event field optional;
+- tightening request constraints or relaxing response/event constraints; and
+- adding metadata to the strict event envelope, whose deployed readers reject unknown fields.
 
-Adding a new endpoint, response, schema, enum value, or optional field is allowed in v1. If a
-breaking change is intentional, publish a new major version instead of weakening or bypassing the
-compatibility check.
+Adding a new endpoint, response, schema, accepted request enum value, or optional request/response
+field is allowed in v1. Unlike ordinary response bodies, the shared event envelope intentionally
+uses `additionalProperties: false`, so even an optional envelope field requires a new major version
+or a staged reader-first migration.
+
+The checker fails closed when a changed schema keyword is not understood (for example `oneOf`,
+`anyOf`, `allOf`, `$defs`, `prefixItems` or `dependentRequired`). The report asks for manual review
+instead of silently declaring the change compatible. If a breaking change is intentional, publish
+a new major version rather than weakening or bypassing the compatibility check.
 
 CI runs without Kafka, PostgreSQL, deployment credentials, production secrets, or schema-network
 access. It publishes JUnit XML and a readable Markdown compatibility report for 14 days.

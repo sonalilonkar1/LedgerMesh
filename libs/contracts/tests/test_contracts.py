@@ -103,6 +103,20 @@ def test_unresolved_or_external_references_are_rejected_without_network_access()
             validate_local_references({"$ref": reference}, Path("test-contract.yaml"))
 
 
+def test_invalid_openapi_reports_its_file_path():
+    path = Path("libs/contracts/openapi/broken.v1.yaml")
+    with pytest.raises(ContractValidationError, match="broken.v1.yaml"):
+        validate_openapi_document({"openapi": "3.1.0", "paths": []}, path)
+
+
+def test_invalid_json_schema_reports_its_file_path():
+    path = Path("libs/contracts/schemas/events/broken.v1.json")
+    with pytest.raises(ContractValidationError, match="broken.v1.json"):
+        validate_json_schema(
+            {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": 7}, path
+        )
+
+
 @pytest.mark.parametrize(
     "example_path",
     [EXAMPLES_ROOT / "valid-command.v1.json", EXAMPLES_ROOT / "valid-event.v1.json"],
