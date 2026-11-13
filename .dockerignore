@@ -11,5 +11,8 @@
 *.log
 docs
 tests
-libs/messaging
+# Services install the messaging library, but not its test environment.
+libs/messaging/tests
+libs/messaging/docker-compose.test.yml
+**/.pytest_cache
 
