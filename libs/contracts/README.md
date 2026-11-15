@@ -8,6 +8,8 @@ not contain database tables, ORM models, or service-owned persistence types.
 - `openapi/`: synchronous HTTP contracts.
 - `schemas/events/`: asynchronous Kafka envelope contract.
 - `examples/events/`: valid and invalid messages used by contract tests.
+- `examples/manifest.yaml`: expected schema and result for every checked-in example.
+- `src/ledgermesh_contracts/`: offline validation and v1 compatibility checks.
 - `tests/`: OpenAPI, JSON Schema, and runtime-envelope compatibility tests.
 
 ## Contract ownership
@@ -69,9 +71,60 @@ accepted term. Saga messages already reserve the nullable `fencing_token` envelo
 From the repository root:
 
 ```bash
-uv sync --python 3.12
-make contracts-check
+git fetch origin main
+uv sync --python 3.12 --locked
+make contracts-check BASE_REF=origin/main
 ```
 
-The test suite rejects malformed OpenAPI documents, malformed envelopes, unexpected envelope
-fields, invalid identifiers, naive timestamps, negative versions, and schema/runtime drift.
+This is the exact validation performed by CI. `contracts-check` formats/lints the contract code,
+validates all current contracts and examples, checks the runtime envelope, and compares every
+published v1 contract with `BASE_REF`. To run only compatibility validation:
+
+```bash
+make contracts-compat BASE_REF=origin/main
+```
+
+The current-contract checks reject:
+
+- malformed OpenAPI 3.1 documents and invalid JSON Schemas;
+- unresolved or external `$ref` values (validation never fetches a remote schema);
+- duplicate `operationId` values across the HTTP contracts;
+- valid examples that do not match their schema;
+- negative examples that pass or fail for a reason other than their manifest entry;
+- missing or unknown envelope metadata, invalid identifiers and timestamps; and
+- drift between the canonical JSON Schema and the runtime `EventEnvelope`.
+
+## Compatibility policy
+
+Files whose names contain `.v1.` under `openapi/` and `schemas/` are published contracts. CI
+compares them with the pull request's base commit and rejects changes that would require existing
+producers or consumers to change, including:
+
+- removing or renaming a published contract file, endpoint, operation, response, field or schema;
+- changing `operationId`, `const`, a schema reference, format, or validation pattern;
+- narrowing a request type or widening a response/event type (including adding `null`);
+- removing an accepted request enum value or adding a produced response/event enum value;
+- adding a required field or parameter, or making an optional request body required; and
+- making a guaranteed response/event field optional;
+- tightening request constraints or relaxing response/event constraints; and
+- adding metadata to the strict event envelope, whose deployed readers reject unknown fields.
+
+Adding a new endpoint, response, schema, accepted request enum value, or optional request/response
+field is allowed in v1. Unlike ordinary response bodies, the shared event envelope intentionally
+uses `additionalProperties: false`, so even an optional envelope field requires a new major version
+or a staged reader-first migration.
+
+The checker fails closed when a changed schema keyword is not understood (for example `oneOf`,
+`anyOf`, `allOf`, `$defs`, `prefixItems` or `dependentRequired`). The report asks for manual review
+instead of silently declaring the change compatible. If a breaking change is intentional, publish
+a new major version rather than weakening or bypassing the compatibility check.
+
+CI runs without Kafka, PostgreSQL, deployment credentials, production secrets, or schema-network
+access. It publishes JUnit XML and a readable Markdown compatibility report for 14 days.
+
+## Required status check
+
+After the workflow has run at least once, repository administrators must protect `main` and
+require the status check **`Contract validation / validate-contracts`**. The workflow intentionally
+runs on every pull request to `main`: a path-filtered workflow can leave an unrelated pull request
+waiting forever for a required status that was never created.

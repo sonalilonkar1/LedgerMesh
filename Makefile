@@ -1,7 +1,8 @@
-.PHONY: install format lint test check run-coordinator run-wallet run-catalog run-ledger infra-up infra-status infra-smoke infra-logs infra-down infra-reset
+.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-wallet run-catalog run-ledger infra-up infra-status infra-smoke infra-logs infra-down infra-reset
 
 COMPOSE_FILE ?= infra/compose.yaml
 COMPOSE := docker compose -f $(COMPOSE_FILE)
+BASE_REF ?= origin/main
 
 install:
 	uv sync --python 3.12
@@ -21,6 +22,10 @@ contracts-check:
 	uv run ruff format --check libs/contracts
 	uv run ruff check libs/contracts
 	uv run pytest libs/contracts/tests -q
+	$(MAKE) contracts-compat BASE_REF=$(BASE_REF)
+
+contracts-compat:
+	PYTHONPATH=libs/contracts/src uv run python -m ledgermesh_contracts.compatibility --base-ref $(BASE_REF)
 
 check: lint test
 
