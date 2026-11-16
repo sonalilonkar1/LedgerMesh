@@ -117,7 +117,8 @@ services:
     build:
       context: ..
       dockerfile: infra/Dockerfile.service
-    command: ["python", "-m", "uvicorn", "services.coordinator.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    # Apply migrations (LM-005) before serving; a failed migration stops the container.
+    command: ["sh", "-c", "alembic -c services/coordinator/alembic.ini upgrade head && exec python -m uvicorn services.coordinator.app.main:app --host 0.0.0.0 --port 8000"]
     init: true
     ports:
       - "${COORDINATOR_PORT:-8000}:8000"
@@ -139,7 +140,7 @@ services:
     build:
       context: ..
       dockerfile: infra/Dockerfile.service
-    command: ["python", "-m", "uvicorn", "services.wallet.app.main:app", "--host", "0.0.0.0", "--port", "8001"]
+    command: ["sh", "-c", "alembic -c services/wallet/alembic.ini upgrade head && exec python -m uvicorn services.wallet.app.main:app --host 0.0.0.0 --port 8001"]
     init: true
     ports:
       - "${WALLET_PORT:-8001}:8001"
@@ -161,7 +162,7 @@ services:
     build:
       context: ..
       dockerfile: infra/Dockerfile.service
-    command: ["python", "-m", "uvicorn", "services.catalog.app.main:app", "--host", "0.0.0.0", "--port", "8002"]
+    command: ["sh", "-c", "alembic -c services/catalog/alembic.ini upgrade head && exec python -m uvicorn services.catalog.app.main:app --host 0.0.0.0 --port 8002"]
     init: true
     ports:
       - "${CATALOG_PORT:-8002}:8002"
@@ -183,7 +184,7 @@ services:
     build:
       context: ..
       dockerfile: infra/Dockerfile.service
-    command: ["python", "-m", "uvicorn", "services.audit_ledger.app.main:app", "--host", "0.0.0.0", "--port", "8003"]
+    command: ["sh", "-c", "alembic -c services/audit_ledger/alembic.ini upgrade head && exec python -m uvicorn services.audit_ledger.app.main:app --host 0.0.0.0 --port 8003"]
     init: true
     ports:
       - "${AUDIT_LEDGER_PORT:-8003}:8003"
