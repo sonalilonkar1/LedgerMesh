@@ -2,20 +2,9 @@ name: Contract validation
 
 on:
   pull_request:
-    paths:
-      - "libs/contracts/**"
-      - "libs/messaging/src/ledgermesh_messaging/envelope.py"
-      - "pyproject.toml"
-      - "uv.lock"
-      - ".github/workflows/contracts.yml"
+    branches: [main]
   push:
     branches: [main]
-    paths:
-      - "libs/contracts/**"
-      - "libs/messaging/src/ledgermesh_messaging/envelope.py"
-      - "pyproject.toml"
-      - "uv.lock"
-      - ".github/workflows/contracts.yml"
   workflow_dispatch:
 
 permissions:
@@ -23,18 +12,58 @@ permissions:
 
 jobs:
   validate-contracts:
+    name: validate-contracts
     runs-on: ubuntu-latest
+    env:
+      CONTRACT_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: astral-sh/setup-uv@v7
         with:
           version: "0.13.6"
           enable-cache: true
+
       - name: Install locked dependencies
         run: uv sync --python 3.12 --locked
+
       - name: Check contract formatting and lint
         run: |
           uv run ruff format --check libs/contracts
           uv run ruff check libs/contracts
-      - name: Validate API and event contracts
-        run: uv run pytest libs/contracts/tests -q
+
+      - name: Validate API, event and runtime contracts
+        run: |
+          mkdir -p artifacts
+          uv run pytest libs/contracts/tests -q \
+            --junitxml=artifacts/contract-tests.xml
+
+      - name: Check published v1 compatibility
+        shell: bash
+        run: |
+          base_ref="$CONTRACT_BASE_REF"
+          if [[ -z "$base_ref" || "$base_ref" =~ ^0+$ ]]; then
+            base_ref="HEAD^"
+          fi
+
+          set +e
+          PYTHONPATH=libs/contracts/src uv run python \
+            -m ledgermesh_contracts.compatibility \
+            --base-ref "$base_ref" \
+            --report artifacts/compatibility.md
+          status=$?
+          set -e
+
+          cat artifacts/compatibility.md >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: Retain validation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-validation-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
