@@ -1,4 +1,4 @@
-.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-wallet run-catalog run-ledger infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test
+.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-wallet run-catalog run-ledger infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test db-seed db-baseline
 
 COMPOSE_FILE ?= infra/compose.yaml
 COMPOSE := docker compose -f $(COMPOSE_FILE)
@@ -77,4 +77,14 @@ db-reset:
 
 db-test:
 	uv run pytest tests/db -q
+
+# Deterministic seed data (LM-006). Both change data, so both need an explicit
+# LEDGERMESH_ENV=local or test, e.g. LEDGERMESH_ENV=local make db-baseline.
+#   db-seed      write the baseline users and rewards (repeatable)
+#   db-baseline  wipe every service database, migrate it, then seed it
+db-seed:
+	uv run python -m infra.scripts.seed seed $(SERVICES)
+
+db-baseline:
+	uv run python -m infra.scripts.seed baseline $(SERVICES)
 

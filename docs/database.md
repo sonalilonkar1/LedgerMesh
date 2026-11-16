@@ -56,6 +56,36 @@ LEDGERMESH_ENV=local SERVICES="wallet catalog" make db-reset
 
 `db-downgrade` and `db-reset` delete data, so there is no default: they refuse to run unless you set `LEDGERMESH_ENV=local` or `LEDGERMESH_ENV=test` yourself. That also covers a `<SERVICE>_DATABASE_URL` override pointing somewhere else.
 
+## Seed data and a clean baseline (LM-006)
+
+Demos, tests and experiments start from the same known data:
+
+```bash
+LEDGERMESH_ENV=local make db-baseline
+LEDGERMESH_ENV=local make db-seed
+```
+
+- `db-baseline` wipes every service database (migrations down and up), then seeds it. Afterwards there are no redemptions, operations, reservations, audit events, inbox or outbox rows: only the seed data below.
+- `db-seed` writes the seed rows without wiping anything, and resets any drifted balance or inventory back to its seed value. It is safe to repeat.
+
+Both change data, so both refuse to run unless `LEDGERMESH_ENV` is `local` or `test`. The data lives in `infra/scripts/seed.py`.
+
+| Wallet user | Points | Used for |
+|---|---:|---|
+| `user-alice` | 10,000 | happy paths, throughput |
+| `user-bob` | 1,000 | general use |
+| `user-carol` | 150 | exactly one coffee: competing redemptions for one balance |
+| `user-dave` | 0 | insufficient points |
+
+| Reward | Cost | Inventory | Used for |
+|---|---:|---:|---|
+| `reward-coffee` | 100 | 100 | happy paths |
+| `reward-headphones` | 2,500 | 5 | expensive reward |
+| `reward-last-unit` | 500 | 1 | competing redemptions for the final unit |
+| `reward-sold-out` | 300 | 0 | sold-out rejection |
+
+These identifiers are stable. Tests and experiments may refer to them directly, and `test_seed_identifiers_are_stable` fails if one is renamed by accident. The Coordinator and Audit Ledger have no seed data; they start empty.
+
 ## Changing a schema
 
 Never edit a migration that has been merged. Instead:
