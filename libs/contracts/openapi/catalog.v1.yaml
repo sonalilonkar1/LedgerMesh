@@ -6,6 +6,26 @@ info:
 servers:
   - url: http://catalog:8002
 paths:
+  /v1/rewards:
+    get:
+      operationId: listRewards
+      summary: List rewards, filtering sold-out rewards by default
+      parameters:
+        - name: available_only
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
+      responses:
+        "200":
+          description: Rewards ordered by reward ID
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RewardView"
   /v1/rewards/{reward_id}:
     get:
       operationId: getRewardQuote
@@ -25,6 +45,75 @@ paths:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/Problem"
+  /v1/rewards/{reward_id}/reservations:
+    post:
+      operationId: reserveRewardInventory
+      summary: Reserve reward inventory idempotently
+      parameters:
+        - $ref: "#/components/parameters/RewardId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReserveRequest"
+      responses:
+        "200":
+          description: Applied or previously stored reservation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReservationResult"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+  /v1/rewards/{reward_id}/releases:
+    post:
+      operationId: releaseRewardInventory
+      summary: Release a reservation or record an early-release tombstone
+      parameters:
+        - $ref: "#/components/parameters/RewardId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReleaseRequest"
+      responses:
+        "200":
+          description: Applied, duplicate, or tombstoned release
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReservationResult"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+  /v1/rewards/{reward_id}/fulfillments:
+    post:
+      operationId: fulfillRewardReservation
+      summary: Mark an active reservation fulfilled
+      parameters:
+        - $ref: "#/components/parameters/RewardId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FulfillRequest"
+      responses:
+        "200":
+          description: Applied or previously stored fulfillment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReservationResult"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
   /v1/transactions/{transaction_id}/prepare:
     post:
       operationId: prepareInventoryReservation
@@ -129,6 +218,115 @@ components:
           schema:
             $ref: "#/components/schemas/Problem"
   schemas:
+    ReserveRequest:
+      type: object
+      additionalProperties: false
+      required: [transaction_id, quantity]
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        quantity:
+          type: integer
+          minimum: 1
+        event_id:
+          type: [string, "null"]
+          format: uuid
+    ReleaseRequest:
+      type: object
+      additionalProperties: false
+      required: [transaction_id, quantity]
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        quantity:
+          type: integer
+          minimum: 1
+        event_id:
+          type: [string, "null"]
+          format: uuid
+    FulfillRequest:
+      type: object
+      additionalProperties: false
+      required: [transaction_id]
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        event_id:
+          type: [string, "null"]
+          format: uuid
+    RewardView:
+      type: object
+      additionalProperties: false
+      required:
+        - reward_id
+        - name
+        - point_cost
+        - total_inventory
+        - available_inventory
+        - version
+        - updated_at
+      properties:
+        reward_id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 1
+        point_cost:
+          type: integer
+          minimum: 1
+        total_inventory:
+          type: integer
+          minimum: 0
+        available_inventory:
+          type: integer
+          minimum: 0
+        version:
+          type: integer
+          minimum: 0
+        updated_at:
+          type: string
+          format: date-time
+    ReservationResult:
+      type: object
+      additionalProperties: false
+      required:
+        - transaction_id
+        - reward_id
+        - quantity
+        - state
+        - outcome
+        - available_inventory
+        - version
+        - updated_at
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        reward_id:
+          type: string
+          minLength: 1
+        quantity:
+          type: integer
+          minimum: 1
+        state:
+          type: string
+          enum: [reserved, released, fulfilled, tombstone]
+        outcome:
+          type: string
+          enum: [applied, duplicate, tombstone]
+        available_inventory:
+          type: integer
+          minimum: 0
+        version:
+          type: integer
+          minimum: 0
+        updated_at:
+          type: string
+          format: date-time
     CatalogPrepareRequest:
       type: object
       additionalProperties: false

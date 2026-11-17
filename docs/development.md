@@ -46,6 +46,11 @@ The Wallet Service's balance, deduction, and refund endpoints are documented in
 database; use the complete local stack or set `WALLET_DATABASE_URL` when running
 Wallet directly.
 
+The Catalog Service's reward, reservation, release, and fulfillment endpoints
+are documented in [the Catalog service guide](../services/catalog/README.md).
+They require the Catalog database; use the complete local stack or set
+`CATALOG_DATABASE_URL` when running Catalog directly.
+
 ## Run one service without Compose
 
 | Service | Command | Default port |
