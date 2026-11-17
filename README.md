@@ -131,9 +131,11 @@ Expected response:
 The Wallet Service includes its LM-007 balance, deduction, and refund API. See
 [the Wallet service guide](services/wallet/README.md). The Rewards Catalog
 includes its LM-008 listing, reservation, release, and fulfillment API. See
-[the Catalog service guide](services/catalog/README.md). The remaining business
-APIs, transaction coordination, and observability are added through their
-assigned LM issues.
+[the Catalog service guide](services/catalog/README.md). The Audit Ledger
+includes its LM-009 immutable append and transaction timeline API. See
+[the Audit Ledger service guide](services/audit_ledger/README.md). The remaining
+business APIs, transaction coordination, and observability are added through
+their assigned LM issues.
 
 ## Core Development Commands
 

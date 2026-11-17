@@ -159,6 +159,15 @@ def test_runtime_envelope_fields_match_json_schema():
     assert set(EventEnvelope.model_fields) == schema_fields
 
 
+def test_audit_ledger_embedded_envelope_matches_canonical_schema():
+    canonical = load_json(SCHEMA_PATH)
+    for metadata_key in ("$schema", "$id", "title"):
+        canonical.pop(metadata_key)
+    audit_contract = load_document(CONTRACTS_ROOT / "openapi" / "audit-ledger.v1.yaml")
+
+    assert audit_contract["components"]["schemas"]["EventEnvelope"] == canonical
+
+
 def test_runtime_created_envelope_matches_json_schema():
     message = EventEnvelope(
         event_type="wallet.points_deducted",
