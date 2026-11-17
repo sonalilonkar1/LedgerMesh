@@ -56,6 +56,11 @@ documented in [the Audit Ledger service guide](../services/audit_ledger/README.m
 They require the Audit Ledger database; use the complete local stack or set
 `AUDIT_LEDGER_DATABASE_URL` when running the service directly.
 
+The Coordinator's idempotent redemption and durable transition endpoints are
+documented in [the Coordinator service guide](../services/coordinator/README.md).
+They require the Coordinator database; use the complete local stack or set
+`COORDINATOR_DATABASE_URL` when running the service directly.
+
 ## Run one service without Compose
 
 | Service | Command | Default port |
