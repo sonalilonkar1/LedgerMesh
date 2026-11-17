@@ -5,16 +5,20 @@ Usage, from the repository root:
     LEDGERMESH_ENV=local uv run python -m infra.scripts.seed seed
     LEDGERMESH_ENV=local uv run python -m infra.scripts.seed baseline
 
-``seed`` writes the fixed users and rewards below, overwriting any drifted
-balance or inventory back to its baseline value. It is safe to run repeatedly.
+``seed`` is insert-only: it adds any missing seed user or reward and never
+changes an existing row. Overwriting a balance or inventory that already has
+operations or reservations behind it would leave unmatched deductions, ghost
+allocations and a regressed aggregate version, so it is safe to run repeatedly.
 
-``baseline`` wipes every service database (migrations down and up again) and
-then seeds it, so demos and experiments always start from the same state:
-no redemptions, operations, reservations, audit events, inbox or outbox rows.
+``baseline`` is the only way to restore exact values: it wipes every service
+database (migrations down and up again) and then seeds it, so demos and
+experiments start from the same state with no redemptions, transitions,
+operations, reservations, participant rows, audit events, inbox or outbox rows.
 
-Both change data, so both refuse to run unless ``LEDGERMESH_ENV`` is ``local``
-or ``test``. The identifiers are part of the test contract: automated tests and
-experiments refer to them, so change them only together with those tests.
+Both change data, so the public ``seed()`` and ``baseline()`` functions, not
+just the CLI, refuse to run unless ``LEDGERMESH_ENV`` is ``local`` or ``test``.
+The identifiers are part of the test contract: automated tests and experiments
+refer to them, so change them only together with those tests.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ import argparse
 from dataclasses import dataclass
 
 from alembic import command
-from sqlalchemy import create_engine, func
+from sqlalchemy import create_engine
 from sqlalchemy.dialects.postgresql import insert
 
 from infra.scripts.db import SERVICES, alembic_config, database_url, require_safe_environment
@@ -70,49 +74,40 @@ REWARDS = (
 SEEDED_SERVICES = ("wallet", "catalog")
 
 
-def seed_wallet(url: str) -> None:
-    statement = insert(wallets).values(
-        [{"user_id": w.user_id, "available_points": w.available_points} for w in WALLETS]
-    )
-    statement = statement.on_conflict_do_update(
-        index_elements=[wallets.c.user_id],
-        set_={
-            "available_points": statement.excluded.available_points,
-            "version": 0,
-            "updated_at": func.now(),
-        },
+def _seed_wallet(url: str) -> None:
+    # Insert-only: an existing wallet keeps its balance and version, because
+    # wallet_operations may already account for the difference.
+    statement = (
+        insert(wallets)
+        .values([{"user_id": w.user_id, "available_points": w.available_points} for w in WALLETS])
+        .on_conflict_do_nothing(index_elements=[wallets.c.user_id])
     )
     _execute(url, statement)
 
 
-def seed_catalog(url: str) -> None:
-    statement = insert(rewards).values(
-        [
-            {
-                "reward_id": r.reward_id,
-                "name": r.name,
-                "point_cost": r.point_cost,
-                "total_inventory": r.total_inventory,
-                "available_inventory": r.total_inventory,
-            }
-            for r in REWARDS
-        ]
-    )
-    statement = statement.on_conflict_do_update(
-        index_elements=[rewards.c.reward_id],
-        set_={
-            "name": statement.excluded.name,
-            "point_cost": statement.excluded.point_cost,
-            "total_inventory": statement.excluded.total_inventory,
-            "available_inventory": statement.excluded.available_inventory,
-            "version": 0,
-            "updated_at": func.now(),
-        },
+def _seed_catalog(url: str) -> None:
+    # Insert-only: an existing reward keeps its inventory and version, because
+    # reservations may already account for the difference.
+    statement = (
+        insert(rewards)
+        .values(
+            [
+                {
+                    "reward_id": r.reward_id,
+                    "name": r.name,
+                    "point_cost": r.point_cost,
+                    "total_inventory": r.total_inventory,
+                    "available_inventory": r.total_inventory,
+                }
+                for r in REWARDS
+            ]
+        )
+        .on_conflict_do_nothing(index_elements=[rewards.c.reward_id])
     )
     _execute(url, statement)
 
 
-SEEDERS = {"wallet": seed_wallet, "catalog": seed_catalog}
+SEEDERS = {"wallet": _seed_wallet, "catalog": _seed_catalog}
 
 
 def _execute(url: str, statement) -> None:
@@ -124,19 +119,37 @@ def _execute(url: str, statement) -> None:
         engine.dispose()
 
 
-def seed(service: str, url: str | None = None) -> None:
-    """Write the baseline rows for ``service``; services without seed data are skipped."""
+def _seed_service(service: str, url: str | None) -> None:
     seeder = SEEDERS.get(service)
     if seeder is not None:
         seeder(url or database_url(service))
 
 
-def baseline(service: str, url: str | None = None) -> None:
-    """Wipe ``service``'s database back to an empty schema, then seed it."""
+def _baseline_service(service: str, url: str | None) -> None:
     config = alembic_config(service, url)
     command.downgrade(config, "base")
     command.upgrade(config, "head")
-    seed(service, url)
+    _seed_service(service, url)
+
+
+def seed(service: str, url: str | None = None) -> None:
+    """Add any missing baseline rows for ``service``; never changes existing rows.
+
+    Refuses unless ``LEDGERMESH_ENV`` is ``local`` or ``test``, even when called
+    directly instead of through the CLI.
+    """
+    require_safe_environment("seed")
+    _seed_service(service, url)
+
+
+def baseline(service: str, url: str | None = None) -> None:
+    """Wipe ``service``'s database back to an empty schema, then seed it.
+
+    Refuses unless ``LEDGERMESH_ENV`` is ``local`` or ``test``, even when called
+    directly instead of through the CLI.
+    """
+    require_safe_environment("baseline")
+    _baseline_service(service, url)
 
 
 def run(action: str, services: list[str]) -> None:

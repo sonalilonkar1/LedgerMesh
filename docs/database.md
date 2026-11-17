@@ -65,10 +65,10 @@ LEDGERMESH_ENV=local make db-baseline
 LEDGERMESH_ENV=local make db-seed
 ```
 
-- `db-baseline` wipes every service database (migrations down and up), then seeds it. Afterwards there are no redemptions, operations, reservations, audit events, inbox or outbox rows: only the seed data below.
-- `db-seed` writes the seed rows without wiping anything, and resets any drifted balance or inventory back to its seed value. It is safe to repeat.
+- `db-baseline` wipes every service database (migrations down and up), then seeds it. Afterwards there are no redemptions, transitions, operations, reservations, participant rows, audit events, inbox or outbox rows: only the seed data below, with every version at 0. **Use this to get exact known values.**
+- `db-seed` is insert-only: it adds any missing seed user or reward and never changes an existing row. It does not restore a balance or inventory that has changed, because operations or reservations may account for the difference, and overwriting it would leave unmatched deductions, ghost allocations and a regressed version. It is safe to repeat.
 
-Both change data, so both refuse to run unless `LEDGERMESH_ENV` is `local` or `test`. The data lives in `infra/scripts/seed.py`.
+Both change data, so both refuse to run unless `LEDGERMESH_ENV` is `local` or `test`. That applies to the public `seed()` and `baseline()` functions too, not only the Make targets. The data lives in `infra/scripts/seed.py`.
 
 | Wallet user | Points | Used for |
 |---|---:|---|
