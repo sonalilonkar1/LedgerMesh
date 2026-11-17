@@ -13,8 +13,9 @@ the Wallet database.
 | `POST` | `/v1/wallets/{user_id}/refunds` | Refund the applied deduction with the same transaction ID |
 
 A deduction and its refund share one `transaction_id`. An identical retry
-returns the stored outcome without applying the balance change again. Reusing
-the transaction ID with a different wallet or point amount returns `409`.
+returns the stored operation together with the wallet's current balance and
+version, without applying the balance change again. Reusing the transaction ID
+with a different wallet or point amount returns `409`.
 
 Every successful mutation updates the balance and its `wallet_operations` row
 in one PostgreSQL transaction. The Wallet row is locked during the mutation,
@@ -22,10 +23,20 @@ the database prevents negative balances, and `version` increases once per
 applied operation. Expected-version conditional updates and retry policy remain
 in LM-027.
 
+Repository mutations also accept a caller-owned SQLAlchemy `Connection`. LM-020
+uses that form so the inbox record, Wallet mutation, and outbox reply commit in
+one transaction. HTTP routes use the repository's thin transaction-owning
+wrapper.
+
+A refund that arrives before its deduction currently returns `404`. LM-020
+implements the Saga compensation rule from ADR-001 section 7.1 by recording a
+deduction tombstone, so a delayed deduction cannot apply after compensation.
+
 Run the service with the local stack:
 
 ```bash
 make infra-up
+LEDGERMESH_ENV=local make db-baseline
 curl http://localhost:8001/v1/wallets/user-alice
 ```
 

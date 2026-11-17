@@ -1,5 +1,7 @@
 """PostgreSQL integration tests for Wallet core operations (LM-007)."""
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from uuid import uuid4
 
 import pytest
@@ -65,6 +67,75 @@ def test_identical_deduction_and_refund_retries_are_idempotent(repository):
     assert repository.get_balance("user-1").available_points == 100
     assert repository.get_balance("user-1").version == 2
     assert operation_count(repository.engine) == 2
+
+
+def test_concurrent_identical_deductions_apply_once(repository):
+    transaction_id = uuid4()
+    barrier = Barrier(10)
+
+    def deduct_once(_):
+        barrier.wait()
+        return repository.deduct("user-1", transaction_id, 25, None)
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        results = list(executor.map(deduct_once, range(10)))
+
+    assert sum(not result.duplicate for result in results) == 1
+    assert sum(result.duplicate for result in results) == 9
+    assert repository.get_balance("user-1").available_points == 75
+    assert repository.get_balance("user-1").version == 1
+    assert operation_count(repository.engine) == 1
+
+
+def test_concurrent_identical_refunds_apply_once(repository):
+    transaction_id = uuid4()
+    repository.deduct("user-1", transaction_id, 25, None)
+    barrier = Barrier(10)
+
+    def refund_once(_):
+        barrier.wait()
+        return repository.refund("user-1", transaction_id, None)
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        results = list(executor.map(refund_once, range(10)))
+
+    assert sum(not result.duplicate for result in results) == 1
+    assert sum(result.duplicate for result in results) == 9
+    assert repository.get_balance("user-1").available_points == 100
+    assert repository.get_balance("user-1").version == 2
+    assert operation_count(repository.engine) == 2
+
+
+def test_concurrent_distinct_deductions_never_make_balance_negative(repository):
+    barrier = Barrier(10)
+
+    def deduct_once(_):
+        barrier.wait()
+        try:
+            repository.deduct("user-1", uuid4(), 30, None)
+            return "applied"
+        except InsufficientPoints:
+            return "insufficient"
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        outcomes = list(executor.map(deduct_once, range(10)))
+
+    assert outcomes.count("applied") == 3
+    assert outcomes.count("insufficient") == 7
+    assert repository.get_balance("user-1").available_points == 10
+    assert repository.get_balance("user-1").version == 3
+    assert operation_count(repository.engine) == 3
+
+
+def test_caller_owned_transaction_can_roll_back_wallet_mutation(repository):
+    with repository.engine.connect() as connection:
+        transaction = connection.begin()
+        repository.deduct("user-1", uuid4(), 25, None, connection=connection)
+        transaction.rollback()
+
+    balance = repository.get_balance("user-1")
+    assert (balance.available_points, balance.version) == (100, 0)
+    assert operation_count(repository.engine) == 0
 
 
 def test_transaction_id_cannot_be_reused_for_a_different_deduction(repository):

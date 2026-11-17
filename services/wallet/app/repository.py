@@ -41,11 +41,22 @@ class WalletRepository(Protocol):
     def get_balance(self, user_id: str) -> BalanceRecord: ...
 
     def deduct(
-        self, user_id: str, transaction_id: UUID, points: int, event_id: UUID | None
+        self,
+        user_id: str,
+        transaction_id: UUID,
+        points: int,
+        event_id: UUID | None,
+        *,
+        connection: Connection | None = None,
     ) -> OperationRecord: ...
 
     def refund(
-        self, user_id: str, transaction_id: UUID, event_id: UUID | None
+        self,
+        user_id: str,
+        transaction_id: UUID,
+        event_id: UUID | None,
+        *,
+        connection: Connection | None = None,
     ) -> OperationRecord: ...
 
 
@@ -82,84 +93,121 @@ class PostgresWalletRepository:
         return BalanceRecord(**row._mapping)
 
     def deduct(
-        self, user_id: str, transaction_id: UUID, points: int, event_id: UUID | None
+        self,
+        user_id: str,
+        transaction_id: UUID,
+        points: int,
+        event_id: UUID | None,
+        *,
+        connection: Connection | None = None,
     ) -> OperationRecord:
-        with self.engine.begin() as connection:
-            duplicate = self._existing_operation(connection, transaction_id, "deduct")
-            if duplicate is not None:
-                self._require_same_operation(duplicate, user_id, points, transaction_id)
-                return self._operation_result(
-                    connection, duplicate, transaction_id, "deduct", duplicate=True
-                )
+        if connection is not None:
+            return self._deduct(connection, user_id, transaction_id, points, event_id)
+        with self.engine.begin() as owned_connection:
+            return self._deduct(owned_connection, user_id, transaction_id, points, event_id)
 
-            wallet = self._locked_wallet(connection, user_id)
-            if wallet.available_points < points:
-                raise InsufficientPoints(
-                    f"Wallet {user_id!r} has {wallet.available_points} points; {points} required.",
-                    transaction_id,
-                )
-
-            connection.execute(
-                update(wallets)
-                .where(wallets.c.user_id == user_id)
-                .values(
-                    available_points=wallets.c.available_points - points,
-                    version=wallets.c.version + 1,
-                    updated_at=datetime.now(UTC),
-                )
+    def _deduct(
+        self,
+        connection: Connection,
+        user_id: str,
+        transaction_id: UUID,
+        points: int,
+        event_id: UUID | None,
+    ) -> OperationRecord:
+        wallet = self._locked_wallet(connection, user_id)
+        duplicate = self._existing_operation(connection, transaction_id, "deduct")
+        if duplicate is not None:
+            self._require_same_operation(duplicate, user_id, points, transaction_id)
+            return self._operation_result(
+                connection, duplicate, transaction_id, "deduct", duplicate=True
             )
-            try:
-                operation = connection.execute(
-                    insert(wallet_operations)
-                    .values(
-                        transaction_id=transaction_id,
-                        user_id=user_id,
-                        operation="deduct",
-                        points=points,
-                        status="applied",
-                        event_id=event_id,
-                    )
-                    .returning(*wallet_operations.c)
-                ).one()
-            except IntegrityError as error:
-                raise OperationConflict(
-                    "The transaction ID is already used by a different deduction.", transaction_id
-                ) from error
-            return self._operation_result(connection, operation, transaction_id, "deduct")
 
-    def refund(self, user_id: str, transaction_id: UUID, event_id: UUID | None) -> OperationRecord:
-        with self.engine.begin() as connection:
-            existing_refund = self._existing_operation(connection, transaction_id, "refund")
-            if existing_refund is not None:
-                if existing_refund.user_id != user_id:
-                    raise OperationConflict(
-                        "The transaction ID belongs to another wallet.", transaction_id
-                    )
-                return self._operation_result(
-                    connection, existing_refund, transaction_id, "refund", duplicate=True
-                )
-
-            deduction = self._existing_operation(connection, transaction_id, "deduct")
-            if deduction is None or deduction.status != "applied":
-                raise DeductionNotFound(
-                    "Refund requires an applied deduction with the same transaction ID.",
-                    transaction_id,
-                )
-            if deduction.user_id != user_id:
-                raise OperationConflict(
-                    "The original deduction belongs to another wallet.", transaction_id
-                )
-
-            self._locked_wallet(connection, user_id)
-            connection.execute(
-                update(wallets)
-                .where(wallets.c.user_id == user_id)
-                .values(
-                    available_points=wallets.c.available_points + deduction.points,
-                    version=wallets.c.version + 1,
-                    updated_at=datetime.now(UTC),
-                )
+        if wallet.available_points < points:
+            raise InsufficientPoints(
+                f"Wallet {user_id!r} has {wallet.available_points} points; {points} required.",
+                transaction_id,
             )
+
+        connection.execute(
+            update(wallets)
+            .where(wallets.c.user_id == user_id)
+            .values(
+                available_points=wallets.c.available_points - points,
+                version=wallets.c.version + 1,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        try:
+            operation = connection.execute(
+                insert(wallet_operations)
+                .values(
+                    transaction_id=transaction_id,
+                    user_id=user_id,
+                    operation="deduct",
+                    points=points,
+                    status="applied",
+                    event_id=event_id,
+                )
+                .returning(*wallet_operations.c)
+            ).one()
+        except IntegrityError as error:
+            raise OperationConflict(
+                "The transaction ID is already used by a different deduction.", transaction_id
+            ) from error
+        return self._operation_result(connection, operation, transaction_id, "deduct")
+
+    def refund(
+        self,
+        user_id: str,
+        transaction_id: UUID,
+        event_id: UUID | None,
+        *,
+        connection: Connection | None = None,
+    ) -> OperationRecord:
+        if connection is not None:
+            return self._refund(connection, user_id, transaction_id, event_id)
+        with self.engine.begin() as owned_connection:
+            return self._refund(owned_connection, user_id, transaction_id, event_id)
+
+    def _refund(
+        self,
+        connection: Connection,
+        user_id: str,
+        transaction_id: UUID,
+        event_id: UUID | None,
+    ) -> OperationRecord:
+        self._locked_wallet(connection, user_id)
+        existing_refund = self._existing_operation(connection, transaction_id, "refund")
+        if existing_refund is not None:
+            if existing_refund.user_id != user_id:
+                raise OperationConflict(
+                    "The transaction ID belongs to another wallet.", transaction_id
+                )
+            return self._operation_result(
+                connection, existing_refund, transaction_id, "refund", duplicate=True
+            )
+
+        deduction = self._existing_operation(connection, transaction_id, "deduct")
+        if deduction is None or deduction.status != "applied":
+            raise DeductionNotFound(
+                "Refund requires an applied deduction with the same transaction ID.",
+                transaction_id,
+            )
+        if deduction.user_id != user_id:
+            raise OperationConflict(
+                "The original deduction belongs to another wallet.", transaction_id
+            )
+
+        connection.execute(
+            update(wallets)
+            .where(wallets.c.user_id == user_id)
+            .values(
+                available_points=wallets.c.available_points + deduction.points,
+                version=wallets.c.version + 1,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        try:
             operation = connection.execute(
                 insert(wallet_operations)
                 .values(
@@ -172,7 +220,11 @@ class PostgresWalletRepository:
                 )
                 .returning(*wallet_operations.c)
             ).one()
-            return self._operation_result(connection, operation, transaction_id, "refund")
+        except IntegrityError as error:
+            raise OperationConflict(
+                "The transaction ID is already used by a different refund.", transaction_id
+            ) from error
+        return self._operation_result(connection, operation, transaction_id, "refund")
 
     @staticmethod
     def _existing_operation(connection: Connection, transaction_id: UUID, operation: str):
