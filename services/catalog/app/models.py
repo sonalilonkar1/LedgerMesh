@@ -56,6 +56,21 @@ class ReservationResult(StrictModel):
     updated_at: datetime
 
 
+class CatalogPrepareRequest(StrictModel):
+    correlation_id: UUID
+    reward_id: str = Field(min_length=1)
+    quantity: int = Field(gt=0)
+    expected_reward_version: int = Field(ge=0)
+    expected_point_cost: int = Field(gt=0)
+
+
+class ParticipantResponse(StrictModel):
+    transaction_id: UUID
+    participant: Literal["catalog"] = "catalog"
+    state: Literal["PREPARED", "COMMITTED", "ABORTED", "IN_DOUBT"]
+    updated_at: datetime
+
+
 class Problem(StrictModel):
     type: str
     title: str

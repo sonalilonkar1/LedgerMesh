@@ -61,9 +61,6 @@ make infra-up
 uv run pytest tests/db/test_catalog_core.py -q
 ```
 
-The 2PC participant API is implemented by LM-014. Kafka Saga consumption is
-implemented by LM-021. Both reuse these core Catalog operations.
-
 ## Saga consumer (LM-021)
 
 The worker consumes `catalog.commands` through the `catalog-saga` consumer
@@ -96,3 +93,48 @@ make run-catalog-saga
 
 uv run pytest tests/db/test_catalog_saga.py -q
 ```
+
+## 2PC participant API (LM-014)
+
+| Method | Path | Behavior |
+|---|---|---|
+| `POST` | `/v1/transactions/{id}/prepare` | Validate inventory and the quoted version/cost, then return `PREPARED` or `ABORTED` |
+| `POST` | `/v1/transactions/{id}/commit` | Commit the PostgreSQL prepared reservation |
+| `POST` | `/v1/transactions/{id}/abort` | Roll back prepared work or create an abort tombstone |
+| `GET` | `/v1/transactions/{id}` | Return the participant's durable state |
+
+Prepare verifies the reward exists, inventory is sufficient, and the supplied
+`expected_reward_version` and `expected_point_cost` still match the Catalog's
+authoritative row. It then decrements inventory and inserts the reservation
+inside a PostgreSQL transaction followed by `PREPARE TRANSACTION`. Those changes
+survive connection loss but remain invisible until COMMIT.
+
+Repeated prepare and final-decision calls return the stored result. COMMIT for
+an unknown transaction returns `404`; ABORT for an unknown transaction creates
+an `ABORTED` tombstone so a delayed PREPARE cannot allocate ghost inventory.
+Conflicting request reuse or an attempt to reverse a final decision returns
+`409`. PostgreSQL advisory locks serialize concurrent decisions across Catalog
+instances.
+
+Example:
+
+```bash
+transaction_id="33333333-3333-4333-8333-333333333333"
+curl -X POST "http://localhost:8002/v1/transactions/$transaction_id/prepare" \
+  -H 'Content-Type: application/json' \
+  -d '{"correlation_id":"44444444-4444-4444-8444-444444444444","reward_id":"reward-coffee","quantity":1,"expected_reward_version":0,"expected_point_cost":100}'
+
+curl -X POST "http://localhost:8002/v1/transactions/$transaction_id/commit"
+curl "http://localhost:8002/v1/transactions/$transaction_id"
+```
+
+Run the participant tests:
+
+```bash
+make infra-up
+uv run pytest tests/db/test_catalog_participant.py -q
+make db-prepared-list
+```
+
+The 2PC and Saga paths reuse the same core Catalog operations while keeping
+their coordination and idempotency records separate.
