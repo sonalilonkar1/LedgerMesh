@@ -1,11 +1,81 @@
 openapi: 3.1.0
 info:
-  title: LedgerMesh Wallet Participant API
+  title: LedgerMesh Wallet API
   version: 1.0.0
   description: Internal synchronous 2PC API owned by the Wallet Service.
 servers:
   - url: http://wallet:8001
 paths:
+  /v1/wallets/{user_id}:
+    get:
+      operationId: getWalletBalance
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: Current point balance and aggregate version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletBalance"
+        "404":
+          $ref: "#/components/responses/Problem"
+  /v1/wallets/{user_id}/deductions:
+    post:
+      operationId: deductWalletPoints
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeductRequest"
+      responses:
+        "200":
+          description: Applied deduction or the stored result of an identical retry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletOperationResult"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          description: Insufficient points or conflicting reuse of the transaction ID
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  /v1/wallets/{user_id}/refunds:
+    post:
+      operationId: refundWalletPoints
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefundRequest"
+      responses:
+        "200":
+          description: Applied refund or the stored result of an identical retry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletOperationResult"
+        "404":
+          description: Wallet or original applied deduction was not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "409":
+          description: Transaction ID belongs to another Wallet operation
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
   /v1/transactions/{transaction_id}/prepare:
     post:
       operationId: prepareWalletDeduction
@@ -88,6 +158,13 @@ paths:
           $ref: "#/components/responses/Problem"
 components:
   parameters:
+    UserId:
+      name: user_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
     TransactionId:
       name: transaction_id
       in: path
@@ -103,6 +180,78 @@ components:
           schema:
             $ref: "#/components/schemas/Problem"
   schemas:
+    DeductRequest:
+      type: object
+      additionalProperties: false
+      required: [transaction_id, points]
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        points:
+          type: integer
+          minimum: 1
+        event_id:
+          type: [string, "null"]
+          format: uuid
+    RefundRequest:
+      type: object
+      additionalProperties: false
+      required: [transaction_id]
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        event_id:
+          type: [string, "null"]
+          format: uuid
+    WalletBalance:
+      type: object
+      additionalProperties: false
+      required: [user_id, available_points, version, updated_at]
+      properties:
+        user_id:
+          type: string
+          minLength: 1
+        available_points:
+          type: integer
+          minimum: 0
+        version:
+          type: integer
+          minimum: 0
+        updated_at:
+          type: string
+          format: date-time
+    WalletOperationResult:
+      type: object
+      additionalProperties: false
+      required:
+        [user_id, available_points, version, updated_at, transaction_id, operation, points, outcome]
+      properties:
+        user_id:
+          type: string
+          minLength: 1
+        available_points:
+          type: integer
+          minimum: 0
+        version:
+          type: integer
+          minimum: 0
+        updated_at:
+          type: string
+          format: date-time
+        transaction_id:
+          type: string
+          format: uuid
+        operation:
+          type: string
+          enum: [deduct, refund]
+        points:
+          type: integer
+          minimum: 1
+        outcome:
+          type: string
+          enum: [applied, duplicate]
     WalletPrepareRequest:
       type: object
       additionalProperties: false

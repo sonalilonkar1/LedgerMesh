@@ -41,6 +41,11 @@ For ports, credentials, volume behavior, configuration overrides, and troublesho
 
 Each service applies its database migrations when its container starts. For schemas, safety constraints, `make db-upgrade` / `db-reset` and the migration tests, see [the database guide](database.md).
 
+The Wallet Service's balance, deduction, and refund endpoints are documented in
+[the Wallet service guide](../services/wallet/README.md). They require the Wallet
+database; use the complete local stack or set `WALLET_DATABASE_URL` when running
+Wallet directly.
+
 ## Run one service without Compose
 
 | Service | Command | Default port |
