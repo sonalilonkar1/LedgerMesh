@@ -73,3 +73,44 @@ uv run pytest services/coordinator/tests -q
 make infra-up
 uv run pytest tests/db/test_coordinator_core.py -q
 ```
+
+## Two-Phase Commit workflow (LM-015)
+
+Run or resume a 2PC redemption with:
+
+```bash
+curl -X POST \
+  http://localhost:8000/internal/v1/redemptions/<transaction-id>/execute-2pc
+```
+
+The workflow reads the authoritative reward quote from Catalog and sends
+prepare requests to Wallet and Catalog. Two `PREPARED` votes cause one durable
+`COMMIT_DECIDED` transition. Any NO vote, transport failure, or prepare timeout
+causes one durable `ABORT_DECIDED` transition. The decision is committed before
+COMMIT or ABORT is sent.
+
+If either participant does not acknowledge the final decision, the Coordinator
+remains in the corresponding decided state. Calling the endpoint again resends
+the same irreversible decision. Once both acknowledge, the Coordinator
+atomically stores the terminal state and an audit event in its transactional
+outbox.
+
+The Coordinator then attempts to append the event to the Audit Ledger. An Audit
+Ledger outage never reverses or blocks the durable business outcome: the outbox
+row remains unpublished and a later execution attempt retries the same
+`event_id`.
+
+| Variable | Default |
+|---|---|
+| `WALLET_URL` | `http://wallet:8001` |
+| `CATALOG_URL` | `http://catalog:8002` |
+| `AUDIT_LEDGER_URL` | `http://audit-ledger:8003` |
+| `COORDINATOR_HTTP_TIMEOUT_SECONDS` | `2` |
+
+Focused validation:
+
+```bash
+uv run pytest services/coordinator/tests/test_two_phase_commit.py -q
+make infra-up
+uv run pytest tests/db/test_two_phase_commit_workflow.py -q
+```
