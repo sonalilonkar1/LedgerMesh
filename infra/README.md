@@ -73,6 +73,48 @@ The local-development password defaults to `ledgermesh_dev`. These credentials a
 
 All PostgreSQL instances start with `max_prepared_transactions=100`, enabling the prepared transactions required by the 2PC implementation.
 
+### Prepared-transaction operations
+
+PostgreSQL keeps a transaction after its client disconnects once it has run
+`PREPARE TRANSACTION`. This durability is required by 2PC, but it also means an
+unresolved transaction can retain row locks and consume one of the 100 prepared
+transaction slots.
+
+List unresolved transactions across the service databases:
+
+```bash
+make db-prepared-list
+```
+
+The underlying diagnostic query is:
+
+```sql
+SELECT gid, prepared, owner, database
+FROM pg_prepared_xacts
+WHERE database = current_database()
+ORDER BY prepared, gid;
+```
+
+For local or test recovery only, roll back every unresolved transaction:
+
+```bash
+LEDGERMESH_ENV=local make db-prepared-clean
+```
+
+The cleanup command deliberately refuses to run when `LEDGERMESH_ENV` is unset
+or is not `local`/`test`. In staging or production, inspect the transaction ID,
+Coordinator decision and participant logs before issuing a specific `COMMIT
+PREPARED` or `ROLLBACK PREPARED`; bulk cleanup could violate the durable 2PC
+decision. Prepared transactions count against `max_prepared_transactions` and
+can hold locks indefinitely, so alerting on their age and count is required in
+the hosted environment.
+
+`max_prepared_transactions` is a server-wide capacity, is allocated in shared
+memory at PostgreSQL startup, and therefore requires a server restart when
+changed. The value should be at least the maximum number of participant
+transactions that can simultaneously remain prepared, with operational
+headroom; reaching the limit makes new `PREPARE TRANSACTION` commands fail.
+
 ## Volumes
 
 Compose creates the following named volumes:
