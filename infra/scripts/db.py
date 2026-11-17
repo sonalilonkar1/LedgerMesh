@@ -56,7 +56,7 @@ def require_safe_environment(action: str) -> None:
     environment = os.environ.get("LEDGERMESH_ENV", "")
     if environment not in SAFE_ENVIRONMENTS:
         sys.exit(
-            f"Refusing to {action}: it deletes data. Set LEDGERMESH_ENV=local or "
+            f"Refusing to {action}: it changes or deletes data. Set LEDGERMESH_ENV=local or "
             f"LEDGERMESH_ENV=test (currently {environment!r})."
         )
 
