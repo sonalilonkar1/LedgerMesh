@@ -74,9 +74,6 @@ make infra-up
 uv run pytest tests/db/test_wallet_core.py -q
 ```
 
-The 2PC participant API is implemented by LM-013 and reuses these core Wallet
-operations.
-
 ## Saga command consumer (LM-020)
 
 `services/wallet/app/saga.py` consumes `wallet.commands` (consumer group
@@ -127,3 +124,48 @@ make run-wallet-saga
 ```
 
 Its tests run in the database suite: `uv run pytest tests/db/test_wallet_saga.py -q`.
+
+## 2PC participant API (LM-013)
+
+| Method | Path | Behavior |
+|---|---|---|
+| `POST` | `/v1/transactions/{id}/prepare` | Validate the balance and return a durable `PREPARED` or `ABORTED` vote |
+| `POST` | `/v1/transactions/{id}/commit` | Commit the PostgreSQL prepared deduction |
+| `POST` | `/v1/transactions/{id}/abort` | Roll back prepared work, or create an abort tombstone for an unknown transaction |
+| `GET` | `/v1/transactions/{id}` | Return the participant's durable state |
+
+Prepare writes request identity to `participant_transactions`, applies the
+deduction inside a PostgreSQL transaction and then executes `PREPARE
+TRANSACTION`. The uncommitted balance change survives connection loss but is
+not visible until COMMIT. A transaction-scoped PostgreSQL advisory lock
+serializes concurrent duplicate prepare, commit and abort calls across Wallet
+instances.
+
+Repeated prepare and final-decision requests return the stored outcome. COMMIT
+for an unknown transaction returns `404`; ABORT for an unknown transaction
+creates an `ABORTED` tombstone, causing a delayed PREPARE to vote NO without
+locking the wallet. Reusing a transaction ID with different request data or
+trying to reverse a final decision returns `409`.
+
+Example:
+
+```bash
+transaction_id="11111111-1111-4111-8111-111111111111"
+curl -X POST "http://localhost:8001/v1/transactions/$transaction_id/prepare" \
+  -H 'Content-Type: application/json' \
+  -d '{"correlation_id":"22222222-2222-4222-8222-222222222222","user_id":"user-alice","points":100}'
+
+curl -X POST "http://localhost:8001/v1/transactions/$transaction_id/commit"
+curl "http://localhost:8001/v1/transactions/$transaction_id"
+```
+
+Run the participant tests with the local databases running:
+
+```bash
+make infra-up
+uv run pytest tests/db/test_wallet_participant.py -q
+make db-prepared-list
+```
+
+The last command must show no unresolved transactions after the test suite.
+Kafka Saga consumption is implemented separately by LM-020.
