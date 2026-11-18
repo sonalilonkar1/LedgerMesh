@@ -29,7 +29,14 @@ SCHEMAS = {
 }
 EXPECTED_TABLES = {
     "coordinator": {"redemptions", "redemption_transitions", "inbox", "outbox"},
-    "wallet": {"wallets", "wallet_operations", "participant_transactions", "inbox", "outbox"},
+    "wallet": {
+        "wallets",
+        "wallet_operations",
+        "participant_transactions",
+        "deduction_rejections",
+        "inbox",
+        "outbox",
+    },
     "catalog": {"rewards", "reservations", "participant_transactions", "inbox", "outbox"},
     "audit_ledger": {"audit_events", "inbox"},
 }

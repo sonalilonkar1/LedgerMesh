@@ -10,9 +10,10 @@ from typing import Protocol
 from uuid import UUID
 
 from sqlalchemy import Connection, Engine, create_engine, insert, select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.exc import IntegrityError
 
-from services.wallet.app.db.schema import wallet_operations, wallets
+from services.wallet.app.db.schema import deduction_rejections, wallet_operations, wallets
 from services.wallet.app.errors import (
     DeductionAlreadyApplied,
     DeductionNotFound,
@@ -269,6 +270,13 @@ class PostgresWalletRepository:
                     "The transaction ID belongs to another wallet.", transaction_id
                 )
             if existing.status == "tombstone":
+                # Only an identical early refund is a duplicate; a different
+                # amount for the same transaction is a conflicting command.
+                if existing.points != points:
+                    raise OperationConflict(
+                        "The transaction ID was cancelled for a different amount.",
+                        transaction_id,
+                    )
                 return self._operation_result(
                     connection, existing, transaction_id, "deduct", duplicate=True
                 )
@@ -294,10 +302,44 @@ class PostgresWalletRepository:
             ) from error
         return self._operation_result(connection, tombstone, transaction_id, "deduct")
 
-    def deduction_status(self, transaction_id: UUID, *, connection: Connection) -> str | None:
-        """Return the stored deduction's status (``applied``/``tombstone``), if any."""
-        row = self._existing_operation(connection, transaction_id, "deduct")
-        return None if row is None else row.status
+    def lock_wallet(self, user_id: str, *, connection: Connection) -> None:
+        """Lock the wallet row for the rest of the caller's transaction."""
+        self._locked_wallet(connection, user_id)
+
+    def stored_deduction(self, transaction_id: UUID, *, connection: Connection):
+        """Return the stored deduction row (``applied`` or ``tombstone``), if any."""
+        return self._existing_operation(connection, transaction_id, "deduct")
+
+    def stored_rejection(self, transaction_id: UUID, *, connection: Connection):
+        """Return the stored Saga rejection for ``transaction_id``, if any."""
+        return connection.execute(
+            select(deduction_rejections).where(
+                deduction_rejections.c.transaction_id == transaction_id
+            )
+        ).one_or_none()
+
+    def record_rejection(
+        self,
+        transaction_id: UUID,
+        user_id: str,
+        points: int,
+        reason: str,
+        event_id: UUID | None,
+        *,
+        connection: Connection,
+    ) -> None:
+        """Remember that the deduction for ``transaction_id`` was rejected."""
+        connection.execute(
+            postgresql_insert(deduction_rejections)
+            .values(
+                transaction_id=transaction_id,
+                user_id=user_id,
+                points=points,
+                reason=reason,
+                event_id=event_id,
+            )
+            .on_conflict_do_nothing(index_elements=[deduction_rejections.c.transaction_id])
+        )
 
     @staticmethod
     def _existing_operation(connection: Connection, transaction_id: UUID, operation: str):

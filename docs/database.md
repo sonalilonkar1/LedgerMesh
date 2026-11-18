@@ -16,6 +16,7 @@ Each service owns one PostgreSQL database (`infra/compose.yaml`) and the only co
 | Wallet | `wallets` | Point balance and optimistic-concurrency `version` per user |
 | | `wallet_operations` | One row per deduction or refund of a transaction; an early refund stores a deduction `tombstone` that cancels the late deduction |
 | | `participant_transactions` | 2PC participant state per transaction |
+| | `deduction_rejections` | A rejected Saga deduction per transaction (LM-020), so a later command for the same transaction gets the same rejection |
 | Catalog | `rewards` | Point cost, total and available inventory, `version` |
 | | `reservations` | One reservation per transaction: `reserved`, `released`, `fulfilled` or `tombstone` |
 | | `participant_transactions` | 2PC participant state per transaction |

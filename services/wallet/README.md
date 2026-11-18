@@ -102,6 +102,16 @@ command still commits its rejection reply.
 - **Duplicates:** a redelivered command is a duplicate in the inbox. A command
   re-sent with a new `event_id` for the same transaction replies with outcome
   `duplicate` and changes nothing.
+- **Outcomes belong to the transaction:** a rejected deduction is stored in
+  `deduction_rejections`, so a later command for the same transaction gets the
+  same rejection even if the wallet is topped up or created afterwards. A
+  genuinely new redemption uses a new `transaction_id`.
+- **Identity:** `cancelled` and `duplicate` are returned only when the user and
+  points match the stored record. Any other body reusing the transaction id is a
+  `conflict`, and a conflicting early refund is dead-lettered.
+- **Workflow step:** a deduction must be step 1, the first Saga step in the
+  Coordinator's state machine (LM-010), and a refund must be a later
+  compensation step. Ordering across messages is checked by LM-026.
 - **Early refund:** a refund with no deduction stores a deduction tombstone
   (using the command's `points`) and replies `cancelled_before_deduction`. The
   late deduction is rejected with reason `cancelled`.

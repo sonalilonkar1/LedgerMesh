@@ -48,9 +48,21 @@ async def run(stop: asyncio.Event) -> None:
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     producer = create_producer(bootstrap_servers())
     consumer = create_consumer(bootstrap_servers(), CONSUMER_GROUP, WALLET_COMMANDS.name)
-    await producer.start()
-    await consumer.start()
+    # Every client that started is stopped, even if a later start or the run fails.
+    started = []
+    try:
+        await producer.start()
+        started.append(producer)
+        await consumer.start()
+        started.append(consumer)
+        await _serve(stop, sessions, producer, consumer)
+    finally:
+        for client in reversed(started):
+            await client.stop()
+        await engine.dispose()
 
+
+async def _serve(stop: asyncio.Event, sessions, producer, consumer) -> None:
     async def dead_letter(record, error: Exception) -> None:
         # Retry topics and alerting arrive with LM-024; until then a command that
         # can never succeed is parked on the DLQ instead of blocking its partition.
@@ -67,12 +79,7 @@ async def run(stop: asyncio.Event) -> None:
         consumer, sessions, name=CONSUMER_GROUP, handler=handler, on_dead_letter=dead_letter
     )
     publisher = OutboxPublisher(sessions, producer, name="wallet")
-    try:
-        await asyncio.gather(inbox_consumer.run(stop), publisher.run(stop))
-    finally:
-        await consumer.stop()
-        await producer.stop()
-        await engine.dispose()
+    await asyncio.gather(inbox_consumer.run(stop), publisher.run(stop))
 
 
 def main() -> None:

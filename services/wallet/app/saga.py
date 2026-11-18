@@ -22,10 +22,22 @@ Results (to the Coordinator, keyed by ``transaction_id``):
 - ``wallet.points_refunded``: outcome ``applied``, ``duplicate`` or
   ``cancelled_before_deduction``
 
-A refund that arrives before its deduction stores a deduction tombstone
-(ADR-001 section 7.1), so the late deduction is answered with ``cancelled``
-instead of being applied. Malformed commands raise ``InvalidCommand``, a
-``PermanentError``, and are dead-lettered by ``InboxConsumer``.
+Outcomes belong to the transaction, not to one command delivery:
+
+- A rejected deduction is stored in ``deduction_rejections``. A later command
+  for the same transaction (a re-send with a new event id, or a delayed copy)
+  gets the same rejection, even if the wallet has since been topped up.
+- A refund that arrives before its deduction stores a deduction tombstone
+  (ADR-001 section 7.1), so the late deduction is answered with ``cancelled``
+  instead of being applied.
+- ``cancelled`` and ``duplicate`` are returned only when the user and points
+  match the stored record. Any other body reusing the transaction id is a
+  ``conflict``.
+
+Commands are checked against their place in the Saga: a deduction is step 1 and
+a refund is a later compensation step. Malformed commands raise
+``InvalidCommand``, a ``PermanentError``, and are dead-lettered by
+``InboxConsumer``.
 """
 
 from __future__ import annotations
@@ -60,6 +72,7 @@ REFUND_POINTS = "wallet.refund_points"
 POINTS_DEDUCTED = "wallet.points_deducted"
 DEDUCTION_REJECTED = "wallet.deduction_rejected"
 POINTS_REFUNDED = "wallet.points_refunded"
+DEDUCT_STEP = 1
 
 
 class InvalidCommand(PermanentError):
@@ -81,6 +94,13 @@ def parse_command(envelope: EventEnvelope) -> WalletCommand:
         raise InvalidCommand("Wallet commands must target the wallet aggregate")
     if envelope.workflow_step is None or envelope.workflow_step < 1:
         raise InvalidCommand("Wallet commands must carry a positive workflow_step")
+    # In the Coordinator's Saga state machine (LM-010) the deduction is the first
+    # step (REQUESTED is 0, DEDUCTING_POINTS is 1) and a refund is always a later
+    # compensation step. Ordering across messages is checked by LM-026.
+    if envelope.event_type == DEDUCT_POINTS and envelope.workflow_step != DEDUCT_STEP:
+        raise InvalidCommand(f"a deduction must be workflow_step {DEDUCT_STEP}")
+    if envelope.event_type == REFUND_POINTS and envelope.workflow_step <= DEDUCT_STEP:
+        raise InvalidCommand("a refund must be a compensation step after the deduction")
     if envelope.aggregate_version is not None:
         # ADR-001 section 5: only the owning service assigns aggregate versions.
         raise InvalidCommand("commands must not carry an aggregate_version")
@@ -139,6 +159,12 @@ class WalletSagaHandler:
         transaction_id = command.envelope.transaction_id
         try:
             with connection.begin_nested():
+                # Lock first, so the stored-outcome check below and the deduction
+                # see the same state as any competing command for this wallet.
+                self.repository.lock_wallet(command.user_id, connection=connection)
+                earlier = self._earlier_rejection(connection, command)
+                if earlier is not None:
+                    return earlier
                 record = self.repository.deduct(
                     command.user_id,
                     transaction_id,
@@ -147,12 +173,23 @@ class WalletSagaHandler:
                     connection=connection,
                 )
         except InsufficientPoints as error:
-            return self._rejected(command, "insufficient_points", error.detail)
+            return self._reject_and_remember(
+                connection, command, "insufficient_points", error.detail
+            )
         except WalletNotFound as error:
-            return self._rejected(command, "wallet_not_found", error.detail)
+            earlier = self._earlier_rejection(connection, command)
+            if earlier is not None:
+                return earlier
+            return self._reject_and_remember(connection, command, "wallet_not_found", error.detail)
         except OperationConflict as error:
-            status = self.repository.deduction_status(transaction_id, connection=connection)
-            if status == "tombstone":
+            stored = self.repository.stored_deduction(transaction_id, connection=connection)
+            # "cancelled" only for the exact deduction an early refund cancelled;
+            # any other body reusing the transaction id stays a conflict.
+            if (
+                stored is not None
+                and stored.status == "tombstone"
+                and self._same_deduction(stored, command)
+            ):
                 logger.warning(
                     "rejecting late deduction %s for transaction %s: already cancelled",
                     command.envelope.event_id,
@@ -226,6 +263,46 @@ class WalletSagaHandler:
                 "outcome": "cancelled_before_deduction",
             },
         )
+
+    def _earlier_rejection(
+        self, connection: Connection, command: WalletCommand
+    ) -> EventEnvelope | None:
+        """Return the stored rejection for this transaction, if there is one.
+
+        A rejection belongs to the transaction, so a later command for it (a
+        re-send with a new event id, or a delayed copy) gets the same answer even
+        if the wallet has since been topped up or created.
+        """
+        stored = self.repository.stored_rejection(
+            command.envelope.transaction_id, connection=connection
+        )
+        if stored is None:
+            return None
+        if not self._same_deduction(stored, command):
+            return self._rejected(
+                command, "conflict", "The transaction ID was rejected for a different deduction."
+            )
+        return self._rejected(
+            command, stored.reason, "The deduction was already rejected for this transaction."
+        )
+
+    def _reject_and_remember(
+        self, connection: Connection, command: WalletCommand, reason: str, detail: str
+    ) -> EventEnvelope:
+        with connection.begin_nested():
+            self.repository.record_rejection(
+                command.envelope.transaction_id,
+                command.user_id,
+                command.points,
+                reason,
+                command.envelope.event_id,
+                connection=connection,
+            )
+        return self._rejected(command, reason, detail)
+
+    @staticmethod
+    def _same_deduction(row, command: WalletCommand) -> bool:
+        return row.user_id == command.user_id and row.points == command.points
 
     @staticmethod
     def _rejected(command: WalletCommand, reason: str, detail: str) -> EventEnvelope:

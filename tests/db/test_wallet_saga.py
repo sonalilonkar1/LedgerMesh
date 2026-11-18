@@ -6,15 +6,24 @@ Wallet change and the reply in the outbox commit or roll back together.
 """
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from ledgermesh_messaging import EventEnvelope, InboxConsumer, inbox, outbox, process_once
-from sqlalchemy import Engine, func, select
+from ledgermesh_messaging import (
+    EventEnvelope,
+    InboxConsumer,
+    TransientError,
+    inbox,
+    outbox,
+    process_once,
+)
+from sqlalchemy import Engine, func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from services.wallet.app.db.schema import wallet_operations, wallets
+from services.wallet.app.db.schema import deduction_rejections, wallet_operations, wallets
 from services.wallet.app.repository import PostgresWalletRepository
 from services.wallet.app.saga import (
     DEDUCT_POINTS,
@@ -159,8 +168,54 @@ def test_rejected_deduction_replies_without_changing_the_balance(
     assert reply.event_type == DEDUCTION_REJECTED
     assert reply.payload["reason"] == reason
     assert reply.aggregate_version is None
-    # The rejection is recorded, so a redelivery is a duplicate, not a new attempt.
+    # The rejection is stored for the transaction, not only for this event id.
     assert count(wallet_db, inbox) == 1
+    assert count(wallet_db, deduction_rejections) == 1
+
+
+def test_rejection_is_kept_after_the_wallet_is_topped_up(database_url, wallet_db):
+    # The Coordinator already treated T as failed; a later command for T must not
+    # deduct just because the balance has grown since.
+    transaction_id = uuid4()
+    deliver(database_url, wallet_db, command(DEDUCT_POINTS, transaction_id, points=101))
+    with wallet_db.begin() as connection:
+        connection.execute(update(wallets).values(available_points=500))
+
+    deliver(database_url, wallet_db, command(DEDUCT_POINTS, transaction_id, points=101))
+
+    assert balance(wallet_db) == (500, 0)
+    assert count(wallet_db, wallet_operations) == 0
+    first, second = replies(wallet_db)
+    assert (first.payload["reason"], second.payload["reason"]) == (
+        "insufficient_points",
+        "insufficient_points",
+    )
+
+
+def test_wallet_not_found_rejection_is_kept_after_the_wallet_is_created(database_url, wallet_db):
+    transaction_id = uuid4()
+    late = {"user_id": "user-late", "points": 10}
+    deliver(database_url, wallet_db, command(DEDUCT_POINTS, transaction_id, **late))
+    with wallet_db.begin() as connection:
+        connection.execute(wallets.insert().values(user_id="user-late", available_points=500))
+
+    deliver(database_url, wallet_db, command(DEDUCT_POINTS, transaction_id, **late))
+
+    assert count(wallet_db, wallet_operations) == 0
+    assert [reply.payload["reason"] for reply in replies(wallet_db)] == [
+        "wallet_not_found",
+        "wallet_not_found",
+    ]
+
+
+def test_different_deduction_for_a_rejected_transaction_is_a_conflict(database_url, wallet_db):
+    transaction_id = uuid4()
+    deliver(database_url, wallet_db, command(DEDUCT_POINTS, transaction_id, points=101))
+
+    deliver(database_url, wallet_db, command(DEDUCT_POINTS, transaction_id, points=50))
+
+    assert balance(wallet_db) == (100, 0)
+    assert replies(wallet_db)[-1].payload["reason"] == "conflict"
 
 
 def test_transaction_id_reused_for_a_different_deduction_is_rejected(database_url, wallet_db):
@@ -253,6 +308,82 @@ def test_repeated_early_refund_keeps_one_tombstone(database_url, wallet_db):
     assert outcomes == ["cancelled_before_deduction", "cancelled_before_deduction"]
 
 
+@pytest.mark.parametrize(
+    "late",
+    [{"points": 50}, {"user_id": "user-2"}],
+    ids=["different-points", "different-user"],
+)
+def test_deduction_that_differs_from_the_cancelled_one_is_a_conflict(database_url, wallet_db, late):
+    # A tombstone cancels one exact deduction; reusing its transaction id for
+    # another body is a conflict, not a valid cancellation.
+    with wallet_db.begin() as connection:
+        connection.execute(wallets.insert().values(user_id="user-2", available_points=100))
+    transaction_id = uuid4()
+    deliver(database_url, wallet_db, command(REFUND_POINTS, transaction_id, points=40, step=3))
+
+    deliver(database_url, wallet_db, command(DEDUCT_POINTS, transaction_id, **late))
+
+    assert replies(wallet_db)[-1].payload["reason"] == "conflict"
+    assert count(wallet_db, wallet_operations) == 1
+
+
+def test_repeated_early_refund_with_a_different_amount_is_not_a_duplicate(database_url, wallet_db):
+    transaction_id = uuid4()
+    deliver(database_url, wallet_db, command(REFUND_POINTS, transaction_id, points=40, step=3))
+
+    with pytest.raises(InvalidCommand):
+        deliver(database_url, wallet_db, command(REFUND_POINTS, transaction_id, points=50, step=3))
+
+    assert count(wallet_db, wallet_operations) == 1
+    assert len(replies(wallet_db)) == 1
+
+
+def test_concurrent_deduction_and_refund_never_leave_an_unmatched_deduction(
+    database_url, wallet_db
+):
+    # Race a deduction against its refund many times. Each transaction must end
+    # either deducted-then-refunded or cancelled with no deduction (INV-06).
+    def deliver_with_retries(envelope):
+        # InboxConsumer retries a TransientError; mirror that here.
+        for _ in range(5):
+            try:
+                return deliver(database_url, wallet_db, envelope)
+            except TransientError:
+                continue
+        raise AssertionError("refund did not settle after retries")
+
+    for _ in range(10):
+        transaction_id = uuid4()
+        barrier = Barrier(2)
+
+        def send(envelope, barrier=barrier):
+            barrier.wait()
+            return deliver_with_retries(envelope)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(
+                executor.map(
+                    send,
+                    [
+                        command(DEDUCT_POINTS, transaction_id, points=40, step=1),
+                        command(REFUND_POINTS, transaction_id, points=40, step=3),
+                    ],
+                )
+            )
+
+        with wallet_db.connect() as connection:
+            rows = connection.execute(
+                select(wallet_operations.c.operation, wallet_operations.c.status).where(
+                    wallet_operations.c.transaction_id == transaction_id
+                )
+            ).all()
+        assert sorted(tuple(row) for row in rows) in (
+            [("deduct", "applied"), ("refund", "applied")],
+            [("deduct", "tombstone")],
+        )
+        assert balance(wallet_db)[0] == 100
+
+
 # Criterion 1: commands are validated before anything is applied
 
 
@@ -268,6 +399,8 @@ def test_repeated_early_refund_keeps_one_tombstone(database_url, wallet_db):
         {"payload": {"user_id": "user-1", "points": 0}},
         {"payload": {"user_id": "user-1", "points": "10"}},
         {"payload": {"user_id": "user-1"}},
+        {"workflow_step": 3},
+        {"event_type": REFUND_POINTS},
     ],
     ids=[
         "unknown-command",
@@ -279,6 +412,8 @@ def test_repeated_early_refund_keeps_one_tombstone(database_url, wallet_db):
         "zero-points",
         "string-points",
         "missing-points",
+        "deduction-at-a-compensation-step",
+        "refund-at-the-forward-step",
     ],
 )
 def test_invalid_command_changes_nothing(database_url, wallet_db, overrides):
