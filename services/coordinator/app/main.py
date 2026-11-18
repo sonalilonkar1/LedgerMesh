@@ -1,3 +1,5 @@
+import os
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Annotated
 from uuid import UUID
@@ -8,9 +10,16 @@ from fastapi.responses import JSONResponse
 from services.coordinator.app.errors import CoordinatorError
 from services.coordinator.app.models import (
     CreateRedemptionRequest,
+    InDoubtTransactionView,
     Problem,
+    RecoveryRunResponse,
     RedemptionResponse,
     TransitionView,
+)
+from services.coordinator.app.recovery import (
+    RecoveryWorker,
+    TwoPhaseCommitRecovery,
+    recovery_enabled,
 )
 from services.coordinator.app.repository import PostgresCoordinatorRepository, get_engine
 from services.coordinator.app.service import CoordinatorService
@@ -18,7 +27,22 @@ from services.coordinator.app.two_phase_commit import TwoPhaseCommitWorkflow, de
 
 SERVICE_NAME = "coordinator"
 
-app = FastAPI(title="LedgerMesh Redemption Coordinator", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    worker: RecoveryWorker | None = None
+    if recovery_enabled():
+        interval = float(os.environ.get("COORDINATOR_RECOVERY_INTERVAL_SECONDS", "5"))
+        worker = RecoveryWorker(get_two_phase_commit_recovery(), interval)
+        worker.start()
+    try:
+        yield
+    finally:
+        if worker:
+            worker.stop()
+
+
+app = FastAPI(title="LedgerMesh Redemption Coordinator", version="0.1.0", lifespan=lifespan)
 
 
 @lru_cache
@@ -35,6 +59,17 @@ def get_two_phase_commit_workflow() -> TwoPhaseCommitWorkflow:
 
 
 TwoPhaseCommitDependency = Annotated[TwoPhaseCommitWorkflow, Depends(get_two_phase_commit_workflow)]
+
+
+@lru_cache
+def get_two_phase_commit_recovery() -> TwoPhaseCommitRecovery:
+    repository = PostgresCoordinatorRepository(get_engine())
+    return TwoPhaseCommitRecovery(repository, default_workflow(repository))
+
+
+TwoPhaseCommitRecoveryDependency = Annotated[
+    TwoPhaseCommitRecovery, Depends(get_two_phase_commit_recovery)
+]
 IdempotencyKey = Annotated[
     str,
     Header(alias="Idempotency-Key", min_length=1, max_length=128),
@@ -111,3 +146,25 @@ def execute_two_phase_commit(
     transaction_id: UUID, workflow: TwoPhaseCommitDependency
 ) -> RedemptionResponse:
     return RedemptionResponse.model_validate(workflow.execute(transaction_id), from_attributes=True)
+
+
+@app.get(
+    "/internal/v1/2pc/in-doubt",
+    response_model=list[InDoubtTransactionView],
+    tags=["internal"],
+)
+def list_in_doubt_transactions(
+    recovery: TwoPhaseCommitRecoveryDependency,
+) -> list[InDoubtTransactionView]:
+    return recovery.in_doubt()
+
+
+@app.post(
+    "/internal/v1/2pc/recovery/run",
+    response_model=RecoveryRunResponse,
+    tags=["internal"],
+)
+def run_two_phase_commit_recovery(
+    recovery: TwoPhaseCommitRecoveryDependency,
+) -> RecoveryRunResponse:
+    return recovery.run_once()

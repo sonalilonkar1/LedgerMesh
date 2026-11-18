@@ -196,3 +196,37 @@ def test_audit_outage_does_not_reverse_terminal_outcome_and_retry_delivers():
     assert second.status == "COMMITTED"
     assert repository.pending is None
     assert len(audit.events) == 1
+
+
+def test_recovery_before_durable_decision_uses_presumed_abort_without_reprepare():
+    wallet = FakeWallet()
+    catalog = FakeCatalog()
+    service, repository, audit = workflow(wallet=wallet, catalog=catalog)
+    repository.record = repository.record.__class__(
+        **(repository.record.__dict__ | {"status": "PREPARING"})
+    )
+
+    result = service.recover(repository.record.transaction_id)
+
+    assert result.status == "ABORTED"
+    assert repository.log[:3] == [
+        "persist:ABORT_DECIDED",
+        "wallet:abort",
+        "catalog:abort",
+    ]
+    assert audit.events[0].event_type == "redemption.aborted"
+
+
+def test_recovery_after_durable_commit_retransmits_commit_without_prepare():
+    wallet = FakeWallet(fail_prepare=True)
+    catalog = FakeCatalog(fail_prepare=True)
+    service, repository, _audit = workflow(wallet=wallet, catalog=catalog)
+    repository.record = repository.record.__class__(
+        **(repository.record.__dict__ | {"status": "COMMIT_DECIDED"})
+    )
+
+    result = service.recover(repository.record.transaction_id)
+
+    assert result.status == "COMMITTED"
+    assert repository.log[:2] == ["wallet:commit", "catalog:commit"]
+    assert "persist:ABORT_DECIDED" not in repository.log

@@ -59,3 +59,18 @@ class Problem(StrictModel):
     status: int = Field(ge=400, le=599)
     detail: str
     transaction_id: UUID | None = None
+
+
+class InDoubtTransactionView(StrictModel):
+    transaction_id: UUID
+    status: Literal["PREPARING", "COMMIT_DECIDED", "ABORT_DECIDED"]
+    workflow_step: int = Field(ge=0)
+    updated_at: datetime
+    recovery_action: Literal["PRESUME_ABORT", "RETRANSMIT_COMMIT", "RETRANSMIT_ABORT"]
+
+
+class RecoveryRunResponse(StrictModel):
+    scanned: int = Field(ge=0)
+    recovered: int = Field(ge=0)
+    still_in_doubt: int = Field(ge=0)
+    failed: int = Field(ge=0)
