@@ -1,0 +1,158 @@
+openapi: 3.1.0
+info:
+  title: LedgerMesh Audit Ledger API
+  version: 1.0.0
+  description: Append-only audit event ingestion and transaction timeline queries.
+servers:
+  - url: http://audit-ledger:8003
+paths:
+  /v1/audit-events:
+    post:
+      operationId: appendAuditEvent
+      summary: Idempotently append one complete LedgerMesh event envelope
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EventEnvelope"
+      responses:
+        "200":
+          description: Newly appended event or the identical previously stored event
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditAppendResult"
+        "409":
+          description: The event ID already exists with different envelope content
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  /v1/transactions/{transaction_id}/events:
+    get:
+      operationId: listTransactionAuditEvents
+      summary: Return a transaction timeline in immutable ledger-recording order
+      parameters:
+        - name: transaction_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Events ordered by ascending ledger sequence
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditEventView"
+components:
+  schemas:
+    EventEnvelope:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - event_id
+        - event_type
+        - transaction_id
+        - correlation_id
+        - causation_id
+        - aggregate_type
+        - aggregate_id
+        - aggregate_version
+        - workflow_step
+        - fencing_token
+        - occurred_at
+        - payload
+      properties:
+        schema_version:
+          const: 1
+        event_id:
+          type: string
+          format: uuid
+        event_type:
+          type: string
+          minLength: 1
+          pattern: '^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$'
+        transaction_id:
+          type: string
+          format: uuid
+        correlation_id:
+          type: string
+          format: uuid
+        causation_id:
+          type: [string, "null"]
+          format: uuid
+        aggregate_type:
+          type: string
+          minLength: 1
+        aggregate_id:
+          type: string
+          minLength: 1
+        aggregate_version:
+          type: [integer, "null"]
+          minimum: 0
+        workflow_step:
+          type: [integer, "null"]
+          minimum: 0
+        fencing_token:
+          type: [integer, "null"]
+          minimum: 0
+        occurred_at:
+          type: string
+          format: date-time
+          pattern: '(Z|[+-][0-9]{2}:[0-9]{2})$'
+        payload:
+          type: object
+    AuditEventView:
+      type: object
+      additionalProperties: false
+      required: [ledger_sequence, recorded_at, envelope]
+      properties:
+        ledger_sequence:
+          type: integer
+          minimum: 1
+        recorded_at:
+          type: string
+          format: date-time
+        envelope:
+          $ref: "#/components/schemas/EventEnvelope"
+    AuditAppendResult:
+      type: object
+      additionalProperties: false
+      required: [ledger_sequence, recorded_at, envelope, outcome]
+      properties:
+        ledger_sequence:
+          type: integer
+          minimum: 1
+        recorded_at:
+          type: string
+          format: date-time
+        envelope:
+          $ref: "#/components/schemas/EventEnvelope"
+        outcome:
+          type: string
+          enum: [appended, duplicate]
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, detail]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+        event_id:
+          type: [string, "null"]
+          format: uuid
