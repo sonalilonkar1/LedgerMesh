@@ -19,6 +19,7 @@ Each service owns one PostgreSQL database (`infra/compose.yaml`) and the only co
 | Catalog | `rewards` | Point cost, total and available inventory, `version` |
 | | `reservations` | One reservation per transaction: `reserved`, `released`, `fulfilled` or `tombstone` |
 | | `participant_transactions` | 2PC participant state per transaction |
+| | `catalog_saga_outcomes` | Durable reserve/release result per transaction and command type, including rejections retried with a new event ID |
 | Coordinator | `redemptions` | One row per redemption: idempotency key, mode, status, current workflow step and command |
 | | `redemption_transitions` | History of status changes |
 | Audit Ledger | `audit_events` | Append-only record of every event, one row per `event_id` |

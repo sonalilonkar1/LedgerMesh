@@ -27,7 +27,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 metadata = MetaData()
 
@@ -105,6 +105,30 @@ participant_transactions = Table(
         "OR (correlation_id IS NOT NULL AND request_hash IS NOT NULL "
         "AND reward_id IS NOT NULL AND quantity IS NOT NULL)",
         name="ck_participant_transactions_request_identity",
+    ),
+)
+
+# Durable Saga command outcomes. The inbox deduplicates one event_id; this table
+# also makes a retry with a new event_id return the original transaction outcome.
+catalog_saga_outcomes = Table(
+    "catalog_saga_outcomes",
+    metadata,
+    Column("transaction_id", UUID(as_uuid=True), primary_key=True),
+    Column("command_type", String(32), primary_key=True),
+    Column("reward_id", Text, nullable=False),
+    Column("quantity", Integer, nullable=False),
+    Column("result_event_type", String(255), nullable=False),
+    Column("result_payload", JSONB, nullable=False),
+    Column("aggregate_version", BigInteger),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint(
+        "command_type IN ('reserve', 'release')",
+        name="ck_catalog_saga_outcomes_command_type",
+    ),
+    CheckConstraint("quantity > 0", name="ck_catalog_saga_outcomes_quantity_positive"),
+    CheckConstraint(
+        "aggregate_version IS NULL OR aggregate_version >= 0",
+        name="ck_catalog_saga_outcomes_version_non_negative",
     ),
 )
 

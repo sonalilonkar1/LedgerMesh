@@ -264,6 +264,18 @@ def test_baseline_restores_exact_catalog_state_and_clears_all_activity(database_
         ),
     )
     run(engine, participant("catalog", "PREPARED"))
+    run(
+        engine,
+        catalog.catalog_saga_outcomes.insert().values(
+            transaction_id=uuid4(),
+            command_type="reserve",
+            reward_id="reward-coffee",
+            quantity=1,
+            result_event_type="catalog.inventory_reserved",
+            result_payload={"outcome": "applied"},
+            aggregate_version=1,
+        ),
+    )
     run(engine, update(catalog.rewards).values(available_inventory=0, version=2))
     add_messaging_rows(engine, "catalog")
 
@@ -273,6 +285,7 @@ def test_baseline_restores_exact_catalog_state_and_clears_all_activity(database_
     assert versions(engine, catalog.rewards) == {0}
     assert count(engine, catalog.reservations) == 0
     assert count(engine, catalog.participant_transactions) == 0
+    assert count(engine, catalog.catalog_saga_outcomes) == 0
     assert_messaging_rows_cleared(engine, "catalog")
 
 

@@ -40,3 +40,5 @@ htmlcov/
 
 # Runtime logs
 *.log
+
+artifacts/
