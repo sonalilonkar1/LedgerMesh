@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 
 from services.wallet.app.db.schema import wallet_operations, wallets
 from services.wallet.app.errors import (
+    DeductionAlreadyApplied,
     DeductionNotFound,
     InsufficientPoints,
     OperationConflict,
@@ -225,6 +226,78 @@ class PostgresWalletRepository:
                 "The transaction ID is already used by a different refund.", transaction_id
             ) from error
         return self._operation_result(connection, operation, transaction_id, "refund")
+
+    def record_deduction_tombstone(
+        self,
+        user_id: str,
+        transaction_id: UUID,
+        points: int,
+        event_id: UUID | None,
+        *,
+        connection: Connection | None = None,
+    ) -> OperationRecord:
+        """Cancel a deduction that has not arrived yet (ADR-001 section 7.1).
+
+        Stores a ``deduct`` row with status ``tombstone``. It occupies the
+        deduction's unique key, so the late deduction is rejected instead of
+        applied. The balance and version are unchanged.
+        """
+        if connection is not None:
+            return self._record_deduction_tombstone(
+                connection, user_id, transaction_id, points, event_id
+            )
+        with self.engine.begin() as owned_connection:
+            return self._record_deduction_tombstone(
+                owned_connection, user_id, transaction_id, points, event_id
+            )
+
+    def _record_deduction_tombstone(
+        self,
+        connection: Connection,
+        user_id: str,
+        transaction_id: UUID,
+        points: int,
+        event_id: UUID | None,
+    ) -> OperationRecord:
+        # Same lock as deduct, so a deduction cannot slip in between the check
+        # and the insert.
+        self._locked_wallet(connection, user_id)
+        existing = self._existing_operation(connection, transaction_id, "deduct")
+        if existing is not None:
+            if existing.user_id != user_id:
+                raise OperationConflict(
+                    "The transaction ID belongs to another wallet.", transaction_id
+                )
+            if existing.status == "tombstone":
+                return self._operation_result(
+                    connection, existing, transaction_id, "deduct", duplicate=True
+                )
+            raise DeductionAlreadyApplied(
+                "The deduction has already been applied; refund it instead.", transaction_id
+            )
+        try:
+            tombstone = connection.execute(
+                insert(wallet_operations)
+                .values(
+                    transaction_id=transaction_id,
+                    user_id=user_id,
+                    operation="deduct",
+                    points=points,
+                    status="tombstone",
+                    event_id=event_id,
+                )
+                .returning(*wallet_operations.c)
+            ).one()
+        except IntegrityError as error:
+            raise OperationConflict(
+                "The transaction ID is already used by another operation.", transaction_id
+            ) from error
+        return self._operation_result(connection, tombstone, transaction_id, "deduct")
+
+    def deduction_status(self, transaction_id: UUID, *, connection: Connection) -> str | None:
+        """Return the stored deduction's status (``applied``/``tombstone``), if any."""
+        row = self._existing_operation(connection, transaction_id, "deduct")
+        return None if row is None else row.status
 
     @staticmethod
     def _existing_operation(connection: Connection, transaction_id: UUID, operation: str):
