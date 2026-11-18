@@ -208,3 +208,37 @@ def test_execute_route_is_available_in_test_environment(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["status"] == "COMMITTED"
+
+
+def test_recovery_before_durable_decision_uses_presumed_abort_without_reprepare():
+    wallet = FakeWallet()
+    catalog = FakeCatalog()
+    service, repository = workflow(wallet=wallet, catalog=catalog)
+    repository.record = repository.record.__class__(
+        **(repository.record.__dict__ | {"status": "PREPARING"})
+    )
+
+    result = service.recover(repository.record.transaction_id)
+
+    assert result.status == "ABORTED"
+    assert repository.log[:3] == [
+        "persist:ABORT_DECIDED",
+        "wallet:abort",
+        "catalog:abort",
+    ]
+    assert repository.log[-1] == "persist:ABORTED+outbox"
+
+
+def test_recovery_after_durable_commit_retransmits_commit_without_prepare():
+    wallet = FakeWallet(fail_prepare=True)
+    catalog = FakeCatalog(fail_prepare=True)
+    service, repository = workflow(wallet=wallet, catalog=catalog)
+    repository.record = repository.record.__class__(
+        **(repository.record.__dict__ | {"status": "COMMIT_DECIDED"})
+    )
+
+    result = service.recover(repository.record.transaction_id)
+
+    assert result.status == "COMMITTED"
+    assert repository.log[:2] == ["wallet:commit", "catalog:commit"]
+    assert "persist:ABORT_DECIDED" not in repository.log

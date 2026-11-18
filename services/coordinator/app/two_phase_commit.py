@@ -130,6 +130,30 @@ class TwoPhaseCommitWorkflow:
         with self._workflow_lock(transaction_id):
             return self._execute_locked(transaction_id)
 
+    def recover(self, transaction_id: UUID) -> WorkflowRecord:
+        """Resume a transaction using only its durable state.
+
+        A PREPARING record has no durable decision. Recovery therefore uses
+        presumed abort; it must never repeat prepare and invent a COMMIT after
+        a crash. Already-decided records retransmit the same decision.
+        """
+        with self._workflow_lock(transaction_id):
+            record = self.repository.get_workflow(transaction_id)
+            if record.coordination_mode != "two_phase_commit":
+                raise InvalidTransition("The redemption is not a 2PC transaction.", transaction_id)
+            if record.status == "PREPARING":
+                self.repository.transition(
+                    transaction_id,
+                    "ABORT_DECIDED",
+                    "recovery presumed abort: no durable decision existed",
+                )
+                record = self.repository.get_workflow(transaction_id)
+            if record.status == "REQUESTED":
+                return self._execute_locked(transaction_id)
+            if record.status in {"COMMIT_DECIDED", "ABORT_DECIDED"}:
+                record = self._deliver_decision(record)
+            return self.repository.get_workflow(transaction_id)
+
     @contextmanager
     def _workflow_lock(self, transaction_id: UUID) -> Iterator[None]:
         connection = self.lock_engine.connect().execution_options(isolation_level="AUTOCOMMIT")

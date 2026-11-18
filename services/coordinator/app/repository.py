@@ -82,6 +82,16 @@ class WorkflowRecord(RedemptionRecord):
     workflow_step: int = 0
 
 
+RECOVERABLE_2PC_STATES = (
+    "REQUESTED",
+    "PREPARING",
+    "COMMIT_DECIDED",
+    "ABORT_DECIDED",
+)
+
+IN_DOUBT_2PC_STATES = ("PREPARING", "COMMIT_DECIDED", "ABORT_DECIDED")
+
+
 class CoordinatorRepository(Protocol):
     def create(
         self,
@@ -200,6 +210,34 @@ class PostgresCoordinatorRepository:
             raise RedemptionNotFound(f"Redemption {transaction_id} does not exist.", transaction_id)
         return self._workflow(row)
 
+    def list_recoverable_2pc(self, limit: int = 100) -> list[WorkflowRecord]:
+        """Return durable 2PC work in a stable order for a bounded recovery pass."""
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(redemptions)
+                .where(
+                    redemptions.c.coordination_mode == "two_phase_commit",
+                    redemptions.c.status.in_(RECOVERABLE_2PC_STATES),
+                )
+                .order_by(redemptions.c.updated_at.asc(), redemptions.c.transaction_id.asc())
+                .limit(limit)
+            ).all()
+        return [self._workflow(row) for row in rows]
+
+    def list_in_doubt_2pc(self, limit: int = 100) -> list[WorkflowRecord]:
+        """Return transactions that need a recovery decision or acknowledgement."""
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(redemptions)
+                .where(
+                    redemptions.c.coordination_mode == "two_phase_commit",
+                    redemptions.c.status.in_(IN_DOUBT_2PC_STATES),
+                )
+                .order_by(redemptions.c.updated_at.asc(), redemptions.c.transaction_id.asc())
+                .limit(limit)
+            ).all()
+        return [self._workflow(row) for row in rows]
+
     def record_quote(
         self, transaction_id: UUID, point_cost: int, reward_version: int
     ) -> WorkflowRecord:
@@ -257,28 +295,6 @@ class PostgresCoordinatorRepository:
             )
         del updated
         return workflow, envelope
-
-    def pending_audit(self, transaction_id: UUID) -> EventEnvelope | None:
-        with self.engine.connect() as connection:
-            row = connection.execute(
-                select(outbox.c.envelope)
-                .where(
-                    outbox.c.message_key == str(transaction_id),
-                    outbox.c.topic == "redemption.events",
-                    outbox.c.published_at.is_(None),
-                )
-                .order_by(outbox.c.id.desc())
-                .limit(1)
-            ).one_or_none()
-        return EventEnvelope.model_validate(row.envelope) if row else None
-
-    def mark_audit_published(self, event_id: UUID) -> None:
-        with self.engine.begin() as connection:
-            connection.execute(
-                update(outbox)
-                .where(outbox.c.event_id == event_id)
-                .values(published_at=datetime.now(UTC), attempts=outbox.c.attempts + 1)
-            )
 
     def transition(
         self,
