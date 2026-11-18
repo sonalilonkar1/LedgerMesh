@@ -1,10 +1,45 @@
-# Cross-service tests
+# 2PC integration and blocking experiments (LM-017)
 
-Tests that exercise more than one LedgerMesh service belong here.
+Run the cross-service suite against local Compose PostgreSQL:
+
+```bash
+make infra-up
+make test-2pc-integration
+```
+
+The suite creates four temporary databases, migrates each with its service-owned
+schema, and always rolls back leaked prepared transactions before dropping them.
+It never modifies the normal Coordinator, Wallet, Catalog, or Audit Ledger data.
+
+The scenarios prove:
+
+- a successful 2PC redemption commits Wallet, Catalog, Coordinator, and Audit;
+- a Wallet or Catalog NO vote aborts all prepared effects;
+- a prepared Wallet transaction blocks a competing update while the Coordinator
+  is unavailable;
+- restart recovery releases that lock using presumed abort;
+- the post-test INV-01 through INV-06 checker reports zero violations;
+- no PostgreSQL prepared transaction remains after a completed experiment.
+
+The blocking test uses a 700 ms PostgreSQL `statement_timeout`. Its measured
+`prepared_lock_blocking_seconds` value and the invariant count for every
+scenario are recorded in `artifacts/2pc-integration.json`. JUnit results are
+written to `artifacts/2pc-integration.xml`; CI retains both for 14 days.
+
+To use a different PostgreSQL server:
+
+```bash
+LM_TEST_POSTGRES_URL=postgresql+psycopg://user:password@host:5432/database \
+  make test-2pc-integration
+```
+
+The PostgreSQL role must be allowed to create temporary databases and the
+server must have `max_prepared_transactions` greater than zero.
 
 - Unit tests remain next to their owning service.
 - Messaging-library tests remain under `libs/messaging/tests`.
-- Cross-service integration, failure-injection, and invariant tests will be added here by later issues.
+- Cross-service integration, failure-injection, and invariant tests live under
+  `tests/integration`; LM-017 provides the initial 2PC suite.
 
 Database-backed component tests live under `tests/db`. The LM-021 suite in
 `tests/db/test_catalog_saga.py` covers transactional Catalog commands, durable
