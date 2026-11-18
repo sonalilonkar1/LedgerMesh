@@ -128,7 +128,9 @@ Expected response:
 {"status":"ok","service":"coordinator"}
 ```
 
-The current service applications are initial skeletons. Business APIs, persistence, transaction coordination, and observability will be added through their assigned LM issues.
+The Wallet Service includes its LM-007 balance, deduction, and refund API. See
+[the Wallet service guide](services/wallet/README.md). The other business APIs,
+transaction coordination, and observability are added through their assigned LM issues.
 
 ## Core Development Commands
 
