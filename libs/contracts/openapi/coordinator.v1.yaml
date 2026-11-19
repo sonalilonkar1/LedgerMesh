@@ -44,6 +44,45 @@ paths:
                 $ref: "#/components/schemas/RedemptionResponse"
         "404":
           $ref: "#/components/responses/Problem"
+  /internal/v1/redemptions/{transaction_id}/transitions:
+    post:
+      operationId: transitionRedemption
+      summary: Durably apply one valid Coordinator state transition
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransitionRequest"
+      responses:
+        "200":
+          description: Updated redemption state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RedemptionResponse"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
+    get:
+      operationId: listRedemptionTransitions
+      summary: Return durable transition history in ledger order
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+      responses:
+        "200":
+          description: Ordered transition history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TransitionView"
+        "404":
+          $ref: "#/components/responses/Problem"
 components:
   parameters:
     IdempotencyKey:
@@ -69,6 +108,81 @@ components:
           schema:
             $ref: "#/components/schemas/Problem"
   schemas:
+    TransitionRequest:
+      type: object
+      additionalProperties: false
+      required: [to_status]
+      properties:
+        to_status:
+          type: string
+          enum:
+            - REQUESTED
+            - PREPARING
+            - COMMIT_DECIDED
+            - ABORT_DECIDED
+            - COMMITTED
+            - ABORTED
+            - DEDUCTING_POINTS
+            - POINTS_DEDUCTED
+            - RESERVING_INVENTORY
+            - COMPENSATING
+            - COMPLETED
+            - FAILED
+            - COMPENSATED
+        reason:
+          type: [string, "null"]
+          maxLength: 2000
+    TransitionView:
+      type: object
+      additionalProperties: false
+      required: [sequence, from_status, to_status, workflow_step, reason, created_at]
+      properties:
+        sequence:
+          type: integer
+          minimum: 1
+        from_status:
+          type:
+            - string
+            - "null"
+          enum:
+            - null
+            - REQUESTED
+            - PREPARING
+            - COMMIT_DECIDED
+            - ABORT_DECIDED
+            - COMMITTED
+            - ABORTED
+            - DEDUCTING_POINTS
+            - POINTS_DEDUCTED
+            - RESERVING_INVENTORY
+            - COMPENSATING
+            - COMPLETED
+            - FAILED
+            - COMPENSATED
+        to_status:
+          type: string
+          enum:
+            - REQUESTED
+            - PREPARING
+            - COMMIT_DECIDED
+            - ABORT_DECIDED
+            - COMMITTED
+            - ABORTED
+            - DEDUCTING_POINTS
+            - POINTS_DEDUCTED
+            - RESERVING_INVENTORY
+            - COMPENSATING
+            - COMPLETED
+            - FAILED
+            - COMPENSATED
+        workflow_step:
+          type: integer
+          minimum: 0
+        reason:
+          type: [string, "null"]
+        created_at:
+          type: string
+          format: date-time
     CreateRedemptionRequest:
       type: object
       additionalProperties: false
