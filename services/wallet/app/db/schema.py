@@ -103,5 +103,25 @@ participant_transactions = Table(
     ),
 )
 
+deduction_rejections = Table(
+    "deduction_rejections",
+    metadata,
+    # A Saga deduction that was rejected (LM-020). The outcome belongs to the
+    # transaction, not to one command delivery, so a later command for the same
+    # transaction gets the same rejection instead of being applied after a top-up.
+    # No foreign key to wallets: "wallet_not_found" is a valid stored outcome.
+    Column("transaction_id", UUID(as_uuid=True), primary_key=True),
+    Column("user_id", Text, nullable=False),
+    Column("points", BigInteger, nullable=False),
+    Column("reason", String(32), nullable=False),
+    Column("event_id", UUID(as_uuid=True)),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint("points > 0", name="ck_deduction_rejections_points_positive"),
+    CheckConstraint(
+        "reason IN ('insufficient_points', 'wallet_not_found')",
+        name="ck_deduction_rejections_reason",
+    ),
+)
+
 inbox.to_metadata(metadata)
 outbox.to_metadata(metadata)
