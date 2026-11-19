@@ -44,11 +44,6 @@ class RedemptionResponse(StrictModel):
     updated_at: datetime
 
 
-class TransitionRequest(StrictModel):
-    to_status: RedemptionStatus
-    reason: str | None = Field(default=None, max_length=2000)
-
-
 class TransitionView(StrictModel):
     sequence: int
     from_status: RedemptionStatus | None

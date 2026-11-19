@@ -10,13 +10,18 @@ state transitions, and preserves enough state for later workflow recovery.
 |---|---|---|
 | `POST` | `/v1/redemptions` | Create or return an idempotent redemption |
 | `GET` | `/v1/redemptions/{transaction_id}` | Return the current durable state |
-| `POST` | `/internal/v1/redemptions/{transaction_id}/transitions` | Apply one valid internal transition |
 | `GET` | `/internal/v1/redemptions/{transaction_id}/transitions` | Return ordered transition history |
 
 Creation requires an `Idempotency-Key` header. Repeating the same body with the
 same key returns the existing transaction. Reusing the key with a different
 body returns `409`. The redemption row and initial `REQUESTED` transition are
 committed atomically.
+
+State changes are deliberately not exposed through HTTP. Only Coordinator
+workflow code can call the repository transition operation. This prevents an
+untrusted client from walking a transaction through valid-looking states and
+reporting success without the corresponding Wallet and Catalog effects. The
+internal history endpoint is read-only.
 
 ## State validation
 
@@ -28,6 +33,12 @@ states cannot transition again. Every accepted transition:
 - updates status, workflow step, version, and timestamp;
 - appends a durable `redemption_transitions` row;
 - commits both changes in one PostgreSQL transaction.
+
+Reapplying the current state is an idempotent no-op: the stored record is
+returned without advancing the version or workflow step and without appending
+another history row. `COMPENSATING -> COMPENSATING` is the one intentional
+self-loop because it records a new compensation attempt. Row locking also makes
+competing commit and abort decisions mutually exclusive.
 
 Later issues reuse this foundation:
 

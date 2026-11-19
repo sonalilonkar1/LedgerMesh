@@ -10,7 +10,6 @@ from services.coordinator.app.models import (
     CreateRedemptionRequest,
     Problem,
     RedemptionResponse,
-    TransitionRequest,
     TransitionView,
 )
 from services.coordinator.app.repository import PostgresCoordinatorRepository, get_engine
@@ -79,20 +78,6 @@ def get_redemption(
     transaction_id: UUID, service: CoordinatorServiceDependency
 ) -> RedemptionResponse:
     return service.get(transaction_id)
-
-
-@app.post(
-    "/internal/v1/redemptions/{transaction_id}/transitions",
-    response_model=RedemptionResponse,
-    responses={404: {"model": Problem}, 409: {"model": Problem}},
-    tags=["internal"],
-)
-def transition_redemption(
-    transaction_id: UUID,
-    request: TransitionRequest,
-    service: CoordinatorServiceDependency,
-) -> RedemptionResponse:
-    return service.transition(transaction_id, request.to_status, request.reason)
 
 
 @app.get(

@@ -62,6 +62,8 @@ class FakeCoordinatorRepository:
         self, transaction_id: UUID, to_status: str, reason: str | None = None
     ) -> RedemptionRecord:
         current = self.get(transaction_id)
+        if current.status == to_status and to_status != "COMPENSATING":
+            return replace(current, duplicate=True)
         edge = f"{current.status}->{to_status}"
         if edge not in TRANSITIONS[current.coordination_mode]:
             raise InvalidTransition(f"Invalid transition {edge}.", transaction_id)
@@ -168,30 +170,26 @@ def test_get_returns_current_mode_and_state():
     assert response.json() == created
 
 
-def test_valid_transition_is_persisted_and_visible():
-    client, _repository = client_and_repository()
+def test_transition_history_is_read_only_and_visible():
+    client, repository = client_and_repository()
     created = client.post(
         "/v1/redemptions",
         headers={"Idempotency-Key": "request-1"},
         json=request_payload(),
     ).json()
-    transaction_id = created["transaction_id"]
+    transaction_id = UUID(created["transaction_id"])
 
-    transitioned = client.post(
-        f"/internal/v1/redemptions/{transaction_id}/transitions",
-        json={"to_status": "DEDUCTING_POINTS", "reason": "Saga started"},
-    )
+    repository.transition(transaction_id, "DEDUCTING_POINTS", "Saga started")
     history = client.get(f"/internal/v1/redemptions/{transaction_id}/transitions")
 
-    assert transitioned.status_code == 200
-    assert transitioned.json()["status"] == "DEDUCTING_POINTS"
+    assert history.status_code == 200
     assert [item["to_status"] for item in history.json()] == [
         "REQUESTED",
         "DEDUCTING_POINTS",
     ]
 
 
-def test_invalid_transition_returns_conflict_without_changing_state():
+def test_transition_write_endpoint_is_not_exposed():
     client, _repository = client_and_repository()
     created = client.post(
         "/v1/redemptions",
@@ -202,12 +200,11 @@ def test_invalid_transition_returns_conflict_without_changing_state():
 
     response = client.post(
         f"/internal/v1/redemptions/{transaction_id}/transitions",
-        json={"to_status": "COMPLETED"},
+        json={"to_status": "DEDUCTING_POINTS", "reason": "untrusted client"},
     )
     current = client.get(f"/v1/redemptions/{transaction_id}")
 
-    assert response.status_code == 409
-    assert response.json()["type"] == "urn:ledgermesh:coordinator:invalid-transition"
+    assert response.status_code in {404, 405}
     assert current.json()["status"] == "REQUESTED"
 
 

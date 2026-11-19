@@ -119,6 +119,78 @@ def test_valid_state_paths_are_durable(repository, mode, states):
     assert [transition.workflow_step for transition in transitions] == list(range(len(states) + 1))
 
 
+def test_repeated_final_transition_returns_existing_state_without_new_history(repository):
+    created = repository.create("repeated-commit", create_request("two_phase_commit"))
+    repository.transition(created.transaction_id, "PREPARING")
+    repository.transition(created.transaction_id, "COMMIT_DECIDED")
+    committed = repository.transition(created.transaction_id, "COMMITTED")
+    history_before = repository.list_transitions(created.transaction_id)
+
+    duplicate = repository.transition(created.transaction_id, "COMMITTED")
+    history_after = repository.list_transitions(created.transaction_id)
+
+    assert duplicate.duplicate is True
+    assert duplicate.status == committed.status == "COMMITTED"
+    assert history_after == history_before
+
+
+def test_competing_commit_and_abort_decisions_only_record_one_winner(repository):
+    created = repository.create("competing-decisions", create_request("two_phase_commit"))
+    repository.transition(created.transaction_id, "PREPARING")
+    barrier = Barrier(2)
+
+    def decide(target: str):
+        barrier.wait()
+        try:
+            return ("accepted", repository.transition(created.transaction_id, target).status)
+        except InvalidTransition:
+            return ("rejected", target)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(decide, ["COMMIT_DECIDED", "ABORT_DECIDED"]))
+
+    assert [result[0] for result in results].count("accepted") == 1
+    assert [result[0] for result in results].count("rejected") == 1
+    current = repository.get(created.transaction_id)
+    assert current.status in {"COMMIT_DECIDED", "ABORT_DECIDED"}
+    decision_rows = [
+        row
+        for row in repository.list_transitions(created.transaction_id)
+        if row.to_status in {"COMMIT_DECIDED", "ABORT_DECIDED"}
+    ]
+    assert len(decision_rows) == 1
+
+
+@pytest.mark.parametrize(
+    ("mode", "path", "attempted_status"),
+    [
+        ("two_phase_commit", ["PREPARING", "COMMIT_DECIDED", "COMMITTED"], "ABORT_DECIDED"),
+        ("two_phase_commit", ["PREPARING", "ABORT_DECIDED", "ABORTED"], "COMMIT_DECIDED"),
+        (
+            "saga",
+            ["DEDUCTING_POINTS", "POINTS_DEDUCTED", "RESERVING_INVENTORY", "COMPLETED"],
+            "COMPENSATING",
+        ),
+        ("saga", ["DEDUCTING_POINTS", "FAILED"], "COMPENSATING"),
+        ("saga", ["DEDUCTING_POINTS", "COMPENSATING", "COMPENSATED"], "DEDUCTING_POINTS"),
+    ],
+)
+def test_terminal_states_cannot_transition_to_a_different_state(
+    repository, mode, path, attempted_status
+):
+    created = repository.create(f"terminal-{uuid4()}", create_request(mode))
+    for state in path:
+        repository.transition(created.transaction_id, state)
+    history_before = repository.list_transitions(created.transaction_id)
+
+    with pytest.raises(InvalidTransition):
+        repository.transition(created.transaction_id, attempted_status)
+
+    current = repository.get(created.transaction_id)
+    assert current.status == path[-1]
+    assert repository.list_transitions(created.transaction_id) == history_before
+
+
 @pytest.mark.parametrize(
     ("mode", "invalid_status"),
     [

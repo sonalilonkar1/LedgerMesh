@@ -206,6 +206,14 @@ class PostgresCoordinatorRepository:
         if current is None:
             raise RedemptionNotFound(f"Redemption {transaction_id} does not exist.", transaction_id)
 
+        # Recovery workers may retry a transition when the first response was
+        # lost. Returning the durable state makes that retry idempotent and,
+        # importantly, does not advance workflow_step/version or append a
+        # duplicate history row. COMPENSATING is the one intentional self-loop:
+        # each retry represents another durable compensation attempt.
+        if current.status == to_status and to_status != "COMPENSATING":
+            return self._redemption(current, duplicate=True)
+
         edge = f"{current.status}->{to_status}"
         if edge not in TRANSITIONS[current.coordination_mode]:
             raise InvalidTransition(
