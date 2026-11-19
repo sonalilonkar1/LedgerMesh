@@ -38,6 +38,12 @@ class OperationConflict(WalletError):
     problem_type = "urn:ledgermesh:wallet:operation-conflict"
 
 
+class DeductionAlreadyApplied(WalletError):
+    status = 409
+    title = "Deduction already applied"
+    problem_type = "urn:ledgermesh:wallet:deduction-already-applied"
+
+
 class InvalidAmount(WalletError):
     status = 422
     title = "Invalid point amount"

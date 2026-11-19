@@ -28,9 +28,9 @@ uses that form so the inbox record, Wallet mutation, and outbox reply commit in
 one transaction. HTTP routes use the repository's thin transaction-owning
 wrapper.
 
-A refund that arrives before its deduction currently returns `404`. LM-020
-implements the Saga compensation rule from ADR-001 section 7.1 by recording a
-deduction tombstone, so a delayed deduction cannot apply after compensation.
+Over HTTP, a refund that arrives before its deduction returns `404`. The Saga
+consumer below applies ADR-001 section 7.1 instead: it records a deduction
+tombstone, so a delayed deduction cannot apply after compensation.
 
 Run the service with the local stack:
 
@@ -74,5 +74,56 @@ make infra-up
 uv run pytest tests/db/test_wallet_core.py -q
 ```
 
-The 2PC participant API is implemented by LM-013. Kafka Saga consumption is
-implemented by LM-020. Both reuse these core Wallet operations.
+The 2PC participant API is implemented by LM-013 and reuses these core Wallet
+operations.
+
+## Saga command consumer (LM-020)
+
+`services/wallet/app/saga.py` consumes `wallet.commands` (consumer group
+`wallet-saga`) and replies on `wallet.results`, keyed by `transaction_id`. Each
+command runs through the messaging library's `process_once`, so the inbox row,
+the Wallet change and the reply commit in one PostgreSQL transaction. The Wallet
+change uses the caller-owned `connection=` form inside a savepoint, so a rejected
+command still commits its rejection reply.
+
+| Command | Payload | Replies |
+|---|---|---|
+| `wallet.deduct_points` | `user_id`, `points` | `wallet.points_deducted` (`applied` or `duplicate`), or `wallet.deduction_rejected` with reason `insufficient_points`, `wallet_not_found`, `cancelled` or `conflict` |
+| `wallet.refund_points` | `user_id`, `points` | `wallet.points_refunded` with outcome `applied`, `duplicate` or `cancelled_before_deduction` |
+
+- **Validation:** a command must target the `wallet` aggregate, carry a positive
+  `workflow_step` and no `aggregate_version`, name the same user in its payload
+  and `aggregate_id`, and carry positive integer `points`. Anything else is a
+  `PermanentError` and goes to `wallet.commands.dlq`.
+- **Replies** carry the command's `transaction_id`, `correlation_id` and
+  `workflow_step`, with `causation_id` set to the command's `event_id`. Only a
+  reply describing a new balance change carries `aggregate_version` (the Wallet
+  version after the change).
+- **Duplicates:** a redelivered command is a duplicate in the inbox. A command
+  re-sent with a new `event_id` for the same transaction replies with outcome
+  `duplicate` and changes nothing.
+- **Outcomes belong to the transaction:** a rejected deduction is stored in
+  `deduction_rejections`, so a later command for the same transaction gets the
+  same rejection even if the wallet is topped up or created afterwards. A
+  genuinely new redemption uses a new `transaction_id`.
+- **Identity:** `cancelled` and `duplicate` are returned only when the user and
+  points match the stored record. Any other body reusing the transaction id is a
+  `conflict`, and a conflicting early refund is dead-lettered.
+- **Workflow step:** a deduction must be step 1, the first Saga step in the
+  Coordinator's state machine (LM-010), and a refund must be a later
+  compensation step. Ordering across messages is checked by LM-026.
+- **Early refund:** a refund with no deduction stores a deduction tombstone
+  (using the command's `points`) and replies `cancelled_before_deduction`. The
+  late deduction is rejected with reason `cancelled`.
+- **Restart:** Kafka offsets are committed only after the database transaction,
+  so a crash in between redelivers the command and the inbox reports a duplicate.
+  Replies already in the outbox are published after the restart.
+
+Run the worker against the local stack (create the topics first):
+
+```bash
+uv run ledgermesh-topics
+make run-wallet-saga
+```
+
+Its tests run in the database suite: `uv run pytest tests/db/test_wallet_saga.py -q`.

@@ -51,6 +51,16 @@ are documented in [the Catalog service guide](../services/catalog/README.md).
 They require the Catalog database; use the complete local stack or set
 `CATALOG_DATABASE_URL` when running Catalog directly.
 
+The Audit Ledger's immutable append and transaction timeline endpoints are
+documented in [the Audit Ledger service guide](../services/audit_ledger/README.md).
+They require the Audit Ledger database; use the complete local stack or set
+`AUDIT_LEDGER_DATABASE_URL` when running the service directly.
+
+The Coordinator's idempotent redemption and durable transition endpoints are
+documented in [the Coordinator service guide](../services/coordinator/README.md).
+They require the Coordinator database; use the complete local stack or set
+`COORDINATOR_DATABASE_URL` when running the service directly.
+
 ## Run one service without Compose
 
 | Service | Command | Default port |

@@ -10,10 +10,12 @@ from typing import Protocol
 from uuid import UUID
 
 from sqlalchemy import Connection, Engine, create_engine, insert, select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.exc import IntegrityError
 
-from services.wallet.app.db.schema import wallet_operations, wallets
+from services.wallet.app.db.schema import deduction_rejections, wallet_operations, wallets
 from services.wallet.app.errors import (
+    DeductionAlreadyApplied,
     DeductionNotFound,
     InsufficientPoints,
     OperationConflict,
@@ -225,6 +227,131 @@ class PostgresWalletRepository:
                 "The transaction ID is already used by a different refund.", transaction_id
             ) from error
         return self._operation_result(connection, operation, transaction_id, "refund")
+
+    def record_deduction_tombstone(
+        self,
+        user_id: str,
+        transaction_id: UUID,
+        points: int,
+        event_id: UUID | None,
+        *,
+        connection: Connection | None = None,
+    ) -> OperationRecord:
+        """Cancel a deduction that has not arrived yet (ADR-001 section 7.1).
+
+        Stores a ``deduct`` row with status ``tombstone``. It occupies the
+        deduction's unique key, so the late deduction is rejected instead of
+        applied. The balance and version are unchanged.
+        """
+        if connection is not None:
+            return self._record_deduction_tombstone(
+                connection, user_id, transaction_id, points, event_id
+            )
+        with self.engine.begin() as owned_connection:
+            return self._record_deduction_tombstone(
+                owned_connection, user_id, transaction_id, points, event_id
+            )
+
+    def _record_deduction_tombstone(
+        self,
+        connection: Connection,
+        user_id: str,
+        transaction_id: UUID,
+        points: int,
+        event_id: UUID | None,
+    ) -> OperationRecord:
+        # Same lock as deduct, so a deduction cannot slip in between the check
+        # and the insert.
+        self._locked_wallet(connection, user_id)
+        existing = self._existing_operation(connection, transaction_id, "deduct")
+        if existing is not None:
+            if existing.user_id != user_id:
+                raise OperationConflict(
+                    "The transaction ID belongs to another wallet.", transaction_id
+                )
+            if existing.status == "tombstone":
+                # Only an identical early refund is a duplicate; a different
+                # amount for the same transaction is a conflicting command.
+                if existing.points != points:
+                    raise OperationConflict(
+                        "The transaction ID was cancelled for a different amount.",
+                        transaction_id,
+                    )
+                return self._operation_result(
+                    connection, existing, transaction_id, "deduct", duplicate=True
+                )
+            raise DeductionAlreadyApplied(
+                "The deduction has already been applied; refund it instead.", transaction_id
+            )
+        try:
+            tombstone = connection.execute(
+                insert(wallet_operations)
+                .values(
+                    transaction_id=transaction_id,
+                    user_id=user_id,
+                    operation="deduct",
+                    points=points,
+                    status="tombstone",
+                    event_id=event_id,
+                )
+                .returning(*wallet_operations.c)
+            ).one()
+        except IntegrityError as error:
+            raise OperationConflict(
+                "The transaction ID is already used by another operation.", transaction_id
+            ) from error
+        return self._operation_result(connection, tombstone, transaction_id, "deduct")
+
+    def lock_wallet(self, user_id: str, *, connection: Connection) -> None:
+        """Lock the wallet row for the rest of the caller's transaction."""
+        self._locked_wallet(connection, user_id)
+
+    def stored_deduction(self, transaction_id: UUID, *, connection: Connection):
+        """Return the stored deduction row (``applied`` or ``tombstone``), if any."""
+        return self._existing_operation(connection, transaction_id, "deduct")
+
+    def stored_rejection(self, transaction_id: UUID, *, connection: Connection):
+        """Return the stored Saga rejection for ``transaction_id``, if any."""
+        return connection.execute(
+            select(deduction_rejections).where(
+                deduction_rejections.c.transaction_id == transaction_id
+            )
+        ).one_or_none()
+
+    def record_rejection(
+        self,
+        transaction_id: UUID,
+        user_id: str,
+        points: int,
+        reason: str,
+        event_id: UUID | None,
+        *,
+        connection: Connection,
+    ):
+        """Store a rejection for ``transaction_id`` and return the row that won.
+
+        Two different commands for the same transaction can race here: a failed
+        deduction's savepoint rollback also releases its wallet lock, and a missing
+        wallet has no row to lock at all. Only one insert wins, so the caller must
+        answer from the returned durable row, not from its own local rejection.
+        """
+        stored = connection.execute(
+            postgresql_insert(deduction_rejections)
+            .values(
+                transaction_id=transaction_id,
+                user_id=user_id,
+                points=points,
+                reason=reason,
+                event_id=event_id,
+            )
+            .on_conflict_do_nothing(index_elements=[deduction_rejections.c.transaction_id])
+            .returning(*deduction_rejections.c)
+        ).one_or_none()
+        if stored is not None:
+            return stored
+        # Lost the race; the competing insert has committed by now (the unique
+        # index made us wait), so this new statement sees its row.
+        return self.stored_rejection(transaction_id, connection=connection)
 
     @staticmethod
     def _existing_operation(connection: Connection, transaction_id: UUID, operation: str):
