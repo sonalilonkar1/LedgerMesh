@@ -46,6 +46,20 @@ Later issues reuse this foundation:
 - LM-016 resumes incomplete 2PC transactions;
 - LM-022 drives and recovers the Saga state machine.
 
+## Saga worker (LM-022)
+
+`make run-coordinator-saga` runs three durable loops: it starts `REQUESTED`
+Saga redemptions after reading the authoritative Catalog quote, consumes Wallet
+and Catalog result events, and publishes the Coordinator outbox. A state only
+advances when the result acknowledges `current_command_id` and matches the
+stored correlation ID, workflow step and aggregate.
+
+Each transition, the next participant command and the inbox claim commit in
+one Coordinator database transaction. Restarting the worker therefore resumes
+from the stored state and unpublished outbox rows. Transition events are sent
+to `redemption.events`; run `make run-audit-consumer` to persist them in the
+Audit Ledger with its transactional inbox.
+
 The Catalog quote, `point_cost`, `reward_version`, and `total_points` are filled
 when the workflow begins. LM-010 intentionally persists the client request first
 without reading another service's database.

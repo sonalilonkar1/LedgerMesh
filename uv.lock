@@ -464,7 +464,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "jsonschema" },
     { name = "openapi-spec-validator" },
     { name = "pytest" },
@@ -486,7 +485,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = ">=0.27,<1" },
     { name = "jsonschema", specifier = ">=4.23,<5" },
     { name = "openapi-spec-validator", specifier = ">=0.7,<1" },
     { name = "pytest", specifier = ">=8.2,<10" },
