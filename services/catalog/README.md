@@ -81,9 +81,13 @@ retry using a new event ID, including rejected reservations.
 
 Release-before-reserve creates a tombstone. A late matching reserve returns
 `cancelled`; transaction-ID reuse for another reward or quantity remains a
-conflict. LM-026 completes semantic cross-topic workflow ordering. This worker
-validates the command type, positive workflow step, Catalog aggregate, payload
-identity, and absence of an aggregate version on commands.
+`conflict` reply rather than being dead-lettered. Concurrent deliveries use the
+durable outcome row as the authority: an identical retry returns `duplicate`,
+while a different reward or quantity returns `conflict`. A reservation must be
+workflow step 3, and a release must be a later compensation step. LM-026
+completes semantic cross-topic ordering. This worker also validates the command
+type, Catalog aggregate, payload identity, and absence of an aggregate version
+on commands.
 
 ```bash
 make infra-up

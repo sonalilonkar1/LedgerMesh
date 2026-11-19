@@ -1,6 +1,8 @@
 """Catalog Saga consumer integration tests (LM-021)."""
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -46,6 +48,15 @@ def catalog_db(database_url: str, engine: Engine) -> Engine:
         )
         connection.execute(
             rewards.insert().values(
+                reward_id="reward-2",
+                name="Tea",
+                point_cost=80,
+                total_inventory=10,
+                available_inventory=10,
+            )
+        )
+        connection.execute(
+            rewards.insert().values(
                 reward_id="reward-empty",
                 name="Sold out",
                 point_cost=100,
@@ -63,7 +74,7 @@ def command(
     *,
     reward_id: str = "reward-1",
     quantity=2,
-    step: int | None = 2,
+    step: int | None = 3,
     **overrides,
 ) -> EventEnvelope:
     fields = {
@@ -201,21 +212,22 @@ def test_retry_with_new_event_id_returns_stored_reserve_outcome(database_url, ca
     assert second.aggregate_version is None
 
 
-def test_transaction_id_reuse_with_different_quantity_is_dead_letterable(database_url, catalog_db):
+def test_transaction_id_reuse_with_different_quantity_returns_conflict(database_url, catalog_db):
     transaction_id = uuid4()
     deliver(database_url, catalog_db, command(RESERVE_INVENTORY, transaction_id, quantity=2))
 
-    with pytest.raises(InvalidCommand):
-        deliver(database_url, catalog_db, command(RESERVE_INVENTORY, transaction_id, quantity=3))
+    deliver(database_url, catalog_db, command(RESERVE_INVENTORY, transaction_id, quantity=3))
 
     assert inventory(catalog_db) == (8, 1)
+    assert replies(catalog_db)[-1].event_type == RESERVATION_REJECTED
+    assert replies(catalog_db)[-1].payload["reason"] == "conflict"
 
 
 def test_release_restores_inventory_once(database_url, catalog_db):
     transaction_id = uuid4()
     deliver(database_url, catalog_db, command(RESERVE_INVENTORY, transaction_id))
-    deliver(database_url, catalog_db, command(RELEASE_INVENTORY, transaction_id, step=3))
-    deliver(database_url, catalog_db, command(RELEASE_INVENTORY, transaction_id, step=3))
+    deliver(database_url, catalog_db, command(RELEASE_INVENTORY, transaction_id, step=4))
+    deliver(database_url, catalog_db, command(RELEASE_INVENTORY, transaction_id, step=4))
 
     assert inventory(catalog_db) == (10, 2)
     release, duplicate = replies(catalog_db)[-2:]
@@ -228,8 +240,8 @@ def test_release_restores_inventory_once(database_url, catalog_db):
 
 def test_early_release_tombstones_and_cancels_late_reserve(database_url, catalog_db):
     transaction_id = uuid4()
-    deliver(database_url, catalog_db, command(RELEASE_INVENTORY, transaction_id, step=3))
-    deliver(database_url, catalog_db, command(RESERVE_INVENTORY, transaction_id, step=2))
+    deliver(database_url, catalog_db, command(RELEASE_INVENTORY, transaction_id, step=4))
+    deliver(database_url, catalog_db, command(RESERVE_INVENTORY, transaction_id, step=3))
 
     assert inventory(catalog_db) == (10, 0)
     release, reserve = replies(catalog_db)
@@ -245,13 +257,13 @@ def test_tombstone_does_not_hide_different_command_identity(database_url, catalo
     deliver(
         database_url,
         catalog_db,
-        command(RELEASE_INVENTORY, transaction_id, quantity=2, step=3),
+        command(RELEASE_INVENTORY, transaction_id, quantity=2, step=4),
     )
 
     deliver(
         database_url,
         catalog_db,
-        command(RESERVE_INVENTORY, transaction_id, quantity=3, step=2),
+        command(RESERVE_INVENTORY, transaction_id, quantity=3, step=3),
     )
 
     assert replies(catalog_db)[-1].payload["reason"] == "conflict"
@@ -270,6 +282,8 @@ def test_tombstone_does_not_hide_different_command_identity(database_url, catalo
         {"payload": {"reward_id": "reward-1", "quantity": 0}},
         {"payload": {"reward_id": "reward-1", "quantity": "2"}},
         {"payload": {"reward_id": "reward-1"}},
+        {"workflow_step": 4},
+        {"event_type": RELEASE_INVENTORY},
     ],
 )
 def test_invalid_command_changes_nothing(database_url, catalog_db, overrides):
@@ -316,3 +330,55 @@ def test_restart_before_offset_commit_does_not_reserve_twice(database_url, catal
     assert inventory(catalog_db) == (8, 1)
     assert count(catalog_db, reservations) == 1
     assert count(catalog_db, outbox) == 1
+
+
+def transaction_replies(engine: Engine, transaction_id) -> list[EventEnvelope]:
+    return [reply for reply in replies(engine) if reply.transaction_id == transaction_id]
+
+
+def test_concurrent_identical_reservations_reply_applied_and_duplicate(database_url, catalog_db):
+    transaction_id = uuid4()
+    barrier = Barrier(2)
+
+    def send(_):
+        envelope = command(RESERVE_INVENTORY, transaction_id, quantity=2, step=3)
+        barrier.wait()
+        return deliver(database_url, catalog_db, envelope)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(send, range(2)))
+
+    results = transaction_replies(catalog_db, transaction_id)
+    assert sorted(reply.payload["outcome"] for reply in results) == ["applied", "duplicate"]
+    assert inventory(catalog_db, "reward-1") == (8, 1)
+    assert count(catalog_db, reservations) == 1
+    assert count(catalog_db, catalog_saga_outcomes) == 1
+
+
+def test_concurrent_different_rewards_return_one_success_and_one_conflict(database_url, catalog_db):
+    transaction_id = uuid4()
+    barrier = Barrier(2)
+
+    def send(reward_id):
+        envelope = command(
+            RESERVE_INVENTORY,
+            transaction_id,
+            reward_id=reward_id,
+            quantity=2,
+            step=3,
+        )
+        barrier.wait()
+        return deliver(database_url, catalog_db, envelope)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(send, ["reward-1", "reward-2"]))
+
+    results = transaction_replies(catalog_db, transaction_id)
+    assert sorted(reply.event_type for reply in results) == sorted(
+        [INVENTORY_RESERVED, RESERVATION_REJECTED]
+    )
+    rejected = next(reply for reply in results if reply.event_type == RESERVATION_REJECTED)
+    assert rejected.payload["reason"] == "conflict"
+    assert sum(inventory(catalog_db, reward_id)[0] for reward_id in ("reward-1", "reward-2")) == 18
+    assert count(catalog_db, reservations) == 1
+    assert count(catalog_db, catalog_saga_outcomes) == 1

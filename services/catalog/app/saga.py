@@ -11,8 +11,8 @@ from ledgermesh_messaging import (
     OutgoingMessage,
     PermanentError,
 )
-from sqlalchemy import Connection, insert, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import Connection, select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.catalog.app.db.schema import catalog_saga_outcomes, reservations
@@ -30,6 +30,7 @@ INVENTORY_RESERVED = "catalog.inventory_reserved"
 RESERVATION_REJECTED = "catalog.reservation_rejected"
 INVENTORY_RELEASED = "catalog.inventory_released"
 RELEASE_REJECTED = "catalog.release_rejected"
+RESERVE_STEP = 3
 
 
 class InvalidCommand(PermanentError):
@@ -54,6 +55,10 @@ def parse_command(envelope: EventEnvelope) -> CatalogCommand:
         raise InvalidCommand("Catalog commands must target the reward aggregate")
     if envelope.workflow_step is None or envelope.workflow_step < 1:
         raise InvalidCommand("Catalog commands must carry a positive workflow_step")
+    if envelope.event_type == RESERVE_INVENTORY and envelope.workflow_step != RESERVE_STEP:
+        raise InvalidCommand(f"a reservation must be workflow_step {RESERVE_STEP}")
+    if envelope.event_type == RELEASE_INVENTORY and envelope.workflow_step <= RESERVE_STEP:
+        raise InvalidCommand("a release must be a compensation step after the reservation")
     if envelope.aggregate_version is not None:
         raise InvalidCommand("commands must not carry an aggregate_version")
     reward_id = envelope.payload.get("reward_id")
@@ -108,43 +113,71 @@ class CatalogSagaHandler:
             )
         ).one_or_none()
         if stored is not None:
-            return self._stored_reply(command, stored)
+            return self._stored_reply(command, stored, duplicate=True)
 
         reply = (
             self._reserve(connection, command)
             if command.kind == "reserve"
             else self._release(connection, command)
         )
-        self._store_outcome(connection, command, reply)
-        return reply
+        stored, inserted = self._store_outcome(connection, command, reply)
+        # The row that won the unique-key race is authoritative. A concurrent
+        # command may have recorded a different identity or result while this
+        # delivery was waiting on the reward/reservation locks.
+        return self._stored_reply(command, stored, duplicate=not inserted)
 
-    def _stored_reply(self, command: CatalogCommand, stored) -> EventEnvelope:
+    def _stored_reply(self, command: CatalogCommand, stored, *, duplicate: bool) -> EventEnvelope:
         if stored.reward_id != command.reward_id or stored.quantity != command.quantity:
-            raise InvalidCommand("transaction ID is already used by a different Catalog command")
-        payload = dict(stored.result_payload)
-        if payload.get("outcome") == "applied":
-            payload["outcome"] = "duplicate"
-        return result_envelope(command, stored.result_event_type, payload)
-
-    def _store_outcome(
-        self, connection: Connection, command: CatalogCommand, reply: EventEnvelope
-    ) -> None:
-        try:
-            connection.execute(
-                insert(catalog_saga_outcomes).values(
-                    transaction_id=command.envelope.transaction_id,
-                    command_type=command.kind,
-                    reward_id=command.reward_id,
-                    quantity=command.quantity,
-                    result_event_type=reply.event_type,
-                    result_payload=reply.payload,
-                    aggregate_version=reply.aggregate_version,
-                )
+            return self._conflict_reply(
+                command, "transaction ID is already used by a different Catalog command"
             )
-        except IntegrityError as error:
-            # Commands for one reward are ordered by Kafka. This protects direct
-            # calls or a reused transaction ID sent to two reward partitions.
-            raise InvalidCommand("Catalog command outcome was recorded concurrently") from error
+        payload = dict(stored.result_payload)
+        if duplicate and payload.get("outcome") == "applied":
+            payload["outcome"] = "duplicate"
+        return result_envelope(
+            command,
+            stored.result_event_type,
+            payload,
+            aggregate_version=None if duplicate else stored.aggregate_version,
+        )
+
+    def _store_outcome(self, connection: Connection, command: CatalogCommand, reply: EventEnvelope):
+        stored = connection.execute(
+            postgresql_insert(catalog_saga_outcomes)
+            .values(
+                transaction_id=command.envelope.transaction_id,
+                command_type=command.kind,
+                reward_id=command.reward_id,
+                quantity=command.quantity,
+                result_event_type=reply.event_type,
+                result_payload=reply.payload,
+                aggregate_version=reply.aggregate_version,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    catalog_saga_outcomes.c.transaction_id,
+                    catalog_saga_outcomes.c.command_type,
+                ]
+            )
+            .returning(*catalog_saga_outcomes.c)
+        ).one_or_none()
+        if stored is not None:
+            return stored, True
+
+        # The unique index made this statement wait for the winning transaction.
+        # Under READ COMMITTED, the following statement sees the committed row.
+        stored = connection.execute(
+            select(catalog_saga_outcomes).where(
+                catalog_saga_outcomes.c.transaction_id == command.envelope.transaction_id,
+                catalog_saga_outcomes.c.command_type == command.kind,
+            )
+        ).one()
+        return stored, False
+
+    def _conflict_reply(self, command: CatalogCommand, detail: str) -> EventEnvelope:
+        if command.kind == "reserve":
+            return self._reserve_rejected(command, "conflict", detail)
+        return self._release_rejected(command, "conflict", detail)
 
     def _reserve(self, connection: Connection, command: CatalogCommand) -> EventEnvelope:
         try:

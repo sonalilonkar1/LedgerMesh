@@ -34,14 +34,12 @@ async def run(stop: asyncio.Event) -> None:
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     producer = create_producer(bootstrap_servers())
     consumer = create_consumer(bootstrap_servers(), CONSUMER_GROUP, CATALOG_COMMANDS.name)
-    producer_started = False
-    consumer_started = False
-
+    attempted = []
     try:
-        await producer.start()
-        producer_started = True
-        await consumer.start()
-        consumer_started = True
+        for client in (producer, consumer):
+            # Track before awaiting start(), so partial startup is also cleaned up.
+            attempted.append(client)
+            await client.start()
 
         async def dead_letter(record, error: Exception) -> None:
             logger.error("dead-lettering Catalog command at offset %s: %r", record.offset, error)
@@ -63,10 +61,11 @@ async def run(stop: asyncio.Event) -> None:
         publisher = OutboxPublisher(sessions, producer, name="catalog")
         await asyncio.gather(inbox_consumer.run(stop), publisher.run(stop))
     finally:
-        if consumer_started:
-            await consumer.stop()
-        if producer_started:
-            await producer.stop()
+        for client in reversed(attempted):
+            try:
+                await client.stop()
+            except Exception:
+                logger.exception("failed to stop %s during shutdown", type(client).__name__)
         await engine.dispose()
 
 
