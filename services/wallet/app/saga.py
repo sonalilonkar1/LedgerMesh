@@ -290,7 +290,7 @@ class WalletSagaHandler:
         self, connection: Connection, command: WalletCommand, reason: str, detail: str
     ) -> EventEnvelope:
         with connection.begin_nested():
-            self.repository.record_rejection(
+            stored = self.repository.record_rejection(
                 command.envelope.transaction_id,
                 command.user_id,
                 command.points,
@@ -298,7 +298,15 @@ class WalletSagaHandler:
                 command.envelope.event_id,
                 connection=connection,
             )
-        return self._rejected(command, reason, detail)
+        # Answer from the durable row: a concurrent command for the same
+        # transaction may have stored its rejection first.
+        if not self._same_deduction(stored, command):
+            return self._rejected(
+                command, "conflict", "The transaction ID was rejected for a different deduction."
+            )
+        if stored.event_id != command.envelope.event_id:
+            detail = "The deduction was already rejected for this transaction."
+        return self._rejected(command, stored.reason, detail)
 
     @staticmethod
     def _same_deduction(row, command: WalletCommand) -> bool:

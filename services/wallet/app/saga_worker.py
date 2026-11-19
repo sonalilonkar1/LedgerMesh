@@ -48,17 +48,21 @@ async def run(stop: asyncio.Event) -> None:
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     producer = create_producer(bootstrap_servers())
     consumer = create_consumer(bootstrap_servers(), CONSUMER_GROUP, WALLET_COMMANDS.name)
-    # Every client that started is stopped, even if a later start or the run fails.
-    started = []
+    # A client is tracked *before* its start() is awaited, so one whose start()
+    # fails part-way is still stopped. Each stop is isolated, so a failure to stop
+    # one client does not skip the others or the engine.
+    attempted = []
     try:
-        await producer.start()
-        started.append(producer)
-        await consumer.start()
-        started.append(consumer)
+        for client in (producer, consumer):
+            attempted.append(client)
+            await client.start()
         await _serve(stop, sessions, producer, consumer)
     finally:
-        for client in reversed(started):
-            await client.stop()
+        for client in reversed(attempted):
+            try:
+                await client.stop()
+            except Exception:
+                logger.exception("failed to stop %s during shutdown", type(client).__name__)
         await engine.dispose()
 
 

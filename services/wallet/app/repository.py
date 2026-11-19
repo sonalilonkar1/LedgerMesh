@@ -327,9 +327,15 @@ class PostgresWalletRepository:
         event_id: UUID | None,
         *,
         connection: Connection,
-    ) -> None:
-        """Remember that the deduction for ``transaction_id`` was rejected."""
-        connection.execute(
+    ):
+        """Store a rejection for ``transaction_id`` and return the row that won.
+
+        Two different commands for the same transaction can race here: a failed
+        deduction's savepoint rollback also releases its wallet lock, and a missing
+        wallet has no row to lock at all. Only one insert wins, so the caller must
+        answer from the returned durable row, not from its own local rejection.
+        """
+        stored = connection.execute(
             postgresql_insert(deduction_rejections)
             .values(
                 transaction_id=transaction_id,
@@ -339,7 +345,13 @@ class PostgresWalletRepository:
                 event_id=event_id,
             )
             .on_conflict_do_nothing(index_elements=[deduction_rejections.c.transaction_id])
-        )
+            .returning(*deduction_rejections.c)
+        ).one_or_none()
+        if stored is not None:
+            return stored
+        # Lost the race; the competing insert has committed by now (the unique
+        # index made us wait), so this new statement sees its row.
+        return self.stored_rejection(transaction_id, connection=connection)
 
     @staticmethod
     def _existing_operation(connection: Connection, transaction_id: UUID, operation: str):

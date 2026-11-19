@@ -384,6 +384,69 @@ def test_concurrent_deduction_and_refund_never_leave_an_unmatched_deduction(
         assert balance(wallet_db)[0] == 100
 
 
+def reasons_for(engine: Engine, transaction_id) -> list[str]:
+    return [
+        reply.payload["reason"]
+        for reply in replies(engine)
+        if reply.transaction_id == transaction_id
+    ]
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "reason"),
+    [
+        ({"points": 101}, {"points": 102}, "insufficient_points"),
+        (
+            {"user_id": "user-ghost-a", "points": 10},
+            {"user_id": "user-ghost-b", "points": 10},
+            "wallet_not_found",
+        ),
+    ],
+    ids=["same-wallet-different-points", "two-missing-wallets"],
+)
+def test_concurrent_conflicting_rejections_store_one_identity(
+    database_url, wallet_db, first, second, reason
+):
+    # Two different deductions reuse one transaction id and both fail at the
+    # same time. Only one identity may be stored; the other command is a conflict.
+    for _ in range(10):
+        transaction_id = uuid4()
+        bodies = [first, second]
+        barrier = Barrier(2)
+
+        def send(body, barrier=barrier, transaction_id=transaction_id):
+            barrier.wait()
+            return deliver(database_url, wallet_db, command(DEDUCT_POINTS, transaction_id, **body))
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(send, bodies))
+
+        with wallet_db.connect() as connection:
+            stored = connection.execute(
+                select(deduction_rejections).where(
+                    deduction_rejections.c.transaction_id == transaction_id
+                )
+            ).all()
+        assert len(stored) == 1
+        assert sorted(reasons_for(wallet_db, transaction_id)) == sorted([reason, "conflict"])
+
+        # Later retries (new event ids) reproduce the same outcome per body.
+        [winner] = stored
+        for body in bodies:
+            deliver(database_url, wallet_db, command(DEDUCT_POINTS, transaction_id, **body))
+        expected = [
+            reason
+            if (body.get("user_id", "user-1"), body["points"]) == (winner.user_id, winner.points)
+            else "conflict"
+            for body in bodies
+        ]
+        assert reasons_for(wallet_db, transaction_id)[-2:] == expected
+
+    # Nothing was ever deducted.
+    assert balance(wallet_db) == (100, 0)
+    assert count(wallet_db, wallet_operations) == 0
+
+
 # Criterion 1: commands are validated before anything is applied
 
 
