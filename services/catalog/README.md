@@ -63,3 +63,36 @@ uv run pytest tests/db/test_catalog_core.py -q
 
 The 2PC participant API is implemented by LM-014. Kafka Saga consumption is
 implemented by LM-021. Both reuse these core Catalog operations.
+
+## Saga consumer (LM-021)
+
+The worker consumes `catalog.commands` through the `catalog-saga` consumer
+group and publishes transactional replies to `catalog.results`.
+
+| Command | Result |
+|---|---|
+| `catalog.reserve_inventory` | `catalog.inventory_reserved` or `catalog.reservation_rejected` |
+| `catalog.release_inventory` | `catalog.inventory_released` or `catalog.release_rejected` |
+
+The inbox claim, inventory mutation, durable command outcome, and outbox reply
+commit in one Catalog database transaction. The inbox handles redelivery of the
+same event ID. `catalog_saga_outcomes` also preserves the result for a logical
+retry using a new event ID, including rejected reservations.
+
+Release-before-reserve creates a tombstone. A late matching reserve returns
+`cancelled`; transaction-ID reuse for another reward or quantity remains a
+`conflict` reply rather than being dead-lettered. Concurrent deliveries use the
+durable outcome row as the authority: an identical retry returns `duplicate`,
+while a different reward or quantity returns `conflict`. A reservation must be
+workflow step 3, and a release must be a later compensation step. LM-026
+completes semantic cross-topic ordering. This worker also validates the command
+type, Catalog aggregate, payload identity, and absence of an aggregate version
+on commands.
+
+```bash
+make infra-up
+uv run ledgermesh-topics
+make run-catalog-saga
+
+uv run pytest tests/db/test_catalog_saga.py -q
+```

@@ -1,4 +1,4 @@
-.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-wallet run-wallet-saga run-catalog run-ledger infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test db-seed db-baseline
+.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test db-seed db-baseline
 
 COMPOSE_FILE ?= infra/compose.yaml
 COMPOSE := docker compose -f $(COMPOSE_FILE)
@@ -41,6 +41,10 @@ run-wallet-saga:
 
 run-catalog:
 	uv run uvicorn services.catalog.app.main:app --reload --port 8002
+
+run-catalog-saga:
+	CATALOG_DATABASE_URL=$${CATALOG_DATABASE_URL:-postgresql+psycopg://catalog:ledgermesh_dev@localhost:54323/catalog} \
+	  uv run python -m services.catalog.app.saga_worker
 
 run-ledger:
 	uv run uvicorn services.audit_ledger.app.main:app --reload --port 8003
