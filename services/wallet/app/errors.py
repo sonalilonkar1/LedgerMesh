@@ -48,3 +48,15 @@ class InvalidAmount(WalletError):
     status = 422
     title = "Invalid point amount"
     problem_type = "urn:ledgermesh:wallet:invalid-amount"
+
+
+class ParticipantTransactionNotFound(WalletError):
+    status = 404
+    title = "Participant transaction not found"
+    problem_type = "urn:ledgermesh:wallet:participant-not-found"
+
+
+class ParticipantConflict(WalletError):
+    status = 409
+    title = "Participant transaction conflict"
+    problem_type = "urn:ledgermesh:wallet:participant-conflict"

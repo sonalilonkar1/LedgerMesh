@@ -36,6 +36,19 @@ class WalletOperationResult(WalletBalance):
     outcome: Literal["applied", "duplicate"]
 
 
+class WalletPrepareRequest(StrictModel):
+    correlation_id: UUID
+    user_id: str = Field(min_length=1)
+    points: int = Field(gt=0)
+
+
+class ParticipantResponse(StrictModel):
+    transaction_id: UUID
+    participant: Literal["wallet"] = "wallet"
+    state: Literal["PREPARED", "COMMITTED", "ABORTED", "IN_DOUBT"]
+    updated_at: datetime
+
+
 class Problem(StrictModel):
     type: str
     title: str

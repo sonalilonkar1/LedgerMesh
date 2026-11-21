@@ -1,5 +1,6 @@
 from functools import lru_cache
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -7,11 +8,15 @@ from fastapi.responses import JSONResponse
 from services.wallet.app.errors import WalletError
 from services.wallet.app.models import (
     DeductRequest,
+    ParticipantResponse,
     Problem,
     RefundRequest,
     WalletBalance,
     WalletOperationResult,
+    WalletPrepareRequest,
 )
+from services.wallet.app.participant import PostgresWalletParticipantRepository
+from services.wallet.app.participant_service import WalletParticipantService
 from services.wallet.app.repository import PostgresWalletRepository, get_engine
 from services.wallet.app.service import WalletService
 
@@ -26,6 +31,14 @@ def get_wallet_service() -> WalletService:
 
 
 WalletServiceDependency = Annotated[WalletService, Depends(get_wallet_service)]
+
+
+@lru_cache
+def get_participant_service() -> WalletParticipantService:
+    return WalletParticipantService(PostgresWalletParticipantRepository(get_engine()))
+
+
+ParticipantServiceDependency = Annotated[WalletParticipantService, Depends(get_participant_service)]
 
 
 @app.exception_handler(WalletError)
@@ -85,3 +98,53 @@ def refund_points(
     service: WalletServiceDependency,
 ) -> WalletOperationResult:
     return service.refund(user_id, request.transaction_id, request.event_id)
+
+
+@app.post(
+    "/v1/transactions/{transaction_id}/prepare",
+    response_model=ParticipantResponse,
+    responses={409: {"model": Problem}},
+    tags=["2pc"],
+)
+def prepare_transaction(
+    transaction_id: UUID,
+    request: WalletPrepareRequest,
+    service: ParticipantServiceDependency,
+) -> ParticipantResponse:
+    return service.prepare(transaction_id, request)
+
+
+@app.post(
+    "/v1/transactions/{transaction_id}/commit",
+    response_model=ParticipantResponse,
+    responses={404: {"model": Problem}, 409: {"model": Problem}},
+    tags=["2pc"],
+)
+def commit_transaction(
+    transaction_id: UUID, service: ParticipantServiceDependency
+) -> ParticipantResponse:
+    return service.commit(transaction_id)
+
+
+@app.post(
+    "/v1/transactions/{transaction_id}/abort",
+    response_model=ParticipantResponse,
+    responses={409: {"model": Problem}},
+    tags=["2pc"],
+)
+def abort_transaction(
+    transaction_id: UUID, service: ParticipantServiceDependency
+) -> ParticipantResponse:
+    return service.abort(transaction_id)
+
+
+@app.get(
+    "/v1/transactions/{transaction_id}",
+    response_model=ParticipantResponse,
+    responses={404: {"model": Problem}},
+    tags=["2pc"],
+)
+def get_transaction(
+    transaction_id: UUID, service: ParticipantServiceDependency
+) -> ParticipantResponse:
+    return service.get(transaction_id)
