@@ -1,8 +1,9 @@
+import os
 from functools import lru_cache
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from services.coordinator.app.errors import CoordinatorError
@@ -39,6 +40,14 @@ IdempotencyKey = Annotated[
     str,
     Header(alias="Idempotency-Key", min_length=1, max_length=128),
 ]
+
+
+def require_local_internal_routes() -> None:
+    if os.environ.get("LEDGERMESH_ENV") not in {"local", "test"}:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+
+InternalRouteDependency = Annotated[None, Depends(require_local_internal_routes)]
 
 
 @app.exception_handler(CoordinatorError)
@@ -108,6 +117,8 @@ def list_redemption_transitions(
     tags=["internal"],
 )
 def execute_two_phase_commit(
-    transaction_id: UUID, workflow: TwoPhaseCommitDependency
+    transaction_id: UUID,
+    workflow: TwoPhaseCommitDependency,
+    _internal: InternalRouteDependency,
 ) -> RedemptionResponse:
     return RedemptionResponse.model_validate(workflow.execute(transaction_id), from_attributes=True)

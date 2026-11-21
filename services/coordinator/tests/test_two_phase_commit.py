@@ -3,8 +3,11 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from ledgermesh_messaging import EventEnvelope
+import pytest
+from fastapi.testclient import TestClient
 
+from services.coordinator.app.errors import InvalidTransition
+from services.coordinator.app.main import app, get_two_phase_commit_workflow
 from services.coordinator.app.repository import WorkflowRecord
 from services.coordinator.app.two_phase_commit import (
     ParticipantUnavailable,
@@ -45,7 +48,6 @@ class FakeRepository:
             quantity=2,
         )
         self.log: list[str] = []
-        self.pending: EventEnvelope | None = None
 
     def get_workflow(self, _transaction_id):
         return self.record
@@ -73,23 +75,7 @@ class FakeRepository:
         del reason
         self.log.append(f"persist:{terminal}+outbox")
         self.record = self.record.__class__(**(self.record.__dict__ | {"status": terminal}))
-        self.pending = EventEnvelope(
-            event_type=f"redemption.{terminal.lower()}",
-            transaction_id=transaction_id,
-            correlation_id=self.record.correlation_id,
-            aggregate_type="redemption",
-            aggregate_id=str(transaction_id),
-            payload={"status": terminal},
-        )
-        return self.record, self.pending
-
-    def pending_audit(self, _transaction_id):
-        return self.pending
-
-    def mark_audit_published(self, event_id):
-        assert self.pending and self.pending.event_id == event_id
-        self.log.append("audit:published")
-        self.pending = None
+        return self.record, object()
 
 
 class FakeWallet:
@@ -128,52 +114,38 @@ class FakeCatalog(FakeWallet):
             raise ParticipantUnavailable("timeout")
 
 
-class FakeAudit:
-    def __init__(self, fail=False):
-        self.fail = fail
-        self.events = []
-
-    def append(self, envelope):
-        if self.fail:
-            raise ParticipantUnavailable("audit unavailable")
-        self.events.append(envelope)
-
-
-def workflow(wallet=None, catalog=None, audit=None):
+def workflow(wallet=None, catalog=None):
     repository = FakeRepository()
     wallet = wallet or FakeWallet()
     catalog = catalog or FakeCatalog()
-    audit = audit or FakeAudit()
     wallet.log = catalog.log = repository.log
-    return TwoPhaseCommitWorkflow(repository, wallet, catalog, audit), repository, audit
+    return TwoPhaseCommitWorkflow(repository, wallet, catalog), repository
 
 
 def test_all_yes_persists_commit_decision_before_final_messages_and_audits():
-    service, repository, audit = workflow()
+    service, repository = workflow()
     result = service.execute(repository.record.transaction_id)
 
     assert result.status == "COMMITTED"
     decision = repository.log.index("persist:COMMIT_DECIDED")
     assert decision < repository.log.index("wallet:commit")
     assert decision < repository.log.index("catalog:commit")
-    assert repository.log[-1] == "audit:published"
-    assert audit.events[0].event_type == "redemption.committed"
+    assert repository.log[-1] == "persist:COMMITTED+outbox"
 
 
 def test_no_vote_or_prepare_timeout_persists_abort_before_abort_messages():
     for wallet in (FakeWallet(vote="ABORTED"), FakeWallet(fail_prepare=True)):
-        service, repository, audit = workflow(wallet=wallet)
+        service, repository = workflow(wallet=wallet)
         result = service.execute(repository.record.transaction_id)
         assert result.status == "ABORTED"
         decision = repository.log.index("persist:ABORT_DECIDED")
         assert decision < repository.log.index("wallet:abort")
         assert decision < repository.log.index("catalog:abort")
-        assert audit.events[0].event_type == "redemption.aborted"
 
 
 def test_unacknowledged_decision_remains_durable_and_is_retried():
     wallet = FakeWallet(fail_final=True)
-    service, repository, _audit = workflow(wallet=wallet)
+    service, repository = workflow(wallet=wallet)
 
     first = service.execute(repository.record.transaction_id)
     assert first.status == "COMMIT_DECIDED"
@@ -184,15 +156,55 @@ def test_unacknowledged_decision_remains_durable_and_is_retried():
     assert repository.log.count("persist:COMMIT_DECIDED") == 1
 
 
-def test_audit_outage_does_not_reverse_terminal_outcome_and_retry_delivers():
-    audit = FakeAudit(fail=True)
-    service, repository, _audit = workflow(audit=audit)
-    first = service.execute(repository.record.transaction_id)
-    assert first.status == "COMMITTED"
-    assert repository.pending is not None
+def test_terminal_outcome_leaves_audit_delivery_to_the_outbox_publisher():
+    service, repository = workflow()
 
-    audit.fail = False
-    second = service.execute(repository.record.transaction_id)
-    assert second.status == "COMMITTED"
-    assert repository.pending is None
-    assert len(audit.events) == 1
+    result = service.execute(repository.record.transaction_id)
+
+    assert result.status == "COMMITTED"
+    assert repository.log[-1] == "persist:COMMITTED+outbox"
+
+
+def test_durable_decision_mismatch_raises_explicitly():
+    service, repository = workflow()
+    original_transition = repository.transition
+
+    def conflicting_transition(transaction_id, status, reason=None):
+        if status == "COMMIT_DECIDED":
+            status = "ABORT_DECIDED"
+        return original_transition(transaction_id, status, reason)
+
+    repository.transition = conflicting_transition
+
+    with pytest.raises(InvalidTransition, match="Durable decision"):
+        service.execute(repository.record.transaction_id)
+
+
+def test_execute_route_is_hidden_outside_local_and_test(monkeypatch):
+    service, repository = workflow()
+    app.dependency_overrides[get_two_phase_commit_workflow] = lambda: service
+    monkeypatch.delenv("LEDGERMESH_ENV", raising=False)
+    try:
+        response = TestClient(app).post(
+            f"/internal/v1/redemptions/{repository.record.transaction_id}/execute-2pc"
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 404
+    assert repository.record.status == "REQUESTED"
+
+
+def test_execute_route_is_available_in_test_environment(monkeypatch):
+    service, repository = workflow()
+    app.dependency_overrides[get_two_phase_commit_workflow] = lambda: service
+    monkeypatch.setenv("LEDGERMESH_ENV", "test")
+    try:
+        response = TestClient(app).post(
+            f"/internal/v1/redemptions/{repository.record.transaction_id}/execute-2pc"
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "COMMITTED"

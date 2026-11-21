@@ -79,9 +79,15 @@ uv run pytest tests/db/test_coordinator_core.py -q
 Run or resume a 2PC redemption with:
 
 ```bash
+export LEDGERMESH_ENV=local
 curl -X POST \
   http://localhost:8000/internal/v1/redemptions/<transaction-id>/execute-2pc
 ```
+
+The manual execution endpoint is available only when `LEDGERMESH_ENV` is
+explicitly `local` or `test`; hosted/public deployments return `404`. The
+recovery worker introduced by LM-016 starts and resumes durable transactions
+without exposing this control endpoint publicly.
 
 The workflow reads the authoritative reward quote from Catalog and sends
 prepare requests to Wallet and Catalog. Two `PREPARED` votes cause one durable
@@ -95,17 +101,24 @@ the same irreversible decision. Once both acknowledge, the Coordinator
 atomically stores the terminal state and an audit event in its transactional
 outbox.
 
-The Coordinator then attempts to append the event to the Audit Ledger. An Audit
-Ledger outage never reverses or blocks the durable business outcome: the outbox
-row remains unpublished and a later execution attempt retries the same
-`event_id`.
+The Coordinator does not also post the event directly to the Audit Ledger.
+`OutboxPublisher` sends the single durable outbox record to Kafka, and the Audit
+Ledger consumer stores it idempotently. An Audit Ledger outage therefore never
+reverses or blocks the business outcome and there is only one delivery path.
+
+Session advisory locks use a dedicated bounded connection pool. Participant
+HTTP waits cannot consume the repository pool and then deadlock while waiting
+for a second repository connection. The same lock pool is shared by normal
+execution and LM-016 recovery inside the Coordinator process.
 
 | Variable | Default |
 |---|---|
 | `WALLET_URL` | `http://wallet:8001` |
 | `CATALOG_URL` | `http://catalog:8002` |
-| `AUDIT_LEDGER_URL` | `http://audit-ledger:8003` |
 | `COORDINATOR_HTTP_TIMEOUT_SECONDS` | `2` |
+| `COORDINATOR_LOCK_POOL_SIZE` | `5` |
+| `COORDINATOR_LOCK_MAX_OVERFLOW` | `10` |
+| `COORDINATOR_LOCK_POOL_TIMEOUT_SECONDS` | `30` |
 
 Focused validation:
 

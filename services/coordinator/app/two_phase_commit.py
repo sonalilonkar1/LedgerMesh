@@ -10,7 +10,7 @@ from typing import Protocol
 from uuid import UUID
 
 import httpx
-from ledgermesh_messaging import EventEnvelope
+from sqlalchemy import Engine, create_engine
 
 from services.coordinator.app.errors import InvalidTransition
 from services.coordinator.app.repository import PostgresCoordinatorRepository, WorkflowRecord
@@ -43,10 +43,6 @@ class CatalogParticipant(Protocol):
     def commit(self, transaction_id: UUID) -> None: ...
 
     def abort(self, transaction_id: UUID) -> None: ...
-
-
-class AuditSink(Protocol):
-    def append(self, envelope: EventEnvelope) -> None: ...
 
 
 class ParticipantUnavailable(RuntimeError):
@@ -106,16 +102,6 @@ class HttpCatalogParticipant:
         _final_ack(self.client.post(f"/v1/transactions/{transaction_id}/abort"))
 
 
-class HttpAuditSink:
-    def __init__(self, base_url: str, timeout: float = 2.0) -> None:
-        self.client = httpx.Client(base_url=base_url, timeout=timeout)
-
-    def append(self, envelope: EventEnvelope) -> None:
-        response = self.client.post("/v1/audit-events", json=envelope.to_json())
-        if response.status_code not in {200, 201}:
-            raise ParticipantUnavailable(f"Audit append failed with HTTP {response.status_code}")
-
-
 def _participant_state(response: httpx.Response) -> str:
     if response.status_code != 200:
         return "ABORTED"
@@ -133,12 +119,12 @@ class TwoPhaseCommitWorkflow:
         repository: PostgresCoordinatorRepository,
         wallet: WalletParticipant,
         catalog: CatalogParticipant,
-        audit: AuditSink,
+        lock_engine: Engine | None = None,
     ) -> None:
         self.repository = repository
         self.wallet = wallet
         self.catalog = catalog
-        self.audit = audit
+        self.lock_engine = lock_engine or _dedicated_lock_engine(repository.engine)
 
     def execute(self, transaction_id: UUID) -> WorkflowRecord:
         with self._workflow_lock(transaction_id):
@@ -146,9 +132,7 @@ class TwoPhaseCommitWorkflow:
 
     @contextmanager
     def _workflow_lock(self, transaction_id: UUID) -> Iterator[None]:
-        connection = self.repository.engine.connect().execution_options(
-            isolation_level="AUTOCOMMIT"
-        )
+        connection = self.lock_engine.connect().execution_options(isolation_level="AUTOCOMMIT")
         key = f"coordinator:{transaction_id}"
         connection.exec_driver_sql("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key,))
         try:
@@ -169,13 +153,14 @@ class TwoPhaseCommitWorkflow:
         if record.status == "PREPARING":
             decision = self._prepare_and_decide(record)
             record = self.repository.get_workflow(transaction_id)
-            assert record.status == decision
+            if record.status != decision:
+                raise InvalidTransition(
+                    f"Durable decision is {record.status}, expected {decision}.", transaction_id
+                )
 
         if record.status in {"COMMIT_DECIDED", "ABORT_DECIDED"}:
             record = self._deliver_decision(record)
 
-        if record.status in {"COMMITTED", "ABORTED"}:
-            self._deliver_audit(record.transaction_id)
         return self.repository.get_workflow(transaction_id)
 
     def _prepare_and_decide(self, record: WorkflowRecord) -> str:
@@ -213,15 +198,26 @@ class TwoPhaseCommitWorkflow:
         )
         return finalized
 
-    def _deliver_audit(self, transaction_id: UUID) -> None:
-        envelope = self.repository.pending_audit(transaction_id)
-        if envelope is None:
-            return
-        try:
-            self.audit.append(envelope)
-        except (httpx.TimeoutException, httpx.TransportError, ParticipantUnavailable):
-            return
-        self.repository.mark_audit_published(envelope.event_id)
+
+def _dedicated_lock_engine(repository_engine: Engine) -> Engine:
+    """Create a bounded pool used only for session advisory locks.
+
+    A workflow deliberately keeps this connection while participant HTTP calls
+    run. Keeping it separate from the repository pool prevents lock holders
+    from starving the database work required to finish those same workflows.
+    """
+
+    url = getattr(repository_engine, "url", None)
+    if url is None:
+        # Lightweight fake repositories in unit tests provide their own engine.
+        return repository_engine
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        pool_size=int(os.environ.get("COORDINATOR_LOCK_POOL_SIZE", "5")),
+        max_overflow=int(os.environ.get("COORDINATOR_LOCK_MAX_OVERFLOW", "10")),
+        pool_timeout=float(os.environ.get("COORDINATOR_LOCK_POOL_TIMEOUT_SECONDS", "30")),
+    )
 
 
 def default_workflow(repository: PostgresCoordinatorRepository) -> TwoPhaseCommitWorkflow:
@@ -230,5 +226,4 @@ def default_workflow(repository: PostgresCoordinatorRepository) -> TwoPhaseCommi
         repository,
         HttpWalletParticipant(os.environ.get("WALLET_URL", "http://wallet:8001"), timeout),
         HttpCatalogParticipant(os.environ.get("CATALOG_URL", "http://catalog:8002"), timeout),
-        HttpAuditSink(os.environ.get("AUDIT_LEDGER_URL", "http://audit-ledger:8003"), timeout),
     )

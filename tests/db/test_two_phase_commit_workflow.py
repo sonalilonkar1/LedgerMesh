@@ -1,10 +1,12 @@
 """Durability tests for the 2PC Coordinator workflow (LM-015)."""
 
+import time
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 import pytest
 from ledgermesh_messaging.schema import outbox
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, create_engine, select
 
 from services.coordinator.app.models import CreateRedemptionRequest
 from services.coordinator.app.repository import PostgresCoordinatorRepository
@@ -44,17 +46,6 @@ class Participant:
             raise ParticipantUnavailable("abort timeout")
 
 
-class Audit:
-    def __init__(self, fail=False):
-        self.fail = fail
-        self.events = []
-
-    def append(self, envelope):
-        if self.fail:
-            raise ParticipantUnavailable("audit unavailable")
-        self.events.append(envelope)
-
-
 @pytest.fixture
 def repository(database_url: str, engine: Engine):
     upgrade("coordinator", database_url)
@@ -75,10 +66,8 @@ def redemption(repository):
 
 def test_all_yes_persists_one_commit_decision_terminal_outcome_and_audit(repository):
     created = redemption(repository)
-    wallet, catalog, audit = Participant(), Participant(), Audit()
-    result = TwoPhaseCommitWorkflow(repository, wallet, catalog, audit).execute(
-        created.transaction_id
-    )
+    wallet, catalog = Participant(), Participant()
+    result = TwoPhaseCommitWorkflow(repository, wallet, catalog).execute(created.transaction_id)
 
     assert result.status == "COMMITTED"
     transitions = repository.list_transitions(created.transaction_id)
@@ -88,11 +77,9 @@ def test_all_yes_persists_one_commit_decision_terminal_outcome_and_audit(reposit
         "COMMIT_DECIDED",
         "COMMITTED",
     ]
-    assert len(audit.events) == 1
-    assert audit.events[0].event_type == "redemption.committed"
     with repository.engine.connect() as connection:
         row = connection.execute(select(outbox)).one()
-    assert row.published_at is not None
+    assert row.published_at is None
 
 
 @pytest.mark.parametrize(
@@ -101,7 +88,7 @@ def test_all_yes_persists_one_commit_decision_terminal_outcome_and_audit(reposit
 )
 def test_no_vote_or_timeout_persists_one_abort_decision(repository, wallet):
     created = redemption(repository)
-    result = TwoPhaseCommitWorkflow(repository, wallet, Participant(), Audit()).execute(
+    result = TwoPhaseCommitWorkflow(repository, wallet, Participant()).execute(
         created.transaction_id
     )
 
@@ -115,7 +102,7 @@ def test_no_vote_or_timeout_persists_one_abort_decision(repository, wallet):
 def test_unacknowledged_commit_is_retried_without_changing_decision(repository):
     created = redemption(repository)
     wallet = Participant(fail_final=True)
-    workflow = TwoPhaseCommitWorkflow(repository, wallet, Participant(), Audit())
+    workflow = TwoPhaseCommitWorkflow(repository, wallet, Participant())
 
     assert workflow.execute(created.transaction_id).status == "COMMIT_DECIDED"
     wallet.fail_final = False
@@ -124,20 +111,22 @@ def test_unacknowledged_commit_is_retried_without_changing_decision(repository):
     assert [row.to_status for row in transitions].count("COMMIT_DECIDED") == 1
 
 
-def test_audit_outage_leaves_terminal_outcome_and_unpublished_outbox(repository):
-    created = redemption(repository)
-    audit = Audit(fail=True)
-    result = TwoPhaseCommitWorkflow(repository, Participant(), Participant(), audit).execute(
-        created.transaction_id
-    )
+def test_concurrent_workflows_do_not_starve_the_repository_pool(database_url, engine):
+    upgrade("coordinator", database_url)
+    small_engine = create_engine(database_url, pool_size=2, max_overflow=0, pool_timeout=1)
+    repository = PostgresCoordinatorRepository(small_engine)
+    transaction_ids = [redemption(repository).transaction_id for _ in range(8)]
 
-    assert result.status == "COMMITTED"
-    with repository.engine.connect() as connection:
-        row = connection.execute(select(outbox)).one()
-    assert row.published_at is None
+    class SlowParticipant(Participant):
+        def prepare(self, record):
+            time.sleep(0.05)
+            return super().prepare(record)
 
-    audit.fail = False
-    TwoPhaseCommitWorkflow(repository, Participant(), Participant(), audit).execute(
-        created.transaction_id
-    )
-    assert len(audit.events) == 1
+    workflow = TwoPhaseCommitWorkflow(repository, SlowParticipant(), SlowParticipant())
+    try:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(workflow.execute, transaction_ids))
+        assert [result.status for result in results] == ["COMMITTED"] * 8
+    finally:
+        workflow.lock_engine.dispose()
+        small_engine.dispose()
