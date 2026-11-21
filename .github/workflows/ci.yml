@@ -8,6 +8,7 @@ on:
       - "libs/messaging/src/**"
       - "tests/**"
       - "infra/scripts/db.py"
+      - "infra/scripts/prepared_transactions.py"
       - "infra/compose.yaml"
       - "infra/Dockerfile.service"
       - "pyproject.toml"
@@ -22,6 +23,7 @@ on:
       - "libs/messaging/src/**"
       - "tests/**"
       - "infra/scripts/db.py"
+      - "infra/scripts/prepared_transactions.py"
       - "infra/compose.yaml"
       - "infra/Dockerfile.service"
       - "pyproject.toml"
@@ -43,13 +45,13 @@ jobs:
         run: uv sync --python 3.12 --locked
 
       - name: Check formatting
-        run: uv run ruff format --check services libs/contracts tests
+        run: uv run ruff format --check services libs/contracts infra/scripts tests
 
       - name: Run linting
-        run: uv run ruff check services libs/contracts tests
+        run: uv run ruff check services libs/contracts infra/scripts tests
 
-      - name: Run service unit tests
-        run: uv run pytest services -q
+      - name: Run non-database tests
+        run: uv run pytest services libs/contracts/tests tests --ignore=tests/db -q
 
   migrations:
     name: Database migrations and constraints
@@ -84,6 +86,27 @@ jobs:
 
       - name: Install Python and dependencies
         run: uv sync --python 3.12 --locked
+
+      - name: Enable PostgreSQL prepared transactions
+        run: |
+          container="$(docker ps --filter ancestor=postgres:17.11-alpine --format '{{.ID}}' | head -1)"
+          test -n "$container"
+          docker exec "$container" psql -U ledgermesh -d ledgermesh -c \
+            "ALTER SYSTEM SET max_prepared_transactions = 100"
+          docker restart "$container"
+          for attempt in {1..30}; do
+            if docker exec "$container" pg_isready -U ledgermesh -d ledgermesh; then
+              break
+            fi
+            if [[ "$attempt" == 30 ]]; then
+              echo "PostgreSQL did not become ready after restart" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          value="$(docker exec "$container" psql -U ledgermesh -d ledgermesh -Atqc \
+            'SHOW max_prepared_transactions')"
+          test "$value" = "100"
 
       - name: Migrate every service and check its constraints
         run: uv run pytest tests/db -q

@@ -18,6 +18,8 @@ from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 
+from infra.scripts.prepared_transactions import cleanup_prepared
+
 ROOT = Path(__file__).resolve().parents[2]
 SERVICES = ("coordinator", "wallet", "catalog", "audit_ledger")
 SERVER_URL = os.environ.get(
@@ -43,8 +45,13 @@ def database_url() -> Iterator[str]:
             raise
         pytest.skip(f"PostgreSQL is not reachable; run make infra-up first ({exc.orig})")
 
-    yield make_url(SERVER_URL).set(database=name).render_as_string(hide_password=False)
+    test_url = make_url(SERVER_URL).set(database=name).render_as_string(hide_password=False)
+    yield test_url
 
+    # A failed 2PC test must not poison later tests or prevent DROP DATABASE.
+    test_engine = create_engine(test_url)
+    cleanup_prepared(test_engine, report=False)
+    test_engine.dispose()
     with admin.connect() as connection:
         connection.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
     admin.dispose()

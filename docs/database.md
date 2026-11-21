@@ -110,4 +110,13 @@ make infra-up
 make db-test
 ```
 
+## Prepared transactions
+
+The local PostgreSQL servers are configured with
+`max_prepared_transactions=100`. Use `make db-prepared-list` to diagnose
+unresolved 2PC participants and `LEDGERMESH_ENV=local make db-prepared-clean`
+to roll them back during local development. See
+[`infra/README.md`](../infra/README.md#prepared-transaction-operations) for the
+query, operational limits, safety guard and production recovery policy.
+
 Each test creates and drops its own temporary database on the Wallet database server, so it never touches your local data. Set `LM_TEST_POSTGRES_URL` to use another PostgreSQL server; CI does this with a PostgreSQL service container.

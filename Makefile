@@ -1,4 +1,4 @@
-.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test db-seed db-baseline
+.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test db-seed db-baseline db-prepared-list db-prepared-clean
 
 COMPOSE_FILE ?= infra/compose.yaml
 COMPOSE := docker compose -f $(COMPOSE_FILE)
@@ -8,12 +8,12 @@ install:
 	uv sync --python 3.12
 
 format:
-	uv run ruff format services libs/contracts tests
-	uv run ruff check --fix services libs/contracts tests
+	uv run ruff format services libs/contracts infra/scripts tests
+	uv run ruff check --fix services libs/contracts infra/scripts tests
 
 lint:
-	uv run ruff format --check services libs/contracts tests
-	uv run ruff check services libs/contracts tests
+	uv run ruff format --check services libs/contracts infra/scripts tests
+	uv run ruff check services libs/contracts infra/scripts tests
 
 test:
 	uv run pytest services libs/contracts/tests tests -q
@@ -95,4 +95,13 @@ db-seed:
 
 db-baseline:
 	uv run python -m infra.scripts.seed baseline $(SERVICES)
+	
+# PostgreSQL prepared-transaction operations (LM-012). Listing is read-only.
+# Cleanup rolls back unresolved transactions and therefore requires the same
+# explicit local/test guard as the destructive migration targets.
+db-prepared-list:
+	uv run python -m infra.scripts.prepared_transactions list $(SERVICES)
+
+db-prepared-clean:
+	uv run python -m infra.scripts.prepared_transactions cleanup $(SERVICES)
 
