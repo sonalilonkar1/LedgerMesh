@@ -95,9 +95,12 @@ WHERE database = current_database()
 ORDER BY prepared, gid;
 ```
 
-For local or test recovery only, roll back every unresolved transaction:
+For local or test recovery only, roll back every unresolved transaction. Stop
+the Coordinator and participant services first so that cleanup cannot race an
+active 2PC workflow:
 
 ```bash
+docker compose -f infra/compose.yaml stop coordinator wallet catalog audit-ledger
 LEDGERMESH_ENV=local make db-prepared-clean
 ```
 
@@ -165,6 +168,7 @@ If a health check returns an unexpected status or identifies the wrong service, 
 ```bash
 WALLET_PORT=18001 make infra-up
 WALLET_PORT=18001 make infra-smoke
+```
 
 After changing `max_prepared_transactions` or database initialization settings, use `make infra-reset` so PostgreSQL starts with fresh local volumes.
 

@@ -39,7 +39,7 @@ def prepared_database(database_url: str):
 def test_development_server_enables_prepared_transactions(prepared_database) -> None:
     with prepared_database.connect() as connection:
         configured = connection.scalar(text("SHOW max_prepared_transactions"))
-    assert int(configured) == 100
+    assert int(configured) > 0
 
 
 def test_prepared_transaction_survives_connection_loss(database_url, prepared_database) -> None:

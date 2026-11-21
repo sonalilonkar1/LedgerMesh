@@ -50,8 +50,8 @@ jobs:
       - name: Run linting
         run: uv run ruff check services libs/contracts infra/scripts tests
 
-      - name: Run service unit tests
-        run: uv run pytest services -q
+      - name: Run non-database tests
+        run: uv run pytest services libs/contracts/tests tests --ignore=tests/db -q
 
   migrations:
     name: Database migrations and constraints
