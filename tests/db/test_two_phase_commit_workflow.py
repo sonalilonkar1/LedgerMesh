@@ -135,9 +135,71 @@ def test_audit_outage_leaves_terminal_outcome_and_unpublished_outbox(repository)
     with repository.engine.connect() as connection:
         row = connection.execute(select(outbox)).one()
     assert row.published_at is None
+    assert [item.transaction_id for item in repository.list_recoverable_2pc()] == [
+        created.transaction_id
+    ]
 
     audit.fail = False
-    TwoPhaseCommitWorkflow(repository, Participant(), Participant(), audit).execute(
+    TwoPhaseCommitWorkflow(repository, Participant(), Participant(), audit).recover(
         created.transaction_id
     )
     assert len(audit.events) == 1
+    assert repository.list_recoverable_2pc() == []
+
+
+def test_restart_while_preparing_durably_uses_presumed_abort(repository):
+    created = redemption(repository)
+    repository.transition(created.transaction_id, "PREPARING", "crash point before decision")
+
+    restarted_repository = PostgresCoordinatorRepository(repository.engine)
+    wallet, catalog = Participant(), Participant()
+    result = TwoPhaseCommitWorkflow(restarted_repository, wallet, catalog, Audit()).recover(
+        created.transaction_id
+    )
+
+    assert result.status == "ABORTED"
+    transitions = restarted_repository.list_transitions(created.transaction_id)
+    assert [row.to_status for row in transitions] == [
+        "REQUESTED",
+        "PREPARING",
+        "ABORT_DECIDED",
+        "ABORTED",
+    ]
+    assert wallet.final_calls == [("abort", created.transaction_id)]
+    assert catalog.final_calls == [("abort", created.transaction_id)]
+
+
+def test_restart_after_commit_decision_retransmits_without_conflicting_decision(repository):
+    created = redemption(repository)
+    repository.transition(created.transaction_id, "PREPARING")
+    repository.transition(created.transaction_id, "COMMIT_DECIDED", "crash after decision")
+
+    restarted_repository = PostgresCoordinatorRepository(repository.engine)
+    wallet, catalog = Participant(), Participant()
+    result = TwoPhaseCommitWorkflow(restarted_repository, wallet, catalog, Audit()).recover(
+        created.transaction_id
+    )
+
+    assert result.status == "COMMITTED"
+    transitions = restarted_repository.list_transitions(created.transaction_id)
+    states = [row.to_status for row in transitions]
+    assert states.count("COMMIT_DECIDED") == 1
+    assert "ABORT_DECIDED" not in states
+    assert wallet.final_calls == [("commit", created.transaction_id)]
+    assert catalog.final_calls == [("commit", created.transaction_id)]
+
+
+def test_repository_lists_in_doubt_transactions_after_restart(repository):
+    preparing = redemption(repository)
+    repository.transition(preparing.transaction_id, "PREPARING")
+    decided = redemption(repository)
+    repository.transition(decided.transaction_id, "PREPARING")
+    repository.transition(decided.transaction_id, "ABORT_DECIDED")
+
+    restarted = PostgresCoordinatorRepository(repository.engine)
+    rows = restarted.list_in_doubt_2pc()
+
+    assert {row.transaction_id: row.status for row in rows} == {
+        preparing.transaction_id: "PREPARING",
+        decided.transaction_id: "ABORT_DECIDED",
+    }

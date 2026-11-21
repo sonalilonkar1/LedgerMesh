@@ -6,6 +6,30 @@ info:
 servers:
   - url: http://localhost:8000
 paths:
+  /internal/v1/2pc/in-doubt:
+    get:
+      operationId: listInDoubtTwoPhaseCommitTransactions
+      summary: List 2PC transactions awaiting recovery or participant acknowledgement
+      responses:
+        "200":
+          description: In-doubt transactions ordered from oldest to newest
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/InDoubtTransactionView"
+  /internal/v1/2pc/recovery/run:
+    post:
+      operationId: runTwoPhaseCommitRecovery
+      summary: Run one bounded 2PC recovery scan
+      responses:
+        "200":
+          description: Recovery scan counts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryRunResponse"
   /internal/v1/redemptions/{transaction_id}/execute-2pc:
     post:
       operationId: executeTwoPhaseCommit
@@ -125,6 +149,43 @@ components:
           schema:
             $ref: "#/components/schemas/Problem"
   schemas:
+    InDoubtTransactionView:
+      type: object
+      additionalProperties: false
+      required: [transaction_id, status, workflow_step, updated_at, recovery_action]
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PREPARING, COMMIT_DECIDED, ABORT_DECIDED]
+        workflow_step:
+          type: integer
+          minimum: 0
+        updated_at:
+          type: string
+          format: date-time
+        recovery_action:
+          type: string
+          enum: [PRESUME_ABORT, RETRANSMIT_COMMIT, RETRANSMIT_ABORT]
+    RecoveryRunResponse:
+      type: object
+      additionalProperties: false
+      required: [scanned, recovered, still_in_doubt, failed]
+      properties:
+        scanned:
+          type: integer
+          minimum: 0
+        recovered:
+          type: integer
+          minimum: 0
+        still_in_doubt:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
     TransitionRequest:
       type: object
       additionalProperties: false

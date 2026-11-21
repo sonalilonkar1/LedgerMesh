@@ -126,6 +126,11 @@ services:
       SERVICE_NAME: coordinator
       DATABASE_URL: postgresql+psycopg://coordinator:${POSTGRES_PASSWORD:-ledgermesh_dev}@coordinator-db:5432/coordinator
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      COORDINATOR_RECOVERY_ENABLED: "true"
+      COORDINATOR_RECOVERY_INTERVAL_SECONDS: "5"
+      WALLET_URL: http://wallet:8001
+      CATALOG_URL: http://catalog:8002
+      AUDIT_LEDGER_URL: http://audit-ledger:8003
     depends_on:
       coordinator-db:
         condition: service_healthy

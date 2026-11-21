@@ -114,3 +114,50 @@ uv run pytest services/coordinator/tests/test_two_phase_commit.py -q
 make infra-up
 uv run pytest tests/db/test_two_phase_commit_workflow.py -q
 ```
+
+## 2PC crash recovery (LM-016)
+
+The Coordinator runs a bounded recovery scan immediately after startup and at
+the configured interval. Recovery uses only committed Coordinator state:
+
+| Durable state | Recovery action |
+|---|---|
+| `REQUESTED` | Start the workflow normally; no participant was contacted yet |
+| `PREPARING` | Persist `ABORT_DECIDED` (presumed abort), then retransmit ABORT |
+| `COMMIT_DECIDED` | Retransmit COMMIT until both participants acknowledge it |
+| `ABORT_DECIDED` | Retransmit ABORT until both participants acknowledge it |
+| `COMMITTED` / `ABORTED` | Never change the outcome; audit delivery remains retryable from the outbox |
+
+The crucial rule is that recovery never repeats the vote phase for a
+`PREPARING` transaction. A crash may have occurred after one or both participants
+prepared but before the Coordinator durably recorded a decision. Presumed abort
+prevents recovery from inventing a conflicting COMMIT decision.
+
+Participant COMMIT and ABORT endpoints are idempotent, so retransmitting a known
+decision is safe when one participant acknowledged before the other or when an
+acknowledgement was lost.
+
+Operator endpoints:
+
+```bash
+# Show transactions that need a presumed abort or decision retransmission.
+curl http://localhost:8000/internal/v1/2pc/in-doubt
+
+# Trigger one bounded recovery pass without waiting for the worker interval.
+curl -X POST http://localhost:8000/internal/v1/2pc/recovery/run
+```
+
+| Variable | Default in Compose | Purpose |
+|---|---:|---|
+| `COORDINATOR_RECOVERY_ENABLED` | `true` | Enable the startup/periodic worker |
+| `COORDINATOR_RECOVERY_INTERVAL_SECONDS` | `5` | Delay between bounded scans |
+
+Focused validation:
+
+```bash
+uv run pytest services/coordinator/tests/test_recovery.py \
+  services/coordinator/tests/test_recovery_api.py \
+  services/coordinator/tests/test_two_phase_commit.py -q
+make infra-up
+uv run pytest tests/db/test_two_phase_commit_workflow.py -q
+```
