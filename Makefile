@@ -1,4 +1,4 @@
-.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test db-seed db-baseline db-prepared-list db-prepared-clean
+.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test db-seed db-baseline db-prepared-list db-prepared-clean
 
 COMPOSE_FILE ?= infra/compose.yaml
 COMPOSE := docker compose -f $(COMPOSE_FILE)
@@ -32,6 +32,11 @@ check: lint test
 run-coordinator:
 	uv run uvicorn services.coordinator.app.main:app --reload --port 8000
 
+run-coordinator-saga:
+	COORDINATOR_DATABASE_URL=$${COORDINATOR_DATABASE_URL:-postgresql+psycopg://coordinator:ledgermesh_dev@localhost:54321/coordinator} \
+	  CATALOG_URL=$${CATALOG_URL:-http://localhost:8002} \
+	  uv run python -m services.coordinator.app.saga_worker
+
 run-wallet:
 	uv run uvicorn services.wallet.app.main:app --reload --port 8001
 
@@ -48,6 +53,10 @@ run-catalog-saga:
 
 run-ledger:
 	uv run uvicorn services.audit_ledger.app.main:app --reload --port 8003
+
+run-audit-consumer:
+	AUDIT_LEDGER_DATABASE_URL=$${AUDIT_LEDGER_DATABASE_URL:-postgresql+psycopg://audit_ledger:ledgermesh_dev@localhost:54324/audit_ledger} \
+	  uv run python -m services.audit_ledger.app.event_worker
 
 infra-up:
 	$(COMPOSE) up --build -d --wait
