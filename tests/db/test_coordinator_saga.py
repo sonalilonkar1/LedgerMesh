@@ -1,8 +1,10 @@
 """PostgreSQL tests for the durable Coordinator Saga state machine (LM-022)."""
 
 import asyncio
+from collections import defaultdict
 from uuid import uuid4
 
+import httpx
 import pytest
 from ledgermesh_messaging import EventEnvelope, outbox, process_once
 from sqlalchemy import Engine, func, select
@@ -27,6 +29,29 @@ CONSUMER = "coordinator-saga"
 
 class FakeQuotes:
     async def get_quote(self, reward_id: str) -> RewardQuote:
+        return RewardQuote(reward_id, point_cost=100, available_inventory=10, version=7)
+
+
+class MissingRewardQuotes:
+    async def get_quote(self, reward_id: str) -> RewardQuote:
+        request = httpx.Request("GET", f"http://catalog/v1/rewards/{reward_id}")
+        response = httpx.Response(404, request=request)
+        raise httpx.HTTPStatusError("not found", request=request, response=response)
+
+
+class InvalidQuotes:
+    async def get_quote(self, reward_id: str) -> RewardQuote:
+        return RewardQuote(reward_id, point_cost=0, available_inventory=10, version=7)
+
+
+class FailingQuotes:
+    def __init__(self) -> None:
+        self.calls = defaultdict(int)
+
+    async def get_quote(self, reward_id: str) -> RewardQuote:
+        self.calls[reward_id] += 1
+        if reward_id == "reward-broken":
+            raise httpx.ConnectError("Catalog unavailable")
         return RewardQuote(reward_id, point_cost=100, available_inventory=10, version=7)
 
 
@@ -66,6 +91,26 @@ async def start(database_url, transaction_id):
     try:
         count = await SagaStarter(sessions, FakeQuotes(), CoordinatorSagaMachine()).run_once()
         assert count == 1
+    finally:
+        await async_engine.dispose()
+
+
+async def run_starter(database_url, quotes, **kwargs):
+    async_engine = create_async_engine(database_url)
+    sessions = async_sessionmaker(async_engine, expire_on_commit=False)
+    try:
+        starter = SagaStarter(sessions, quotes, CoordinatorSagaMachine(), **kwargs)
+        return await starter.run_once(), starter
+    finally:
+        await async_engine.dispose()
+
+
+async def run_starter_twice(database_url, quotes, **kwargs):
+    async_engine = create_async_engine(database_url)
+    sessions = async_sessionmaker(async_engine, expire_on_commit=False)
+    try:
+        starter = SagaStarter(sessions, quotes, CoordinatorSagaMachine(), **kwargs)
+        return await starter.run_once(), await starter.run_once()
     finally:
         await async_engine.dispose()
 
@@ -283,3 +328,85 @@ def test_same_event_redelivery_is_an_inbox_duplicate(database_url, saga_db):
     assert first.duplicate is False
     assert second.duplicate is True
     assert row(saga_db, created.transaction_id).status == "RESERVING_INVENTORY"
+
+
+def test_late_result_with_new_event_id_is_recorded_and_ignored(database_url, saga_db):
+    created = create(PostgresCoordinatorRepository(saga_db))
+    asyncio.run(start(database_url, created.transaction_id))
+    deducting = row(saga_db, created.transaction_id)
+    original = result(
+        deducting,
+        "wallet.points_deducted",
+        aggregate_type="wallet",
+        aggregate_id=deducting.user_id,
+    )
+
+    asyncio.run(consume(database_url, original))
+    before = len(messages(saga_db))
+    late = original.model_copy(update={"event_id": uuid4()})
+    handled = asyncio.run(consume(database_url, late))
+
+    assert handled.duplicate is False
+    assert row(saga_db, created.transaction_id).status == "RESERVING_INVENTORY"
+    assert len(messages(saga_db)) == before
+
+
+def test_result_after_terminal_state_is_recorded_and_ignored(database_url, saga_db):
+    created = create(PostgresCoordinatorRepository(saga_db))
+    asyncio.run(start(database_url, created.transaction_id))
+    deducting = row(saga_db, created.transaction_id)
+    rejected = result(
+        deducting,
+        "wallet.deduction_rejected",
+        aggregate_type="wallet",
+        aggregate_id=deducting.user_id,
+    )
+    asyncio.run(consume(database_url, rejected))
+    before = len(messages(saga_db))
+
+    late = rejected.model_copy(update={"event_id": uuid4()})
+    handled = asyncio.run(consume(database_url, late))
+
+    assert handled.duplicate is False
+    assert row(saga_db, created.transaction_id).status == "FAILED"
+    assert len(messages(saga_db)) == before
+
+
+@pytest.mark.parametrize("quotes", [MissingRewardQuotes(), InvalidQuotes()])
+def test_permanent_quote_failure_marks_only_that_redemption_failed(database_url, saga_db, quotes):
+    created = create(PostgresCoordinatorRepository(saga_db))
+
+    count, _ = asyncio.run(run_starter(database_url, quotes))
+
+    assert count == 0
+    assert row(saga_db, created.transaction_id).status == "FAILED"
+    queued = messages(saga_db)
+    assert queued[-1].topic == "redemption.events"
+    assert queued[-1].envelope["payload"]["to_status"] == "FAILED"
+
+
+def test_transient_quote_failure_is_isolated_and_backed_off(database_url, saga_db):
+    repository = PostgresCoordinatorRepository(saga_db)
+    broken = repository.create(
+        f"saga-{uuid4()}",
+        CreateRedemptionRequest(
+            user_id="user-alice",
+            reward_id="reward-broken",
+            quantity=1,
+            coordination_mode="saga",
+        ),
+    )
+    healthy = create(repository)
+    quotes = FailingQuotes()
+
+    first_count, second_count = asyncio.run(
+        run_starter_twice(database_url, quotes, poll_interval=10.0, max_backoff=10.0)
+    )
+
+    assert first_count == 1
+    assert second_count == 0
+    assert row(saga_db, broken.transaction_id).status == "REQUESTED"
+    assert row(saga_db, healthy.transaction_id).status == "DEDUCTING_POINTS"
+    assert quotes.calls["reward-broken"] == 1
+
+    assert quotes.calls["reward-broken"] == 1

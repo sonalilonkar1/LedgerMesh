@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,6 +22,7 @@ from ledgermesh_messaging import (
     enqueue,
 )
 from sqlalchemy import Connection, select, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from services.coordinator.app.db.schema import redemption_transitions, redemptions
@@ -32,6 +34,14 @@ DEDUCTION_REJECTED = "wallet.deduction_rejected"
 POINTS_REFUNDED = "wallet.points_refunded"
 INVENTORY_RESERVED = "catalog.inventory_reserved"
 RESERVATION_REJECTED = "catalog.reservation_rejected"
+RESULT_AGGREGATES = {
+    POINTS_DEDUCTED: "wallet",
+    DEDUCTION_REJECTED: "wallet",
+    POINTS_REFUNDED: "wallet",
+    INVENTORY_RESERVED: "reward",
+    RESERVATION_REJECTED: "reward",
+}
+TERMINAL_SAGA_STATES = {"COMPLETED", "FAILED", "COMPENSATED"}
 
 
 class InvalidSagaResult(PermanentError):
@@ -128,7 +138,21 @@ class CoordinatorSagaMachine:
 
     def handle_result(self, connection: Connection, envelope: EventEnvelope):
         row = self._locked(connection, envelope.transaction_id)
-        self._validate_identity(row, envelope)
+        self._validate_stable_identity(row, envelope)
+
+        if row.status in TERMINAL_SAGA_STATES or envelope.workflow_step < row.workflow_step:
+            logger.info(
+                "ignoring stale Saga result transaction_id=%s event_id=%s "
+                "event_step=%s current_step=%s status=%s",
+                row.transaction_id,
+                envelope.event_id,
+                envelope.workflow_step,
+                row.workflow_step,
+                row.status,
+            )
+            return []
+
+        self._validate_current_command(row, envelope)
 
         if row.status == "DEDUCTING_POINTS":
             if envelope.event_type == POINTS_DEDUCTED:
@@ -233,21 +257,36 @@ class CoordinatorSagaMachine:
         return [_audit_event(updated, row.status, status, reason, result.event_id)]
 
     @staticmethod
-    def _validate_identity(row, envelope: EventEnvelope) -> None:
+    def _validate_stable_identity(row, envelope: EventEnvelope) -> None:
         if row.coordination_mode != "saga":
             raise InvalidSagaResult("result targets a non-Saga redemption")
         if envelope.correlation_id != row.correlation_id:
             raise InvalidSagaResult("result correlation_id does not match the redemption")
+        expected_aggregate = RESULT_AGGREGATES.get(envelope.event_type)
+        if expected_aggregate is None:
+            raise InvalidSagaResult(f"unsupported Saga result {envelope.event_type}")
+        expected_id = row.user_id if expected_aggregate == "wallet" else row.reward_id
+        if envelope.aggregate_type != expected_aggregate or envelope.aggregate_id != expected_id:
+            raise InvalidSagaResult("result targets the wrong aggregate")
+
+    @staticmethod
+    def _validate_current_command(row, envelope: EventEnvelope) -> None:
         if envelope.causation_id != row.current_command_id:
             raise InvalidSagaResult("result does not acknowledge the current command")
         if envelope.workflow_step != row.workflow_step:
             raise InvalidSagaResult("result workflow_step does not match the current step")
-        expected_aggregate = (
-            "wallet" if row.status in {"DEDUCTING_POINTS", "COMPENSATING"} else "reward"
-        )
-        expected_id = row.user_id if expected_aggregate == "wallet" else row.reward_id
-        if envelope.aggregate_type != expected_aggregate or envelope.aggregate_id != expected_id:
-            raise InvalidSagaResult("result targets the wrong aggregate")
+
+    def fail_start(self, connection: Connection, transaction_id: UUID, reason: str):
+        row = self._locked(connection, transaction_id)
+        if row.coordination_mode != "saga":
+            raise InvalidSagaResult("only Saga redemptions can be failed by the Saga worker")
+        if row.status != "REQUESTED":
+            return []
+        updated = self._transition(connection, row, "FAILED", reason, command_id=None)
+        return [
+            _audit_event(row, None, "REQUESTED", "redemption created", causation_id=None),
+            _audit_event(updated, "REQUESTED", "FAILED", reason, causation_id=None),
+        ]
 
     @staticmethod
     def _locked(connection: Connection, transaction_id: UUID):
@@ -325,11 +364,42 @@ class SagaStarter:
         machine: CoordinatorSagaMachine,
         *,
         poll_interval: float = 0.5,
+        max_backoff: float = 30.0,
     ) -> None:
         self.sessions = sessions
         self.quote_client = quote_client
         self.machine = machine
         self.poll_interval = poll_interval
+        self.max_backoff = max_backoff
+        self._failures: dict[UUID, int] = {}
+        self._retry_after: dict[UUID, float] = {}
+
+    async def _fail_permanently(self, transaction_id: UUID, reason: str) -> bool:
+        async with self.sessions() as session, session.begin():
+            messages = await session.run_sync(
+                lambda sync: self.machine.fail_start(sync.connection(), transaction_id, reason)
+            )
+            for message in messages:
+                await enqueue(session, message)
+        self._failures.pop(transaction_id, None)
+        self._retry_after.pop(transaction_id, None)
+        return bool(messages)
+
+    async def _fail_or_back_off(self, transaction_id: UUID, reason: str) -> None:
+        try:
+            await self._fail_permanently(transaction_id, reason)
+        except (OSError, SQLAlchemyError):
+            self._back_off(transaction_id)
+            logger.exception(
+                "could not persist permanent Saga failure %s; retry is backed off",
+                transaction_id,
+            )
+
+    def _back_off(self, transaction_id: UUID) -> None:
+        failures = self._failures.get(transaction_id, 0) + 1
+        self._failures[transaction_id] = failures
+        delay = min(self.poll_interval * (2 ** (failures - 1)), self.max_backoff)
+        self._retry_after[transaction_id] = time.monotonic() + delay
 
     async def run_once(self) -> int:
         async with self.sessions() as session:
@@ -347,6 +417,8 @@ class SagaStarter:
 
         started = 0
         for transaction_id, reward_id in rows:
+            if time.monotonic() < self._retry_after.get(transaction_id, 0):
+                continue
             try:
                 quote = await self.quote_client.get_quote(reward_id)
                 async with self.sessions() as session, session.begin():
@@ -358,12 +430,34 @@ class SagaStarter:
                     for message in messages:
                         await enqueue(session, message)
                 started += bool(messages)
-            except (httpx.HTTPError, OSError):
-                logger.exception("could not start Saga %s; it remains REQUESTED", transaction_id)
+                self._failures.pop(transaction_id, None)
+                self._retry_after.pop(transaction_id, None)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    await self._fail_or_back_off(transaction_id, "Catalog reward was not found")
+                    logger.warning(
+                        "failed Saga %s because its reward was not found", transaction_id
+                    )
+                else:
+                    self._back_off(transaction_id)
+                    logger.exception(
+                        "Catalog temporarily rejected quote for Saga %s", transaction_id
+                    )
+            except (InvalidSagaResult, TypeError, ValueError) as exc:
+                await self._fail_or_back_off(
+                    transaction_id, f"Catalog returned an invalid reward quote: {exc}"
+                )
+                logger.warning("failed Saga %s because its quote was invalid", transaction_id)
+            except (httpx.HTTPError, OSError, SQLAlchemyError):
+                self._back_off(transaction_id)
+                logger.exception("could not start Saga %s; retry is backed off", transaction_id)
         return started
 
     async def run(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
-            await self.run_once()
+            try:
+                await self.run_once()
+            except (OSError, SQLAlchemyError):
+                logger.exception("Saga starter scan failed; retrying after poll interval")
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=self.poll_interval)

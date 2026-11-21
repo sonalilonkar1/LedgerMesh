@@ -54,6 +54,14 @@ and Catalog result events, and publishes the Coordinator outbox. A state only
 advances when the result acknowledges `current_command_id` and matches the
 stored correlation ID, workflow step and aggregate.
 
+Late deliveries are normal under at-least-once messaging. Results for an
+earlier workflow step, duplicates with a new event ID after the state has
+advanced, and results received after a terminal state are logged, recorded in
+the inbox, and acknowledged without changing the redemption. Messages that can
+never belong to the workflow—unknown or non-Saga transactions, wrong
+correlation IDs, unsupported result types, and wrong aggregates—remain
+permanent errors.
+
 Each transition, the next participant command and the inbox claim commit in
 one Coordinator database transaction. Restarting the worker therefore resumes
 from the stored state and unpublished outbox rows. Transition events are sent
@@ -63,6 +71,15 @@ Audit Ledger with its transactional inbox.
 The Catalog quote, `point_cost`, `reward_version`, and `total_points` are filled
 when the workflow begins. LM-010 intentionally persists the client request first
 without reading another service's database.
+
+A missing reward or structurally invalid Catalog quote moves that redemption
+durably from `REQUESTED` to `FAILED` and emits its audit events. Transient
+Catalog, network, and database failures leave the redemption in `REQUESTED` and
+use bounded exponential backoff. Failures are isolated per redemption so one
+bad request cannot stop the starter, result consumer, or outbox publisher.
+
+The Audit Ledger consumer publishes unsupported or malformed transition events
+to `redemption.events.dlq`; such an event no longer stops the consumer.
 
 ## Local use
 
