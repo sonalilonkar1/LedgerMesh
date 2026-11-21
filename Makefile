@@ -1,4 +1,4 @@
-.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test db-seed db-baseline db-prepared-list db-prepared-clean
+.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean
 
 COMPOSE_FILE ?= infra/compose.yaml
 COMPOSE := docker compose -f $(COMPOSE_FILE)
@@ -86,6 +86,12 @@ db-reset:
 db-test:
 	uv run pytest tests/db -q
 
+# LM-017 uses four isolated databases and real PostgreSQL prepared transactions.
+test-2pc-integration:
+	mkdir -p artifacts
+	uv run pytest tests/integration -q \
+		--junitxml=artifacts/2pc-integration.xml
+
 # Deterministic seed data (LM-006). Both change data, so both need an explicit
 # LEDGERMESH_ENV=local or test, e.g. LEDGERMESH_ENV=local make db-baseline.
 #   db-seed      write the baseline users and rewards (repeatable)
@@ -95,7 +101,7 @@ db-seed:
 
 db-baseline:
 	uv run python -m infra.scripts.seed baseline $(SERVICES)
-	
+
 # PostgreSQL prepared-transaction operations (LM-012). Listing is read-only.
 # Cleanup rolls back unresolved transactions and therefore requires the same
 # explicit local/test guard as the destructive migration targets.

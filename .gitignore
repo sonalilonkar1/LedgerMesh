@@ -1,5 +1,6 @@
 # Operating system files
 .DS_Store
+artifacts/
 Thumbs.db
 
 # Local environment variables (keep example configuration)
