@@ -1,12 +1,15 @@
 from functools import lru_cache
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
 from services.catalog.app.errors import CatalogError
 from services.catalog.app.models import (
+    CatalogPrepareRequest,
     FulfillRequest,
+    ParticipantResponse,
     Problem,
     ReleaseRequest,
     ReservationResult,
@@ -14,6 +17,8 @@ from services.catalog.app.models import (
     RewardQuote,
     RewardView,
 )
+from services.catalog.app.participant import PostgresCatalogParticipantRepository
+from services.catalog.app.participant_service import CatalogParticipantService
 from services.catalog.app.repository import PostgresCatalogRepository, get_engine
 from services.catalog.app.service import CatalogService
 
@@ -28,6 +33,16 @@ def get_catalog_service() -> CatalogService:
 
 
 CatalogServiceDependency = Annotated[CatalogService, Depends(get_catalog_service)]
+
+
+@lru_cache
+def get_participant_service() -> CatalogParticipantService:
+    return CatalogParticipantService(PostgresCatalogParticipantRepository(get_engine()))
+
+
+ParticipantServiceDependency = Annotated[
+    CatalogParticipantService, Depends(get_participant_service)
+]
 
 
 @app.exception_handler(CatalogError)
@@ -103,3 +118,53 @@ def fulfill_reservation(
     reward_id: str, request: FulfillRequest, service: CatalogServiceDependency
 ) -> ReservationResult:
     return service.fulfill(reward_id, request.transaction_id, request.event_id)
+
+
+@app.post(
+    "/v1/transactions/{transaction_id}/prepare",
+    response_model=ParticipantResponse,
+    responses={409: {"model": Problem}},
+    tags=["2pc"],
+)
+def prepare_transaction(
+    transaction_id: UUID,
+    request: CatalogPrepareRequest,
+    service: ParticipantServiceDependency,
+) -> ParticipantResponse:
+    return service.prepare(transaction_id, request)
+
+
+@app.post(
+    "/v1/transactions/{transaction_id}/commit",
+    response_model=ParticipantResponse,
+    responses={404: {"model": Problem}, 409: {"model": Problem}},
+    tags=["2pc"],
+)
+def commit_transaction(
+    transaction_id: UUID, service: ParticipantServiceDependency
+) -> ParticipantResponse:
+    return service.commit(transaction_id)
+
+
+@app.post(
+    "/v1/transactions/{transaction_id}/abort",
+    response_model=ParticipantResponse,
+    responses={409: {"model": Problem}},
+    tags=["2pc"],
+)
+def abort_transaction(
+    transaction_id: UUID, service: ParticipantServiceDependency
+) -> ParticipantResponse:
+    return service.abort(transaction_id)
+
+
+@app.get(
+    "/v1/transactions/{transaction_id}",
+    response_model=ParticipantResponse,
+    responses={404: {"model": Problem}},
+    tags=["2pc"],
+)
+def get_transaction(
+    transaction_id: UUID, service: ParticipantServiceDependency
+) -> ParticipantResponse:
+    return service.get(transaction_id)

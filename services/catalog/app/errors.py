@@ -48,3 +48,15 @@ class InvalidQuantity(CatalogError):
     status = 422
     title = "Invalid reservation quantity"
     problem_type = "urn:ledgermesh:catalog:invalid-quantity"
+
+
+class ParticipantTransactionNotFound(CatalogError):
+    status = 404
+    title = "Participant transaction not found"
+    problem_type = "urn:ledgermesh:catalog:participant-not-found"
+
+
+class ParticipantConflict(CatalogError):
+    status = 409
+    title = "Participant transaction conflict"
+    problem_type = "urn:ledgermesh:catalog:participant-conflict"
