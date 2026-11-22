@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
+from uuid import UUID
 
 from sqlalchemy import Engine, text
+from sqlalchemy.sql.elements import TextClause
 
 
 @dataclass(frozen=True)
@@ -16,9 +19,14 @@ class InvariantReport:
         return len(self.violations)
 
 
-def _scalar(engine: Engine, statement: str) -> int:
+def _scalar(
+    engine: Engine,
+    statement: str | TextClause,
+    parameters: dict[str, Any] | None = None,
+) -> int:
     with engine.connect() as connection:
-        return int(connection.scalar(text(statement)) or 0)
+        query = text(statement) if isinstance(statement, str) else statement
+        return int(connection.scalar(query, parameters or {}) or 0)
 
 
 def check_2pc_invariants(engines: dict[str, Engine]) -> InvariantReport:
@@ -66,14 +74,21 @@ def check_2pc_invariants(engines: dict[str, Engine]) -> InvariantReport:
     for transaction_id, status in terminal:
         wallet_effect = _scalar(
             wallet,
-            "SELECT count(*) FROM wallet_operations "
-            f"WHERE transaction_id = '{transaction_id}' AND operation = 'deduct' "
-            "AND status = 'applied'",
+            text(
+                "SELECT count(*) FROM wallet_operations "
+                "WHERE transaction_id = :transaction_id AND operation = 'deduct' "
+                "AND status = 'applied'"
+            ),
+            {"transaction_id": UUID(transaction_id)},
         )
         catalog_effect = _scalar(
             catalog,
-            "SELECT count(*) FROM reservations "
-            f"WHERE transaction_id = '{transaction_id}' AND status = 'reserved'",
+            text(
+                "SELECT count(*) FROM reservations "
+                "WHERE transaction_id = :transaction_id "
+                "AND status IN ('reserved', 'fulfilled')"
+            ),
+            {"transaction_id": UUID(transaction_id)},
         )
         if status == "COMMITTED" and (wallet_effect != 1 or catalog_effect != 1):
             violations.append(f"INV-05: committed {transaction_id} is incomplete")

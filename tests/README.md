@@ -21,10 +21,16 @@ The scenarios prove:
 - the post-test INV-01 through INV-06 checker reports zero violations;
 - no PostgreSQL prepared transaction remains after a completed experiment.
 
-The blocking test uses a 700 ms PostgreSQL `statement_timeout`. Its measured
-`prepared_lock_blocking_seconds` value and the invariant count for every
-scenario are recorded in `artifacts/2pc-integration.json`. JUnit results are
-written to `artifacts/2pc-integration.xml`; CI retains both for 14 days.
+The blocking test uses a 700 ms PostgreSQL `statement_timeout`. The JSON report
+separates the probe timeout from the useful lock-lifetime measurement:
+
+- `prepared_lock_probe_timeout_seconds` proves a competing update was blocked;
+- `prepared_lock_duration_seconds` measures from the completed prepare until
+  recovery released the lock and the competing update succeeded.
+
+Both measurements and the invariant count for every scenario are recorded in
+`artifacts/2pc-integration.json`. JUnit results are written to
+`artifacts/2pc-integration.xml`; CI retains both for 14 days.
 
 To use a different PostgreSQL server:
 

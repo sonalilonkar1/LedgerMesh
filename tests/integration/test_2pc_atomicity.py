@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import pytest
+from ledgermesh_messaging import EventEnvelope
+from ledgermesh_messaging.schema import outbox
 from sqlalchemy import Engine, insert, select, text
 from sqlalchemy.exc import DBAPIError
 
@@ -82,14 +84,6 @@ class CatalogAdapter:
         self.repository.abort(transaction_id)
 
 
-class AuditAdapter:
-    def __init__(self, repository: PostgresAuditRepository) -> None:
-        self.repository = repository
-
-    def append(self, envelope) -> None:
-        self.repository.append(envelope)
-
-
 @dataclass
 class Harness:
     engines: dict[str, Engine]
@@ -151,7 +145,6 @@ def harness(service_databases) -> Harness:
         coordinator,
         WalletAdapter(wallet),
         CatalogAdapter(catalog, engines["catalog"]),
-        AuditAdapter(audit),
     )
     return Harness(engines, coordinator, wallet, catalog, audit, workflow)
 
@@ -165,10 +158,24 @@ def assert_zero_violations(harness: Harness, lm017_report, scenario: str) -> Non
     assert report.count == 0, "\n".join(report.violations)
 
 
+def deliver_audit_outbox(harness: Harness, transaction_id: UUID) -> None:
+    """Model the outbox/Kafka/audit-consumer boundary without a Kafka fixture."""
+    with harness.engines["coordinator"].connect() as connection:
+        document = connection.scalar(
+            select(outbox.c.envelope).where(
+                outbox.c.topic == "redemption.events",
+                outbox.c.message_key == str(transaction_id),
+            )
+        )
+    assert document is not None
+    harness.audit.append(EventEnvelope.model_validate(document))
+
+
 def test_happy_path_commits_wallet_inventory_coordinator_and_audit(harness: Harness, lm017_report):
     created = harness.create()
 
     result = harness.workflow.execute(created.transaction_id)
+    deliver_audit_outbox(harness, created.transaction_id)
 
     assert result.status == "COMMITTED"
     with harness.engines["wallet"].connect() as connection:
@@ -251,8 +258,9 @@ def test_coordinator_crash_measures_prepared_lock_blocking_and_recovers(
         100,
     )
     assert vote.state == "PREPARED"
+    prepared_at = time.monotonic()
 
-    started = time.monotonic()
+    probe_started = time.monotonic()
     with pytest.raises(DBAPIError), harness.engines["wallet"].begin() as connection:
         connection.execute(text("SET LOCAL statement_timeout = '700ms'"))
         connection.execute(
@@ -261,16 +269,15 @@ def test_coordinator_crash_measures_prepared_lock_blocking_and_recovers(
                 "WHERE user_id = 'user-funded'"
             )
         )
-    blocked_seconds = time.monotonic() - started
-    lm017_report["prepared_lock_blocking_seconds"] = round(blocked_seconds, 3)
-    assert 0.5 <= blocked_seconds < 3.0
+    probe_timeout_seconds = time.monotonic() - probe_started
+    lm017_report["prepared_lock_probe_timeout_seconds"] = round(probe_timeout_seconds, 3)
+    assert 0.5 <= probe_timeout_seconds < 3.0
 
     restarted = PostgresCoordinatorRepository(harness.engines["coordinator"])
     recovered = TwoPhaseCommitWorkflow(
         restarted,
         WalletAdapter(harness.wallet),
         CatalogAdapter(harness.catalog, harness.engines["catalog"]),
-        AuditAdapter(harness.audit),
     ).recover(created.transaction_id)
 
     assert recovered.status == "ABORTED"
@@ -282,4 +289,8 @@ def test_coordinator_crash_measures_prepared_lock_blocking_and_recovers(
                 "WHERE user_id = 'user-funded'"
             )
         )
+    lock_duration_seconds = time.monotonic() - prepared_at
+    lm017_report["prepared_lock_duration_seconds"] = round(lock_duration_seconds, 3)
+    assert lock_duration_seconds >= probe_timeout_seconds
+    assert lock_duration_seconds < 10.0
     assert_zero_violations(harness, lm017_report, "coordinator_crash_recovery")
