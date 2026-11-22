@@ -104,7 +104,9 @@ jobs:
           "${{ matrix.image }}:check" "${{ matrix.health_name }}" "${{ matrix.port }}"
 
       - name: Vulnerability scan (fail on fixable HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        # Pinned to the commit behind v0.36.0: this action's tags have been
+        # re-pointed before, so a tag alone is not trusted.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ matrix.image }}:check
           severity: HIGH,CRITICAL
