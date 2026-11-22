@@ -38,6 +38,7 @@ python_files = ["test_*.py"]
 pythonpath = ["."]
 markers = [
     "database: needs PostgreSQL (make infra-up, or LM_TEST_POSTGRES_URL)",
+    "integration: crosses service-owned databases using real infrastructure",
 ]
 
 [tool.ruff]
