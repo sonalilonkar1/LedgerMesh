@@ -1,21 +1,63 @@
-FROM python:3.12-slim-bookworm
+# Production-capable image for one LedgerMesh service (LM-047).
+#
+# The same Dockerfile builds every service; SERVICE selects which one starts by
+# default. Docker Compose (LM-003) builds it too and overrides the command.
+#
+#   docker build -f infra/Dockerfile.service --build-arg SERVICE=wallet \
+#     --build-arg PORT=8001 -t ledgermesh-wallet:local .
+#
+# Any module in the image can also be run by overriding the command, e.g.
+#   docker run ledgermesh-wallet:local python -m services.wallet.app.saga_worker
 
-COPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /uvx /bin/
+# ---- builder: resolve the locked dependency graph into a virtualenv ----------
+FROM python:3.12-slim-bookworm AS builder
+
+COPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /bin/
 
 WORKDIR /app
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
 
+COPY pyproject.toml uv.lock ./
+# The messaging library is a local path dependency. --no-editable installs it
+# into the virtualenv, so the runtime image does not need its source tree.
+COPY libs/messaging ./libs/messaging
+RUN uv sync --locked --no-dev --no-install-project --no-editable
+
+# ---- runtime: only the virtualenv and the service code -----------------------
+FROM python:3.12-slim-bookworm AS runtime
+
+ARG SERVICE=coordinator
+ARG PORT=8000
+ARG SERVICE_NAME=${SERVICE}
+ARG LEDGERMESH_REVISION=unknown
+ARG LEDGERMESH_VERSION=unknown
+
+# A fixed, unprivileged UID/GID; nothing in the image runs as root.
+RUN groupadd --gid 10001 ledgermesh \
+    && useradd --uid 10001 --gid 10001 --no-create-home \
+       --shell /usr/sbin/nologin ledgermesh
+
+WORKDIR /app
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy
+    SERVICE=${SERVICE} \
+    SERVICE_NAME=${SERVICE_NAME} \
+    PORT=${PORT} \
+    LEDGERMESH_REVISION=${LEDGERMESH_REVISION} \
+    LEDGERMESH_VERSION=${LEDGERMESH_VERSION} \
+    RUN_MIGRATIONS=false
 
-COPY pyproject.toml uv.lock ./
-# Services depend on the messaging library through a local path source.
-COPY libs/messaging ./libs/messaging
-RUN uv sync --locked --no-dev --no-install-project
+COPY --from=builder --chown=root:root /app/.venv /app/.venv
+COPY --chown=root:root services ./services
+COPY --chown=root:root --chmod=0755 infra/docker/start-service.sh /app/start-service.sh
 
-COPY services ./services
+USER 10001:10001
+EXPOSE ${PORT}
 
-CMD ["python", "-m", "uvicorn", "services.coordinator.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6 \
+    CMD python -c "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ[\"PORT\"]}/health', timeout=2)"
 
+CMD ["/app/start-service.sh"]

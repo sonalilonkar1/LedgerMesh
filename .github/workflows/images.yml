@@ -1,0 +1,212 @@
+name: Service images
+
+# LM-047: build, scan and publish immutable service images to GHCR.
+#
+# - pull_request: build, smoke-test, scan and generate SBOMs; never push.
+# - main: publish only after the core-ci workflow (lint, unit, database and
+#   2PC integration tests) has succeeded for that exact commit.
+# - v* tags: publish with an additional semantic-version tag. Create release
+#   tags only on commits that main has already published.
+#
+# Images are tagged with the full commit SHA. There is no `latest` tag.
+
+on:
+  pull_request:
+    paths:
+      - "services/**"
+      - "libs/messaging/**"
+      - "infra/Dockerfile.service"
+      - "infra/docker/**"
+      - "infra/scripts/check_image.sh"
+      - ".dockerignore"
+      - ".trivyignore"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/images.yml"
+  workflow_run:
+    workflows: ["core-ci"]
+    types: [completed]
+    branches: [main]
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.event.workflow_run.head_sha || github.ref }}
+  cancel-in-progress: false
+
+env:
+  # workflow_run runs on the default branch; build the commit CI tested.
+  REVISION: ${{ github.event.workflow_run.head_sha || github.sha }}
+  # Staging architecture. Add linux/arm64 here if LM-048 picks an ARM host.
+  PLATFORM: linux/amd64
+
+jobs:
+  check:
+    name: check ${{ matrix.image }}
+    # A completed core-ci run only continues if it succeeded for a push to main.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: coordinator
+            image: ledgermesh-coordinator
+            health_name: coordinator
+            port: 8000
+          - service: wallet
+            image: ledgermesh-wallet
+            health_name: wallet
+            port: 8001
+          - service: catalog
+            image: ledgermesh-catalog
+            health_name: catalog
+            port: 8002
+          - service: audit_ledger
+            image: ledgermesh-audit-ledger
+            health_name: audit-ledger
+            port: 8003
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REVISION }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (load locally for checks)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/Dockerfile.service
+          platforms: ${{ env.PLATFORM }}
+          load: true
+          push: false
+          tags: ${{ matrix.image }}:check
+          build-args: |
+            SERVICE=${{ matrix.service }}
+            SERVICE_NAME=${{ matrix.health_name }}
+            PORT=${{ matrix.port }}
+            LEDGERMESH_REVISION=${{ env.REVISION }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      - name: Start, health, non-root and no-secrets checks
+        run: >-
+          bash infra/scripts/check_image.sh
+          "${{ matrix.image }}:check" "${{ matrix.health_name }}" "${{ matrix.port }}"
+
+      - name: Vulnerability scan (fail on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ matrix.image }}:check
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+          exit-code: "1"
+          format: table
+          output: trivy-${{ matrix.image }}.txt
+
+      - name: SBOM (SPDX)
+        if: always()
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ matrix.image }}:check
+          format: spdx-json
+          artifact-name: sbom-${{ matrix.image }}.spdx.json
+
+      - name: Keep the scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-${{ matrix.image }}
+          path: trivy-${{ matrix.image }}.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+  publish:
+    name: publish ${{ matrix.image }}
+    needs: check
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # The only job that can write packages.
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      # Keep in sync with the check job's matrix.
+      matrix:
+        include:
+          - service: coordinator
+            image: ledgermesh-coordinator
+            health_name: coordinator
+            port: 8000
+          - service: wallet
+            image: ledgermesh-wallet
+            health_name: wallet
+            port: 8001
+          - service: catalog
+            image: ledgermesh-catalog
+            health_name: catalog
+            port: 8002
+          - service: audit_ledger
+            image: ledgermesh-audit-ledger
+            health_name: audit-ledger
+            port: 8003
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REVISION }}
+
+      - name: Image name
+        id: name
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "image=ghcr.io/${owner}/${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Tags and OCI labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.name.outputs.image }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ env.REVISION }}
+            type=semver,pattern={{version}}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.image }}
+            org.opencontainers.image.revision=${{ env.REVISION }}
+
+      - name: Log in to GHCR with the short-lived workflow token
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/Dockerfile.service
+          platforms: ${{ env.PLATFORM }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SERVICE=${{ matrix.service }}
+            SERVICE_NAME=${{ matrix.health_name }}
+            PORT=${{ matrix.port }}
+            LEDGERMESH_REVISION=${{ env.REVISION }}
+            LEDGERMESH_VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.image }}
