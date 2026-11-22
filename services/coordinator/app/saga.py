@@ -459,5 +459,7 @@ class SagaStarter:
                 await self.run_once()
             except (OSError, SQLAlchemyError):
                 logger.exception("Saga starter scan failed; retrying after poll interval")
+            except Exception:
+                logger.exception("unexpected Saga starter failure; retrying after poll interval")
             with suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=self.poll_interval)
