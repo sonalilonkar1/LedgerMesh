@@ -6,6 +6,23 @@ info:
 servers:
   - url: http://localhost:8000
 paths:
+  /internal/v1/redemptions/{transaction_id}/execute-2pc:
+    post:
+      operationId: executeTwoPhaseCommit
+      summary: Run or resume the durable 2PC workflow
+      parameters:
+        - $ref: "#/components/parameters/TransactionId"
+      responses:
+        "200":
+          description: Current durable Coordinator state after this execution attempt
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RedemptionResponse"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          $ref: "#/components/responses/Problem"
   /v1/redemptions:
     post:
       operationId: createRedemption
