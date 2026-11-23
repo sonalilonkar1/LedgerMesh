@@ -90,6 +90,29 @@ class FaultSpec:
     def __str__(self) -> str:
         return f"{self.kind}:{self.target}@{self.start:g}s+{self.length:g}s"
 
+    @property
+    def end(self) -> float:
+        return self.start + self.length
+
+
+def validate_schedule(specs: list[FaultSpec]) -> None:
+    """Reject two faults that would be active on the same service at once.
+
+    Each fault undoes itself when it ends, so a second fault on the same service
+    would be switched off early by the first one's cleanup.
+    """
+    by_target: dict[str, list[FaultSpec]] = {}
+    for spec in specs:
+        by_target.setdefault(spec.target, []).append(spec)
+    for target, faults in by_target.items():
+        ordered = sorted(faults, key=lambda spec: spec.start)
+        for earlier, later in zip(ordered, ordered[1:], strict=False):
+            if later.start < earlier.end:
+                raise FaultError(
+                    f"{earlier} and {later} overlap on {target}; "
+                    "start the second fault after the first one ends"
+                )
+
 
 def compose(action: str, target: str) -> None:
     subprocess.run(
@@ -127,6 +150,7 @@ class FaultRunner:
         self.specs = specs
         self.log_path = log_path
         self.t0 = load_started_at  # epoch seconds when the load began
+        self.problems: list[str] = []  # anything that makes the experiment invalid
         self._abort = threading.Event()
         self._write_lock = threading.Lock()
         self._threads: list[threading.Thread] = []
@@ -155,46 +179,75 @@ class FaultRunner:
         with self._write_lock, self.log_path.open("a") as log:
             log.write(json.dumps(line) + "\n")
 
+    def _problem(self, message: str) -> None:
+        with self._write_lock:
+            self.problems.append(message)
+
     def _run(self, spec: FaultSpec) -> None:
         delay = self.t0 + spec.start - time.time()
         if self._abort.wait(max(delay, 0)):
             self._record("skipped", spec, reason="run ended before the fault was due")
+            self._problem(f"{spec} never ran: the load ended before it was due")
             return
 
-        injected = False
         # "issued" is when the command was sent; the event itself is logged once
         # it returns, so a slow command (a graceful stop) is not mistaken for delay.
         issued = self._offset()
+        inject_ok = False
         try:
             inject(spec.kind, spec.target)
-            injected = True
+            inject_ok = True
             self._record("inject", spec, ok=True, issued_offset_seconds=issued)
         except (subprocess.SubprocessError, OSError) as error:
-            self._record("inject", spec, ok=False, error=_describe(error))
-            return
+            # The command may have taken effect before it failed or timed out, so
+            # the service is treated as possibly disrupted and is restored below.
+            self._record(
+                "inject", spec, ok=False, issued_offset_seconds=issued, error=_describe(error)
+            )
+            self._problem(f"{spec} could not be injected: {_describe(error)}")
 
         try:
-            self._abort.wait(spec.length)
+            if inject_ok and self._abort.wait(spec.length):
+                self._problem(f"{spec} was cut short because the load ended")
         finally:
-            if injected:
-                self._clean(spec)
+            self._clean(spec, after_failed_inject=not inject_ok)
 
-    def _clean(self, spec: FaultSpec) -> None:
+    def _clean(self, spec: FaultSpec, *, after_failed_inject: bool) -> None:
         issued = self._offset()
         try:
             cleanup(spec.kind, spec.target)
         except (subprocess.SubprocessError, OSError) as error:
-            self._record("cleanup", spec, ok=False, error=_describe(error))
+            self._record(
+                "cleanup",
+                spec,
+                ok=False,
+                issued_offset_seconds=issued,
+                after_failed_inject=after_failed_inject,
+                error=_describe(error),
+            )
+            # After a failed inject the service was probably untouched, so "not
+            # paused" style errors are expected there and are not a problem.
+            if not after_failed_inject:
+                self._problem(f"{spec} could not be cleaned up: {_describe(error)}")
             return
         # The service counts as recovered once /health answers again, which can
         # be seconds after the cleanup command returns.
+        healthy = seconds_until_healthy(spec.target)
+        recovered = healthy is not None or spec.target not in HEALTH_PORTS
         self._record(
             "cleanup",
             spec,
             ok=True,
             issued_offset_seconds=issued,
-            healthy_after_seconds=seconds_until_healthy(spec.target),
+            after_failed_inject=after_failed_inject,
+            healthy_after_seconds=healthy,
+            recovered=recovered,
         )
+        if not recovered:
+            self._problem(
+                f"{spec.target} did not answer /health within {RECOVERY_TIMEOUT_SECONDS:g}s "
+                "after cleanup"
+            )
 
     def _offset(self) -> float:
         return round(time.time() - self.t0, 3)

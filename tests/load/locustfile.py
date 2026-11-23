@@ -9,6 +9,14 @@ coordination mode and the concurrency are chosen when the run starts:
 ``--users`` is the concurrency: how many virtual users send requests at once.
 Reset the data first (``LEDGERMESH_ENV=local make db-baseline``) so every run
 starts from the same balances and inventory.
+
+The workload only submits and drives redemptions. It records every transaction
+the Coordinator accepted in ``transactions.jsonl``; ``tests/load/run.py`` then
+checks how each one really ended, so a crash during a request cannot hide a
+transaction that recovery later completes.
+
+Saga mode is submission-only until LM-022 can drive a Saga to completion: it
+creates redemptions but nothing finishes them.
 """
 
 from __future__ import annotations
@@ -17,15 +25,19 @@ import json
 import os
 import time
 import uuid
-from collections import Counter
 from pathlib import Path
 
 from locust import HttpUser, between, events, task
 
 MODES = ("two_phase_commit", "saga")
 
-# How each redemption ended, e.g. {"COMMITTED": 98, "ABORTED": 2}.
-outcomes: Counter[str] = Counter()
+# Every redemption the Coordinator accepted, whatever happened to the follow-up call.
+accepted: list[dict] = []
+
+
+def run_dir() -> Path | None:
+    value = os.environ.get("LM_RUN_DIR")  # set by tests/load/run.py
+    return Path(value) if value else None
 
 
 @events.init_command_line_parser.add_listener
@@ -38,19 +50,20 @@ def add_arguments(parser) -> None:
 @events.test_start.add_listener
 def mark_load_start(environment, **_kwargs) -> None:
     # Faults are scheduled relative to this moment, not to when Locust launched.
-    run_dir = os.environ.get("LM_RUN_DIR")
-    if run_dir:
-        (Path(run_dir) / "load_started.txt").write_text(str(time.time()))
+    directory = run_dir()
+    if directory:
+        (directory / "load_started.txt").write_text(str(time.time()))
+    if environment.parsed_options.mode == "saga":
+        print("Saga mode is submission-only: redemptions are created but nothing completes them.")
 
 
 @events.test_stop.add_listener
-def report_outcomes(environment, **_kwargs) -> None:
-    mode = environment.parsed_options.mode
-    print(f"\nRedemption outcomes ({mode}): {dict(outcomes)}")
-    # tests/load/run.py sets LM_RUN_DIR so the tally is saved with the run.
-    run_dir = os.environ.get("LM_RUN_DIR")
-    if run_dir:
-        (Path(run_dir) / "outcomes.json").write_text(json.dumps(dict(outcomes), indent=2))
+def save_transactions(environment, **_kwargs) -> None:
+    print(f"\nCoordinator accepted {len(accepted)} redemptions ({environment.parsed_options.mode})")
+    directory = run_dir()
+    if directory:
+        lines = (json.dumps(entry) for entry in accepted)
+        (directory / "transactions.jsonl").write_text("".join(f"{line}\n" for line in lines))
 
 
 class RedemptionUser(HttpUser):
@@ -81,14 +94,25 @@ class RedemptionUser(HttpUser):
                 return
             transaction_id = response.json()["transaction_id"]
 
+        # In 2PC mode this stays "not_finished" if the run stops mid-call; the
+        # transaction is still tracked and run.py reports how it really ended.
+        entry = {
+            "transaction_id": transaction_id,
+            "submitted_at": time.time(),
+            "execute_call": "not_finished"
+            if options.mode == "two_phase_commit"
+            else "not_applicable",
+        }
+        accepted.append(entry)
         if options.mode == "two_phase_commit":
-            self._execute_two_phase_commit(transaction_id)
+            entry["execute_call"] = self._execute_two_phase_commit(transaction_id)
         # Saga: nothing drives a Saga redemption yet (LM-022), so there is no
-        # second call to make. Outcome tracking for Saga is added with it.
+        # second call to make.
 
-    def _execute_two_phase_commit(self, transaction_id: str) -> None:
+    def _execute_two_phase_commit(self, transaction_id: str) -> str:
         # In local mode the Coordinator exposes this call to run one 2PC
-        # redemption to its final state and return it.
+        # redemption to its final state. If it fails, the transaction stays in
+        # the list and run.py checks later how it actually ended.
         with self.client.post(
             f"/internal/v1/redemptions/{transaction_id}/execute-2pc",
             name="execute 2PC",
@@ -96,5 +120,5 @@ class RedemptionUser(HttpUser):
         ) as response:
             if response.status_code != 200:
                 response.failure(f"HTTP {response.status_code}: {response.text[:200]}")
-                return
-            outcomes[response.json()["status"]] += 1
+                return f"failed_http_{response.status_code}"
+            return "ok"
