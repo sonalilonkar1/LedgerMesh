@@ -12,10 +12,14 @@ Kafka delivers messages **at least once**. This library turns that into **exactl
 ```python
 from ledgermesh_messaging import InboxConsumer, OutgoingMessage, create_consumer
 
+
 async def handle_deduct(session, envelope):
     # Business writes use the same session, so they commit with the inbox row.
     await deduct_points(session, envelope.aggregate_id, envelope.payload["points"])
-    return [OutgoingMessage(topic="wallet.results", key=str(envelope.transaction_id), envelope=reply)]
+    return [
+        OutgoingMessage(topic="wallet.results", key=str(envelope.transaction_id), envelope=reply)
+    ]
+
 
 consumer = InboxConsumer(
     create_consumer(bootstrap, "wallet-service", "wallet.commands"),
@@ -105,7 +109,7 @@ Three wrappers check a message before its handler runs. Each wraps an ordinary h
 
 Per ADR-001, commands carry `aggregate_version: null` and are never ordered by version. Only events from the aggregate's owner are.
 
-Import `in_version_order` from `ledgermesh_messaging.sequence`, and the other two (with `Expectation`) from `ledgermesh_messaging.workflow`.
+All three, with `Expectation` and the error types, are exported from `ledgermesh_messaging`.
 
 ### Events: `in_version_order`
 
@@ -121,7 +125,7 @@ Each consumer stores the latest version it applied for each aggregate in `aggreg
 | the next version | **applied**, and becomes the latest |
 | further ahead | **future**: raises `FutureEventError`, which is retried and dead-lettered after `max_attempts` |
 
-An event with no version raises `MissingVersionError` and is dead-lettered.
+An event with no version raises `MissingVersionError` and is dead-lettered. An event with no `causation_id` raises `MissingCausationError` before its version is checked (see [Causation](#causation-and-malformed-messages)).
 
 ### Participants: `in_workflow_order`
 
@@ -145,6 +149,7 @@ async def waiting_for(session, envelope):
         return None
     return Expectation(step=saga.current_step, causation_id=saga.current_command_id)
 
+
 handler = matching_workflow_step(apply_result, expectation=waiting_for)
 ```
 
@@ -160,7 +165,15 @@ The Coordinator knows from its own state which step each transaction is waiting 
 
 ### Causation and malformed messages
 
-`causation_id` may be null only for the root message (step 1). A later message without one raises `MissingCausationError`. A message without `workflow_step` raises `MissingWorkflowStepError`. Both are `PermanentError`s, so `InboxConsumer` dead-letters them instead of retrying.
+`causation_id` may be null only for a transaction's **root** message. Which messages a consumer can receive as a root depends on its role, so each wrapper applies one shared rule (`require_causation`) with an explicit `root_step`:
+
+| Wrapper | Root policy | A message without `causation_id` is accepted only if |
+|---|---|---|
+| `in_workflow_order` | `root_step = first_step` (default 1) | it is at or below `first_step`: the transaction's first command |
+| `matching_workflow_step` | no roots | never. A result always answers a command, so this holds at every step, including step 1 |
+| `in_version_order` | no roots by default; pass `root_step=` to allow one | `root_step` is set and the event's `workflow_step` is at or below it |
+
+The rule runs before any state is read or written. A message that breaks it raises `MissingCausationError`, a `PermanentError`, so `InboxConsumer` **dead-letters** it. It is malformed rather than stale, so it is never applied and never recorded in the inbox as ignored. A message without `workflow_step` raises `MissingWorkflowStepError`, and is dead-lettered the same way.
 
 Ignored messages are logged with their `transaction_id`, `event_id`, step and causation, and recorded in the inbox. A redelivery is then a plain duplicate.
 
@@ -176,7 +189,10 @@ Ignored messages are logged with their `transaction_id`, `event_id`, step and ca
 | The Coordinator applies only the awaited result | `test_coordinator_applies_the_awaited_result`, `test_coordinator_ignores_a_result_for_an_earlier_step`, `test_coordinator_ignores_a_result_caused_by_a_different_command` |
 | A future result waits for its step, then is dead-lettered | `test_coordinator_defers_a_future_result_until_its_step`, `test_coordinator_dead_letters_a_result_that_never_becomes_current` |
 | Results for finished transactions are ignored | `test_coordinator_ignores_results_for_finished_transactions` |
-| Only the root message may lack `causation_id`; malformed messages are dead-lettered | `test_later_command_without_causation_is_rejected`, `test_message_without_a_workflow_step_is_dead_lettered`, `test_consumer_dead_letters_an_event_without_a_version` |
+| Only a participant's root command may lack `causation_id` | `test_root_command_may_have_no_causation`, `test_later_command_without_causation_is_rejected`, `test_participant_root_rule_applies_only_up_to_first_step`, `test_participant_dead_letters_a_later_command_without_causation` |
+| A Coordinator result without `causation_id` is dead-lettered at every step, before any state lookup | `test_coordinator_dead_letters_a_result_without_causation_at_any_step`, `test_coordinator_rejects_an_uncaused_result_before_looking_up_state` |
+| An event without `causation_id` is dead-lettered, not applied or recorded; `root_step` opts in to root events | `test_event_without_causation_is_dead_lettered_not_applied`, `test_uncaused_event_is_rejected_even_when_it_would_be_stale`, `test_root_event_may_omit_causation_when_the_consumer_allows_roots`, `test_non_root_event_needs_causation_even_when_roots_are_allowed` |
+| Messages without a version or workflow step are dead-lettered | `test_message_without_a_workflow_step_is_dead_lettered`, `test_consumer_dead_letters_an_event_without_a_version` |
 
 ## Duplicate replay is opt-in
 
