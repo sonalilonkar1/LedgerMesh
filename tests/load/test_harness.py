@@ -83,7 +83,7 @@ def test_a_service_that_never_recovers_makes_the_run_invalid(lifecycle):
     run, _calls, state = lifecycle
     state["healthy"] = None
     runner = run("kill:wallet@0s+0s")
-    assert any("did not answer /health" in problem for problem in runner.problems)
+    assert any("not healthy again" in problem for problem in runner.problems)
 
 
 def test_a_fault_that_never_came_due_is_reported(lifecycle):

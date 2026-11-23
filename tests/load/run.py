@@ -38,9 +38,12 @@ import urllib.error
 import urllib.request
 import uuid
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
+
+from sqlalchemy import create_engine, text
 
 from infra.scripts.db import SAFE_ENVIRONMENTS, SERVICES, database_url
 from tests.load.faults import (
@@ -59,6 +62,7 @@ COORDINATOR_URL = "http://localhost:8000"
 WALLET_URL = "http://localhost:8001"
 CATALOG_URL = "http://localhost:8002"
 LOAD_START_TIMEOUT_SECONDS = 60.0
+POLL_WORKERS = 8
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 TERMINAL_STATUSES = {"COMMITTED", "ABORTED", "COMPLETED", "FAILED", "COMPENSATED"}
 
@@ -80,9 +84,9 @@ def git_commit() -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def fetch_json(url: str) -> dict | None:
+def fetch_json(url: str, timeout: float = 3.0) -> dict | None:
     try:
-        with urllib.request.urlopen(url, timeout=3) as response:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
             return json.load(response)
     except (urllib.error.URLError, TimeoutError, ConnectionError, ValueError):
         return None
@@ -156,37 +160,111 @@ def wait_for_load_start(run_dir: Path, locust: subprocess.Popen) -> float | None
     return None
 
 
-def resolve_transactions(run_dir: Path, timeout: float) -> tuple[Counter, Counter]:
-    """Find out how every accepted transaction really ended.
+def lookup_by_keys(keys: list[str]) -> dict[str, tuple[str, str]] | None:
+    """Read-only lookup of redemptions by Idempotency-Key in the Coordinator database.
 
-    Polls each one until it reaches a final state or the deadline passes, then
-    rewrites ``transactions.jsonl`` with the result. Transactions still not final
-    are reported as unresolved, separately from business failures.
+    Returns {key: (transaction_id, status)} for the keys that exist, or None if the
+    database cannot be read or is not on this machine. Nothing is written and no
+    request is sent to the Coordinator, so looking cannot create a transaction.
     """
-    path = run_dir / "transactions.jsonl"
+    url = database_url("coordinator")
+    if urlsplit(url).hostname not in LOCAL_HOSTS:
+        return None
+    try:
+        engine = create_engine(url)
+        with engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    "select idempotency_key, transaction_id, status "
+                    "from redemptions where idempotency_key = any(:keys)"
+                ),
+                {"keys": keys},
+            ).all()
+        engine.dispose()
+    except Exception:  # the database is down or unreachable: the keys stay unknown
+        return None
+    return {row[0]: (str(row[1]), row[2]) for row in rows}
+
+
+def resolve_unknown(rows: list[dict]) -> None:
+    """Decide what became of requests whose response was lost, without sending any.
+
+    A request that is found by its key was created and is tracked from now on; one
+    that is not found was never created. If the lookup is impossible the rows stay
+    unknown and the run is marked invalid.
+    """
+    unknown = [row for row in rows if row["creation"] == "unknown"]
+    if not unknown:
+        return
+    found = lookup_by_keys([row["idempotency_key"] for row in unknown])
+    if found is None:
+        return
+    for row in unknown:
+        match = found.get(row["idempotency_key"])
+        if match:
+            row["transaction_id"] = match[0]
+            row["creation"] = "recovered_existing"
+        else:
+            row["creation"] = "never_created"
+
+
+def poll_status(transaction_id: str, deadline: float) -> str | None:
+    """Current status of one redemption, never spending past the overall deadline."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
+    body = fetch_json(f"{COORDINATOR_URL}/v1/redemptions/{transaction_id}", min(3.0, remaining))
+    return body["status"] if body else None
+
+
+def resolve_transactions(run_dir: Path, timeout: float) -> tuple[Counter, Counter, Counter]:
+    """Find out how every redemption the load sent really ended.
+
+    ``timeout`` is one overall budget for everything below.
+
+    1. A request whose response was lost is looked up by its Idempotency-Key in the
+       Coordinator database (read-only), to learn whether it was created. Nothing
+       is ever sent to the Coordinator to find out.
+    2. Every transaction that exists is polled until it reaches a final state.
+
+    ``submissions.jsonl`` is rewritten with the result. A transaction still not
+    final, or a request whose fate is still unknown, is reported as unresolved,
+    separately from business failures.
+    """
+    path = run_dir / "submissions.jsonl"
     if not path.exists():
-        return Counter(), Counter()
+        return Counter(), Counter(), Counter()
     rows = [json.loads(line) for line in path.read_text().splitlines() if line]
-    pending = {row["transaction_id"]: row for row in rows}
     deadline = time.monotonic() + timeout
-    while pending and time.monotonic() < deadline:
-        for transaction_id, row in list(pending.items()):
-            body = fetch_json(f"{COORDINATOR_URL}/v1/redemptions/{transaction_id}")
-            status = body["status"] if body else None
-            if status:
-                row["last_status"] = status
-            if status in TERMINAL_STATUSES:
-                row["final_status"] = status
-                row["seconds_to_final_observed"] = round(time.time() - row["submitted_at"], 3)
-                del pending[transaction_id]
-        if pending:
-            time.sleep(0.5)
+
+    resolve_unknown(rows)
+
+    pending = [row for row in rows if row["creation"] in ("accepted", "recovered_existing")]
+    with ThreadPoolExecutor(max_workers=POLL_WORKERS) as pool:
+        while pending and time.monotonic() < deadline:
+            ids = [row["transaction_id"] for row in pending]
+            statuses = pool.map(lambda tid: poll_status(tid, deadline), ids)
+            still_pending = []
+            for row, status in zip(pending, statuses, strict=True):
+                if status:
+                    row["last_status"] = status
+                if status in TERMINAL_STATUSES:
+                    row["final_status"] = status
+                else:
+                    still_pending.append(row)
+            pending = still_pending
+            if pending:
+                time.sleep(max(0.0, min(0.5, deadline - time.monotonic())))
+
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
     outcomes = Counter(row["final_status"] for row in rows if "final_status" in row)
     unresolved = Counter(
-        row.get("last_status", "UNKNOWN") for row in rows if "final_status" not in row
+        row.get("last_status", "UNKNOWN")
+        for row in rows
+        if row["creation"] in ("accepted", "recovered_existing") and "final_status" not in row
     )
-    return outcomes, unresolved
+    creations = Counter(row["creation"] for row in rows)
+    return outcomes, unresolved, creations
 
 
 def parse_faults(texts: list[str]) -> list[FaultSpec]:
@@ -292,10 +370,15 @@ def main() -> None:
 
     outcomes: dict | None = None
     unresolved: dict | None = None
+    submissions: dict | None = None
     if args.mode == "two_phase_commit":
         print(f"Waiting up to {args.settle_timeout} for transactions to settle...")
-        final, stuck = resolve_transactions(run_dir, settle_timeout)
-        outcomes, unresolved = dict(final), dict(stuck)
+        final, stuck, creations = resolve_transactions(run_dir, settle_timeout)
+        outcomes, unresolved, submissions = dict(final), dict(stuck), dict(creations)
+        if creations["unknown"]:
+            problems.append(
+                f"{creations['unknown']} requests got no response and could not be resolved"
+            )
     # Saga redemptions are only submitted until LM-022 can drive them.
     workload = "full_2pc_execution" if args.mode == "two_phase_commit" else "submission_only"
 
@@ -317,6 +400,7 @@ def main() -> None:
         "started_at": started_at,
         "finished_at": finished_at,
         "locust_exit_code": locust_exit_code,
+        "submissions": submissions,
         "final_outcomes": outcomes,
         "unresolved": unresolved,
     }
@@ -324,6 +408,7 @@ def main() -> None:
 
     print(f"\nWorkload: {workload}")
     if outcomes is not None:
+        print(f"Requests sent, by how creation ended: {submissions}")
         print(f"Final outcomes: {outcomes}")
         print(f"Unresolved after {args.settle_timeout}: {unresolved}")
     if problems:

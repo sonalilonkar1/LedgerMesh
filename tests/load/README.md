@@ -56,7 +56,14 @@ LEDGERMESH_ENV=local uv run python -m tests.load.run --mode two_phase_commit --u
 `start` is measured from the moment the load begins. Cleanup always runs, even
 if the run fails, is interrupted, or the injection command itself fails or times
 out (the service may already have been affected). Two faults on the same service
-may not overlap.
+may not overlap in the schedule. Because a command such as `stop` can run longer
+than planned, the runner also allows only one fault at a time per service, from
+injection until the service is healthy again; a later fault that would start
+earlier than that is skipped and the run is marked invalid.
+
+A service counts as recovered when `/health` answers again, or, for Kafka, when
+Docker reports it healthy. Starting a container is not enough: Kafka took about
+six seconds to become ready after `docker compose start`.
 
 | Kind | Trigger | Cleanup | Simulates |
 |---|---|---|---|
@@ -81,16 +88,38 @@ timestamp, the mode, the user count and a random suffix.
 | File | Contents |
 |---|---|
 | `run.json` | Settings, validity and problems, starting balances, git commit, times, final outcomes |
-| `transactions.jsonl` | One line per accepted redemption, with its final state |
+| `submissions.jsonl` | One line per redemption request sent, with how creation ended and the final state |
 | `faults.jsonl` | One line per fault step, with offsets from the load start |
 | `locust_stats.csv`, `locust_stats_history.csv` | Request counts and latency |
 | `locust_failures.csv` | Requests that failed, such as connection refused |
 
-Every redemption the Coordinator accepted is tracked, even if the request that
-created it failed afterwards. After the load, each one is polled until it reaches
-a final state (`COMMITTED`, `ABORTED`, `COMPLETED`, `FAILED` or `COMPENSATED`).
+Every request is written down before it is sent, so a lost response cannot hide
+a transaction. `submissions` in `run.json` counts requests by how creation ended:
+
+| Value | Meaning |
+|---|---|
+| `accepted` | The Coordinator answered 202 |
+| `rejected_http_<code>` | The Coordinator answered and refused; nothing was created |
+| `not_sent` | The connection could not be made, so the request was never delivered |
+| `recovered_existing` | No answer arrived, but a read-only lookup by Idempotency-Key found the redemption in the Coordinator database |
+| `never_created` | No answer arrived and the lookup found nothing, so the request never took effect |
+| `unknown` | The lookup was not possible (database unreachable or not local); the run is marked invalid |
+
+Resolving a lost answer only reads the Coordinator database, and only a local
+one. It never sends a request to the Coordinator, so settling a run cannot create
+a redemption that recovery might then execute.
+
+After the load, every transaction that exists is polled until it reaches a final
+state (`COMMITTED`, `ABORTED`, `COMPLETED`, `FAILED` or `COMPENSATED`).
 `final_outcomes` counts those; `unresolved` counts the ones still not final when
-`--settle-timeout` ended, kept separate from business failures.
+`--settle-timeout` ended, kept separate from business failures. The timeout is a
+single deadline for all of this work, including each individual request.
+
+Latency: the Locust CSV files give request latency, including the `execute 2PC`
+call, which is the work of one 2PC redemption. The run does not store a
+per-transaction completion time, because polling happens after the load and would
+only measure how long the run lasted. End-to-end latency for Saga needs the
+terminal state to be observed during the workload, which has to wait for LM-022.
 
 In `faults.jsonl`, `issued_offset_seconds` is when the command was sent and
 `offset_seconds` is when it finished. On cleanup, `healthy_after_seconds` is how

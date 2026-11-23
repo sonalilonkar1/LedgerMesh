@@ -128,18 +128,46 @@ def cleanup(kind: str, target: str) -> None:
     compose(KINDS[kind][1], target)
 
 
-def seconds_until_healthy(target: str) -> float | None:
-    """Seconds until the service answers /health again, or None if it never does."""
-    port = HEALTH_PORTS.get(target)
-    if port is None:  # Kafka has no HTTP health endpoint
+def docker_health(target: str) -> str | None:
+    """Docker's own health verdict for a service, such as ``healthy``, or None."""
+    try:
+        result = subprocess.run(
+            [*COMPOSE, "ps", "--format", "json", target],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        text = result.stdout.strip()
+        if result.returncode != 0 or not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except ValueError:  # older Compose prints one JSON object per line
+            parsed = [json.loads(line) for line in text.splitlines() if line.strip()]
+    except (subprocess.SubprocessError, OSError, ValueError):
         return None
+    items = parsed if isinstance(parsed, list) else [parsed]
+    return items[0].get("Health") if items else None
+
+
+def is_ready(target: str) -> bool:
+    port = HEALTH_PORTS.get(target)
+    if port is None:  # Kafka has no HTTP endpoint; use its Docker health check
+        return docker_health(target) == "healthy"
+    try:
+        with urllib.request.urlopen(f"http://localhost:{port}/health", timeout=2):
+            return True
+    except (urllib.error.URLError, TimeoutError, ConnectionError):
+        return False
+
+
+def seconds_until_healthy(target: str) -> float | None:
+    """Seconds until the service is ready again, or None if it never is."""
     begin = time.monotonic()
     while time.monotonic() - begin < RECOVERY_TIMEOUT_SECONDS:
-        try:
-            with urllib.request.urlopen(f"http://localhost:{port}/health", timeout=2):
-                return round(time.monotonic() - begin, 3)
-        except (urllib.error.URLError, TimeoutError, ConnectionError):
-            time.sleep(0.25)
+        if is_ready(target):
+            return round(time.monotonic() - begin, 3)
+        time.sleep(0.25)
     return None
 
 
@@ -154,6 +182,8 @@ class FaultRunner:
         self._abort = threading.Event()
         self._write_lock = threading.Lock()
         self._threads: list[threading.Thread] = []
+        # One fault at a time per service, from injection until it is healthy again.
+        self._target_locks = {spec.target: threading.Lock() for spec in specs}
 
     def start(self) -> None:
         for spec in self.specs:
@@ -190,6 +220,24 @@ class FaultRunner:
             self._problem(f"{spec} never ran: the load ended before it was due")
             return
 
+        # The schedule only compares planned times, but a command such as a graceful
+        # stop can take longer than planned. If an earlier fault on this service is
+        # still active or recovering, this one is not run, so cleanups cannot undo
+        # each other, and the run is marked invalid.
+        lock = self._target_locks[spec.target]
+        if not lock.acquire(blocking=False):
+            self._record("skipped", spec, reason="an earlier fault on the same service was active")
+            self._problem(
+                f"{spec} could not start: an earlier fault on {spec.target} was still "
+                "active or recovering"
+            )
+            return
+        try:
+            self._lifecycle(spec)
+        finally:
+            lock.release()
+
+    def _lifecycle(self, spec: FaultSpec) -> None:
         # "issued" is when the command was sent; the event itself is logged once
         # it returns, so a slow command (a graceful stop) is not mistaken for delay.
         issued = self._offset()
@@ -230,10 +278,11 @@ class FaultRunner:
             if not after_failed_inject:
                 self._problem(f"{spec} could not be cleaned up: {_describe(error)}")
             return
-        # The service counts as recovered once /health answers again, which can
-        # be seconds after the cleanup command returns.
+        # The service counts as recovered once it is ready again (/health answers,
+        # or Docker reports Kafka healthy), which can be seconds after the cleanup
+        # command returns.
         healthy = seconds_until_healthy(spec.target)
-        recovered = healthy is not None or spec.target not in HEALTH_PORTS
+        recovered = healthy is not None
         self._record(
             "cleanup",
             spec,
@@ -245,7 +294,7 @@ class FaultRunner:
         )
         if not recovered:
             self._problem(
-                f"{spec.target} did not answer /health within {RECOVERY_TIMEOUT_SECONDS:g}s "
+                f"{spec.target} was not healthy again within {RECOVERY_TIMEOUT_SECONDS:g}s "
                 "after cleanup"
             )
 

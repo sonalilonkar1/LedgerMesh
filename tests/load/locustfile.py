@@ -10,10 +10,10 @@ coordination mode and the concurrency are chosen when the run starts:
 Reset the data first (``LEDGERMESH_ENV=local make db-baseline``) so every run
 starts from the same balances and inventory.
 
-The workload only submits and drives redemptions. It records every transaction
-the Coordinator accepted in ``transactions.jsonl``; ``tests/load/run.py`` then
-checks how each one really ended, so a crash during a request cannot hide a
-transaction that recovery later completes.
+The workload only submits and drives redemptions. It records every request in
+``submissions.jsonl`` before sending it; ``tests/load/run.py`` then checks how
+each one really ended. A crash during a request, even one that loses the
+response to a redemption the Coordinator did create, cannot hide a transaction.
 
 Saga mode is submission-only until LM-022 can drive a Saga to completion: it
 creates redemptions but nothing finishes them.
@@ -23,16 +23,22 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import uuid
 from pathlib import Path
 
 from locust import HttpUser, between, events, task
 
+# Locust loads this file by path, so make the repository root importable.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tests.load.classify import connection_never_established  # noqa: E402
+
 MODES = ("two_phase_commit", "saga")
 
-# Every redemption the Coordinator accepted, whatever happened to the follow-up call.
-accepted: list[dict] = []
+# Every redemption request sent, with what is known about how it went. An entry is
+# added before its request goes out, so a lost response cannot hide a transaction.
+submissions: list[dict] = []
 
 
 def run_dir() -> Path | None:
@@ -59,11 +65,11 @@ def mark_load_start(environment, **_kwargs) -> None:
 
 @events.test_stop.add_listener
 def save_transactions(environment, **_kwargs) -> None:
-    print(f"\nCoordinator accepted {len(accepted)} redemptions ({environment.parsed_options.mode})")
+    print(f"\nSent {len(submissions)} redemption requests ({environment.parsed_options.mode})")
     directory = run_dir()
     if directory:
-        lines = (json.dumps(entry) for entry in accepted)
-        (directory / "transactions.jsonl").write_text("".join(f"{line}\n" for line in lines))
+        lines = (json.dumps(entry) for entry in submissions)
+        (directory / "submissions.jsonl").write_text("".join(f"{line}\n" for line in lines))
 
 
 class RedemptionUser(HttpUser):
@@ -80,32 +86,53 @@ class RedemptionUser(HttpUser):
             "coordination_mode": options.mode,
         }
         # A new key per request: a repeated key would return the old redemption.
-        headers = {"Idempotency-Key": uuid.uuid4().hex}
+        key = uuid.uuid4().hex
+
+        # Recorded BEFORE the request is sent. If the Coordinator creates the
+        # redemption but dies before answering, the key and body are still here, so
+        # run.py can ask again with the same key and find out what happened.
+        entry = {
+            "idempotency_key": key,
+            "body": body,
+            "submitted_at": time.time(),
+            "transaction_id": None,
+            "creation": "unknown",
+            "execute_call": "not_applicable",
+        }
+        submissions.append(entry)
 
         with self.client.post(
             "/v1/redemptions",
             json=body,
-            headers=headers,
+            headers={"Idempotency-Key": key},
             name="create redemption",
             catch_response=True,
         ) as response:
-            if response.status_code != 202:
-                response.failure(f"HTTP {response.status_code}: {response.text[:200]}")
+            code = response.status_code
+            if code == 202:
+                entry["transaction_id"] = response.json()["transaction_id"]
+                entry["creation"] = "accepted"
+            elif 400 <= code < 500:
+                # The Coordinator answered and refused: nothing was created.
+                entry["creation"] = f"rejected_http_{code}"
+                response.failure(f"HTTP {code}: {response.text[:200]}")
                 return
-            transaction_id = response.json()["transaction_id"]
+            else:
+                if connection_never_established(getattr(response, "error", None)):
+                    # The Coordinator was unreachable, so the request was never
+                    # delivered and nothing exists to look for.
+                    entry["creation"] = "not_sent"
+                # Otherwise (a dropped connection, a timeout after sending, a server
+                # error) the redemption may or may not exist; the entry stays
+                # "unknown" for run.py to resolve with the same key.
+                response.failure(f"HTTP {code}: {response.text[:200]}")
+                return
 
         # In 2PC mode this stays "not_finished" if the run stops mid-call; the
         # transaction is still tracked and run.py reports how it really ended.
-        entry = {
-            "transaction_id": transaction_id,
-            "submitted_at": time.time(),
-            "execute_call": "not_finished"
-            if options.mode == "two_phase_commit"
-            else "not_applicable",
-        }
-        accepted.append(entry)
         if options.mode == "two_phase_commit":
-            entry["execute_call"] = self._execute_two_phase_commit(transaction_id)
+            entry["execute_call"] = "not_finished"
+            entry["execute_call"] = self._execute_two_phase_commit(entry["transaction_id"])
         # Saga: nothing drives a Saga redemption yet (LM-022), so there is no
         # second call to make.
 
