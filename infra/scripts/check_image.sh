@@ -5,7 +5,7 @@
 #
 # Checks that the image starts on its own (no database needed for /health),
 # answers its own /health, runs as a non-root user, and contains no .env files,
-# git metadata, credentials or tokens.
+# git metadata, private keys, credentials or tokens.
 set -euo pipefail
 
 image="$1"
@@ -47,9 +47,15 @@ if [[ "$uid" == "0" || "$gid" == "0" ]]; then
 fi
 echo "ok: runs as uid=${uid} gid=${gid}"
 
-found="$(docker exec "$name" sh -c \
-  'find / -xdev \( -name ".env" -o -name ".env.*" -o -name ".git" \
-     -o -name ".git-credentials" -o -name ".netrc" \) -print 2>/dev/null' || true)"
+# Scan as root so directories the service user cannot read are covered too.
+# Any *.key file fails; a *.pem fails only if it holds a private key, because
+# public CA bundles (e.g. certifi's cacert.pem) are legitimately present.
+found="$(docker exec -u 0 "$name" sh -c '
+  find / -xdev \( -name ".env" -o -name ".env.*" -o -name ".git" \
+     -o -name ".git-credentials" -o -name ".netrc" -o -name "*.key" \) \
+     -print 2>/dev/null
+  find / -xdev -type f -name "*.pem" -exec grep -l "PRIVATE KEY" {} + 2>/dev/null
+' || true)"
 if [[ -n "$found" ]]; then
   echo "FAIL: forbidden files in image:" >&2
   echo "$found" >&2
@@ -59,7 +65,7 @@ if docker exec "$name" env | grep -iE '^(GITHUB_TOKEN|GH_TOKEN|.*_SECRET|.*PASSW
   echo "FAIL: credentials present in the image environment" >&2
   exit 1
 fi
-echo "ok: no .env files, git metadata or credentials"
+echo "ok: no .env files, git metadata, private keys or credentials"
 
 # Read the logs once: piping straight into `grep -q` can SIGPIPE docker logs,
 # which pipefail would report as a missing match.

@@ -2,13 +2,16 @@ name: Service images
 
 # LM-047: build, scan and publish immutable service images to GHCR.
 #
-# - pull_request: build, smoke-test, scan and generate SBOMs; never push.
-# - main: publish only after the core-ci workflow (lint, unit, database and
-#   2PC integration tests) has succeeded for that exact commit.
-# - v* tags: publish with an additional semantic-version tag. Create release
-#   tags only on commits that main has already published.
+# - pull_request: build each image once, check, scan and generate SBOMs.
+#   Never pushes, and the token has no packages: write.
+# - main: after core-ci (lint, unit, database and 2PC integration tests) has
+#   succeeded for that exact commit, build once, check, scan and push that same
+#   image under its full commit SHA. An existing SHA tag is never overwritten.
+# - v* tags: nothing is rebuilt. The tagged commit must be on main and have a
+#   successful core-ci run; the semver tag is then added to the digest already
+#   published for that SHA.
 #
-# Images are tagged with the full commit SHA. There is no `latest` tag.
+# There is no `latest` tag.
 
 on:
   pull_request:
@@ -23,6 +26,7 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/images.yml"
+      - ".github/workflows/image-build.yml"
   workflow_run:
     workflows: ["core-ci"]
     types: [completed]
@@ -37,178 +41,118 @@ concurrency:
   group: images-${{ github.event.workflow_run.head_sha || github.ref }}
   cancel-in-progress: false
 
-env:
-  # workflow_run runs on the default branch; build the commit CI tested.
-  REVISION: ${{ github.event.workflow_run.head_sha || github.sha }}
-  # Staging architecture. Add linux/arm64 here if LM-048 picks an ARM host.
-  PLATFORM: linux/amd64
-
 jobs:
   check:
-    name: check ${{ matrix.image }}
-    # A completed core-ci run only continues if it succeeded for a push to main.
-    if: >-
-      github.event_name != 'workflow_run' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push')
-    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - service: coordinator
-            image: ledgermesh-coordinator
-            health_name: coordinator
-            port: 8000
-          - service: wallet
-            image: ledgermesh-wallet
-            health_name: wallet
-            port: 8001
-          - service: catalog
-            image: ledgermesh-catalog
-            health_name: catalog
-            port: 8002
-          - service: audit_ledger
-            image: ledgermesh-audit-ledger
-            health_name: audit-ledger
-            port: 8003
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.REVISION }}
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build (load locally for checks)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: infra/Dockerfile.service
-          platforms: ${{ env.PLATFORM }}
-          load: true
-          push: false
-          tags: ${{ matrix.image }}:check
-          build-args: |
-            SERVICE=${{ matrix.service }}
-            SERVICE_NAME=${{ matrix.health_name }}
-            PORT=${{ matrix.port }}
-            LEDGERMESH_REVISION=${{ env.REVISION }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
-
-      - name: Start, health, non-root and no-secrets checks
-        run: >-
-          bash infra/scripts/check_image.sh
-          "${{ matrix.image }}:check" "${{ matrix.health_name }}" "${{ matrix.port }}"
-
-      - name: Vulnerability scan (fail on fixable HIGH/CRITICAL)
-        # Pinned to the commit behind v0.36.0: this action's tags have been
-        # re-pointed before, so a tag alone is not trusted.
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ matrix.image }}:check
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          trivyignores: .trivyignore
-          exit-code: "1"
-          format: table
-          output: trivy-${{ matrix.image }}.txt
-
-      - name: SBOM (SPDX)
-        if: always()
-        uses: anchore/sbom-action@v0
-        with:
-          image: ${{ matrix.image }}:check
-          format: spdx-json
-          artifact-name: sbom-${{ matrix.image }}.spdx.json
-
-      - name: Keep the scan report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-${{ matrix.image }}
-          path: trivy-${{ matrix.image }}.txt
-          if-no-files-found: warn
-          retention-days: 30
+    uses: ./.github/workflows/image-build.yml
+    with:
+      revision: ${{ github.sha }}
+      publish: false
 
   publish:
-    name: publish ${{ matrix.image }}
-    needs: check
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    # The only job that can write packages.
+    # Only a successful core-ci run for a push to main publishes.
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
     permissions:
       contents: read
       packages: write
-    strategy:
-      fail-fast: false
-      # Keep in sync with the check job's matrix.
-      matrix:
-        include:
-          - service: coordinator
-            image: ledgermesh-coordinator
-            health_name: coordinator
-            port: 8000
-          - service: wallet
-            image: ledgermesh-wallet
-            health_name: wallet
-            port: 8001
-          - service: catalog
-            image: ledgermesh-catalog
-            health_name: catalog
-            port: 8002
-          - service: audit_ledger
-            image: ledgermesh-audit-ledger
-            health_name: audit-ledger
-            port: 8003
+    uses: ./.github/workflows/image-build.yml
+    with:
+      # workflow_run runs on the default branch; build the commit CI tested.
+      revision: ${{ github.event.workflow_run.head_sha }}
+      publish: true
+
+  release:
+    name: release ${{ github.ref_name }}
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ env.REVISION }}
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Image name
-        id: name
+      - name: The tag must point at a tested commit on main
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
         run: |
-          owner="${GITHUB_REPOSITORY_OWNER,,}"
-          echo "image=ghcr.io/${owner}/${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::${TAG} is not vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+          sha="$(git rev-parse "${TAG}^{commit}")"
 
-      - uses: docker/setup-buildx-action@v3
+          if ! git merge-base --is-ancestor "$sha" origin/main; then
+            echo "::error::${TAG} (${sha}) is not on main" >&2
+            exit 1
+          fi
 
-      - name: Tags and OCI labels
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ steps.name.outputs.image }}
-          flavor: latest=false
-          tags: |
-            type=raw,value=${{ env.REVISION }}
-            type=semver,pattern={{version}}
-          labels: |
-            org.opencontainers.image.title=${{ matrix.image }}
-            org.opencontainers.image.revision=${{ env.REVISION }}
+          passed="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${sha}&event=push&status=success" \
+            --jq '.total_count')"
+          if [[ "$passed" -lt 1 ]]; then
+            echo "::error::core-ci has no successful push run for ${sha}" >&2
+            exit 1
+          fi
+
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR with the short-lived workflow token
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
 
-      - name: Publish
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: infra/Dockerfile.service
-          platforms: ${{ env.PLATFORM }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            SERVICE=${{ matrix.service }}
-            SERVICE_NAME=${{ matrix.health_name }}
-            PORT=${{ matrix.port }}
-            LEDGERMESH_REVISION=${{ env.REVISION }}
-            LEDGERMESH_VERSION=${{ steps.meta.outputs.version }}
-          cache-from: type=gha,scope=${{ matrix.image }}
+      - name: Add the semver tag to the already-published SHA digest
+        env:
+          SHA: ${{ steps.verify.outputs.sha }}
+          VERSION: ${{ steps.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+
+          remote_digest() {
+            docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' \
+              | python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])'
+          }
+
+          for image in ledgermesh-coordinator ledgermesh-wallet ledgermesh-catalog ledgermesh-audit-ledger; do
+            repo="ghcr.io/${owner}/${image}"
+            if ! digest="$(remote_digest "${repo}:${SHA}" 2>/dev/null)"; then
+              echo "::error::${repo}:${SHA} was never published; merge and let main publish it first" >&2
+              exit 1
+            fi
+
+            if existing="$(remote_digest "${repo}:${VERSION}" 2>/dev/null)"; then
+              if [[ "$existing" != "$digest" ]]; then
+                echo "::error::${repo}:${VERSION} already points at ${existing}, not ${digest}" >&2
+                exit 1
+              fi
+              echo "- \`${repo}:${VERSION}\` already = \`${digest}\`" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+
+            # A carbon copy of the existing manifest: same digest, no rebuild.
+            docker buildx imagetools create --prefer-index=false \
+              -t "${repo}:${VERSION}" "${repo}@${digest}"
+
+            tagged="$(remote_digest "${repo}:${VERSION}")"
+            if [[ "$tagged" != "$digest" ]]; then
+              echo "::error::${repo}:${VERSION} is ${tagged}, expected ${digest}" >&2
+              exit 1
+            fi
+            echo "- \`${repo}:${VERSION}\` = \`${repo}:${SHA}\` = \`${digest}\`" >> "$GITHUB_STEP_SUMMARY"
+          done

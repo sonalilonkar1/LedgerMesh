@@ -1,0 +1,165 @@
+name: image-build
+
+# LM-047, reusable: build each service image ONCE, check it, scan it, generate
+# its SBOM and, only when `publish` is true, push that same local image.
+#
+# The image that is pushed is the exact object that passed check_image.sh,
+# Trivy and the SBOM step: nothing is rebuilt between scanning and publishing.
+# The caller decides the token permissions (PRs never get packages: write).
+
+on:
+  workflow_call:
+    inputs:
+      revision:
+        description: Commit to build; also the image tag.
+        type: string
+        required: true
+      publish:
+        description: Push the checked image to GHCR.
+        type: boolean
+        default: false
+
+env:
+  # Staging architecture. Add a second platform here if LM-048 picks an ARM host.
+  PLATFORM: linux/amd64
+
+jobs:
+  image:
+    name: ${{ inputs.publish && 'publish' || 'check' }} ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: coordinator
+            image: ledgermesh-coordinator
+            health_name: coordinator
+            port: 8000
+          - service: wallet
+            image: ledgermesh-wallet
+            health_name: wallet
+            port: 8001
+          - service: catalog
+            image: ledgermesh-catalog
+            health_name: catalog
+            port: 8002
+          - service: audit_ledger
+            image: ledgermesh-audit-ledger
+            health_name: audit-ledger
+            port: 8003
+    env:
+      REVISION: ${{ inputs.revision }}
+      SERVICE: ${{ matrix.service }}
+      IMAGE: ${{ matrix.image }}
+      HEALTH_NAME: ${{ matrix.health_name }}
+      PORT: ${{ matrix.port }}
+      CANDIDATE: ${{ matrix.image }}:candidate
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.revision }}
+          persist-credentials: false
+
+      - name: Build once
+        id: build
+        run: |
+          created="$(git log -1 --format=%cI HEAD)"
+          docker build --platform "$PLATFORM" -f infra/Dockerfile.service \
+            --build-arg SERVICE="$SERVICE" \
+            --build-arg SERVICE_NAME="$HEALTH_NAME" \
+            --build-arg PORT="$PORT" \
+            --build-arg LEDGERMESH_REVISION="$REVISION" \
+            --label org.opencontainers.image.source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.revision="$REVISION" \
+            --label org.opencontainers.image.created="$created" \
+            --label org.opencontainers.image.title="$IMAGE" \
+            --label org.opencontainers.image.version="$REVISION" \
+            -t "$CANDIDATE" .
+          image_id="$(docker image inspect --format '{{.Id}}' "$CANDIDATE")"
+          echo "image_id=$image_id" >> "$GITHUB_OUTPUT"
+          echo "Built \`$CANDIDATE\` as \`$image_id\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Start, health, non-root and no-secrets checks
+        run: bash infra/scripts/check_image.sh "$CANDIDATE" "$HEALTH_NAME" "$PORT"
+
+      - name: Vulnerability scan (fail on fixable HIGH/CRITICAL)
+        # Pinned to the commit behind v0.36.0: this action's tags have been
+        # re-pointed before, so a tag alone is not trusted.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ matrix.image }}:candidate
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+          exit-code: "1"
+          format: table
+          output: trivy-${{ matrix.image }}.txt
+
+      - name: SBOM (SPDX)
+        if: always() && steps.build.outcome == 'success'
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ matrix.image }}:candidate
+          format: spdx-json
+          artifact-name: sbom-${{ matrix.image }}.spdx.json
+
+      - name: Keep the scan report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trivy-${{ matrix.image }}
+          path: trivy-${{ matrix.image }}.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+      # ---- publish: only reached when every check above passed -------------
+
+      - name: Log in to GHCR with the short-lived workflow token
+        if: inputs.publish
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+
+      - name: Push the checked image (never overwrite a SHA tag)
+        if: inputs.publish
+        env:
+          SCANNED_ID: ${{ steps.build.outputs.image_id }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          repo="ghcr.io/${owner}/${IMAGE}"
+          ref="${repo}:${REVISION}"
+
+          remote_digest() {
+            docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' \
+              | python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])'
+          }
+
+          # SHA tags are immutable: a re-run must not replace a published image.
+          if existing="$(remote_digest "$ref" 2>/dev/null)"; then
+            echo "::notice::${ref} is already published as ${existing}; not overwriting it."
+            echo "- \`${ref}\` already published as \`${existing}\`; left unchanged" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # The candidate must still be the image that was checked and scanned.
+          test "$(docker image inspect --format '{{.Id}}' "$CANDIDATE")" = "$SCANNED_ID"
+
+          docker tag "$CANDIDATE" "$ref"
+          docker push "$ref" | tee push.log
+          pushed="$(grep -oE 'digest: sha256:[0-9a-f]{64}' push.log | tail -1 | cut -d' ' -f2 || true)"
+          if [[ -z "$pushed" ]]; then
+            pushed="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ref" \
+              | grep "^${repo}@" | head -1 | cut -d@ -f2 || true)"
+          fi
+          published="$(remote_digest "$ref")"
+
+          if [[ -z "$pushed" || "$pushed" != "$published" ]]; then
+            echo "::error::published digest '${published}' is not the pushed digest '${pushed}'" >&2
+            exit 1
+          fi
+          {
+            echo "- scanned image \`${SCANNED_ID}\`"
+            echo "- published \`${ref}\` = \`${published}\` (matches the pushed candidate)"
+          } >> "$GITHUB_STEP_SUMMARY"

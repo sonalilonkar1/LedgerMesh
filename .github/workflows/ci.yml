@@ -15,21 +15,11 @@ on:
       - "uv.lock"
       - "Makefile"
       - ".github/workflows/ci.yml"
+  # No path filter on main: every merge is tested, and the image workflow
+  # publishes only after this succeeds, so a filter here would silently skip
+  # publication for any image input missing from the list (LM-047).
   push:
     branches: [main]
-    paths:
-      - "services/**"
-      - "libs/contracts/**"
-      - "libs/messaging/src/**"
-      - "tests/**"
-      - "infra/scripts/db.py"
-      - "infra/scripts/prepared_transactions.py"
-      - "infra/compose.yaml"
-      - "infra/Dockerfile.service"
-      - "pyproject.toml"
-      - "uv.lock"
-      - "Makefile"
-      - ".github/workflows/ci.yml"
 
 jobs:
   quality:
