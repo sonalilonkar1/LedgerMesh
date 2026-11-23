@@ -1,12 +1,12 @@
 import asyncio
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
-
-from ledgermesh_messaging import InboxConsumer, inbox, process_once
+from ledgermesh_messaging import InboxConsumer, MissingCausationError, inbox, process_once
 from ledgermesh_messaging.schema import aggregate_versions
 from ledgermesh_messaging.sequence import FutureEventError, MissingVersionError, in_version_order
+from sqlalchemy import func, select
 
 from .conftest import increment_and_reply, make_envelope, read_counter
 
@@ -17,10 +17,28 @@ CONSUMER = "audit-ledger"
 ordered = in_version_order(increment_and_reply, consumer=CONSUMER)
 
 
-def wallet_event(version: int, aggregate_id: str = "user-1"):
-    return make_envelope(
-        event_type="wallet.points_deducted", aggregate_id=aggregate_id, aggregate_version=version
+def wallet_event(version: int, aggregate_id: str = "user-1", **overrides):
+    # An owner's event answers a command, so it names that command as its cause.
+    fields = {
+        "event_type": "wallet.points_deducted",
+        "aggregate_id": aggregate_id,
+        "aggregate_version": version,
+        "causation_id": uuid4(),
+    }
+    fields.update(overrides)
+    return make_envelope(**fields)
+
+
+def dead_letter_consumer(session_factory, handler=ordered):
+    dead_letters = []
+
+    async def capture(record, exc):
+        dead_letters.append(exc)
+
+    consumer = InboxConsumer(
+        None, session_factory, name=CONSUMER, handler=handler, on_dead_letter=capture
     )
+    return consumer, dead_letters
 
 
 async def deliver(session_factory, envelope, handler=ordered, consumer=CONSUMER):
@@ -157,6 +175,52 @@ async def test_consumer_dead_letters_an_event_without_a_version(session_factory)
 
     assert result is None
     assert [type(exc) for exc in dead_letters] == [MissingVersionError]
+
+
+async def test_event_without_causation_is_dead_lettered_not_applied(session_factory):
+    consumer, dead_letters = dead_letter_consumer(session_factory)
+    uncaused = wallet_event(1, causation_id=None)
+
+    result = await consumer.handle(SimpleNamespace(value=uncaused.to_bytes()))
+
+    assert result is None
+    assert [type(exc) for exc in dead_letters] == [MissingCausationError]
+    assert await read_counter(session_factory) == 0
+    assert await inbox_rows(session_factory) == 0
+    # Rejected before the ordering check, so no version row was created either.
+    assert await latest_version(session_factory) is None
+
+
+async def test_uncaused_event_is_rejected_even_when_it_would_be_stale(session_factory):
+    await deliver(session_factory, wallet_event(1))
+
+    with pytest.raises(MissingCausationError):
+        await deliver(session_factory, wallet_event(1, causation_id=None))
+
+    assert await inbox_rows(session_factory) == 1
+
+
+async def test_root_event_may_omit_causation_when_the_consumer_allows_roots(session_factory):
+    with_roots = in_version_order(increment_and_reply, consumer=CONSUMER, root_step=1)
+
+    await deliver(
+        session_factory, wallet_event(1, causation_id=None, workflow_step=1), handler=with_roots
+    )
+
+    assert await read_counter(session_factory) == 1
+
+
+async def test_non_root_event_needs_causation_even_when_roots_are_allowed(session_factory):
+    with_roots = in_version_order(increment_and_reply, consumer=CONSUMER, root_step=1)
+
+    with pytest.raises(MissingCausationError):
+        await deliver(
+            session_factory,
+            wallet_event(1, causation_id=None, workflow_step=2),
+            handler=with_roots,
+        )
+
+    assert await read_counter(session_factory) == 0
 
 
 async def test_consumer_retries_a_future_event_then_dead_letters_it(session_factory):

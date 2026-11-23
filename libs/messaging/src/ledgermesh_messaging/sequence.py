@@ -11,6 +11,12 @@ compares each event's ``aggregate_version`` against it:
 
 Only events emitted by the aggregate's owner carry a version. Commands have
 ``aggregate_version = None`` and are ordered by workflow step instead.
+
+``in_version_order`` also applies the shared root-message rule
+(``causation.require_causation``) before reading or writing any version. An
+aggregate's events are emitted in response to a command, so by default every
+event must name its cause; a consumer that can receive a transaction's root
+event passes ``root_step`` to allow a missing cause at or below that step.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .causation import require_causation
 from .consumer import PermanentError, TransientError
 from .envelope import EventEnvelope
 from .inbox import Handler
@@ -69,7 +76,8 @@ async def check_and_advance(
 
     Must run inside the caller's transaction. The aggregate's row is locked
     until that transaction ends, so two events for one aggregate never both
-    pass the check.
+    pass the check. This checks ordering only; ``in_version_order`` also
+    enforces the causation rule.
     """
     version = envelope.aggregate_version
     if version is None:
@@ -109,7 +117,13 @@ async def check_and_advance(
     return SequenceCheck(SequenceDecision.APPLY, latest)
 
 
-def in_version_order(handler: Handler, *, consumer: str, first_version: int = 1) -> Handler:
+def in_version_order(
+    handler: Handler,
+    *,
+    consumer: str,
+    first_version: int = 1,
+    root_step: int | None = None,
+) -> Handler:
     """Wrap ``handler`` so it only sees each aggregate's events in version order.
 
     A stale event returns no messages, so ``process_once`` still records it in
@@ -117,9 +131,16 @@ def in_version_order(handler: Handler, *, consumer: str, first_version: int = 1)
     ``FutureEventError``, which rolls the transaction back and lets
     ``InboxConsumer`` retry it; once retries run out it goes to the dead-letter
     hook (LM-024).
+
+    An event without ``causation_id`` raises ``MissingCausationError`` unless
+    it is a root at or below ``root_step`` (default ``None``: no root events),
+    so ``InboxConsumer`` dead-letters it without touching the version table.
     """
 
     async def ordered(session: AsyncSession, envelope: EventEnvelope):
+        if envelope.aggregate_version is None:
+            raise MissingVersionError(f"{envelope.event_type} has no aggregate_version to order by")
+        require_causation(envelope, root_step=root_step)
         check = await check_and_advance(session, consumer, envelope, first_version=first_version)
         if check.decision is SequenceDecision.STALE:
             logger.info(
