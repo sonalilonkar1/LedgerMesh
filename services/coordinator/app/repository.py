@@ -37,6 +37,7 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     "saga": frozenset(
         {
             "REQUESTED->DEDUCTING_POINTS",
+            "REQUESTED->FAILED",
             "DEDUCTING_POINTS->POINTS_DEDUCTED",
             "DEDUCTING_POINTS->FAILED",
             "DEDUCTING_POINTS->COMPENSATING",
