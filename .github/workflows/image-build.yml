@@ -125,23 +125,33 @@ jobs:
         if: inputs.publish
         env:
           SCANNED_ID: ${{ steps.build.outputs.image_id }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           repo="ghcr.io/${owner}/${IMAGE}"
           ref="${repo}:${REVISION}"
 
-          remote_digest() {
-            docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' \
-              | python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])'
-          }
+          # 0 = exists (digest printed), 3 = confirmed not found, else = lookup failed.
+          lookup() { bash infra/scripts/ghcr_digest.sh "${owner}/${IMAGE}" "$1"; }
 
-          # SHA tags are immutable: a re-run must not replace a published image.
-          if existing="$(remote_digest "$ref" 2>/dev/null)"; then
-            echo "::notice::${ref} is already published as ${existing}; not overwriting it."
-            echo "- \`${ref}\` already published as \`${existing}\`; left unchanged" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
+          # SHA tags are immutable. Only a registry-confirmed "not found" may push;
+          # an auth, network or registry error stops the job instead.
+          status=0
+          existing="$(lookup "$REVISION")" || status=$?
+          case "$status" in
+            0)
+              echo "::notice::${ref} is already published as ${existing}; not overwriting it."
+              echo "- \`${ref}\` already published as \`${existing}\`; left unchanged" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+              ;;
+            3) ;;
+            *)
+              echo "::error::could not determine whether ${ref} exists; refusing to publish" >&2
+              exit 1
+              ;;
+          esac
 
           # The candidate must still be the image that was checked and scanned.
           test "$(docker image inspect --format '{{.Id}}' "$CANDIDATE")" = "$SCANNED_ID"
@@ -153,7 +163,8 @@ jobs:
             pushed="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ref" \
               | grep "^${repo}@" | head -1 | cut -d@ -f2 || true)"
           fi
-          published="$(remote_digest "$ref")"
+          # Must now exist: "not found" or a lookup error both fail here.
+          published="$(lookup "$REVISION")"
 
           if [[ -z "$pushed" || "$pushed" != "$published" ]]; then
             echo "::error::published digest '${published}' is not the pushed digest '${pushed}'" >&2
