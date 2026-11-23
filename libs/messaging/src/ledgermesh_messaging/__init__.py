@@ -4,7 +4,15 @@ from .inbox import Handler, ProcessResult, process_once
 from .kafka import create_consumer, create_producer
 from .outbox import OutgoingMessage, enqueue
 from .publisher import BatchResult, OutboxPublisher
-from .schema import inbox, metadata, outbox
+from .schema import aggregate_versions, inbox, metadata, outbox, workflow_steps
+from .sequence import (
+    FutureEventError,
+    MissingVersionError,
+    SequenceCheck,
+    SequenceDecision,
+    check_and_advance,
+    in_version_order,
+)
 from .topics import (
     ALL_TOPICS,
     CATALOG_COMMANDS,
@@ -22,6 +30,19 @@ from .topics import (
     ensure_topics,
     retry_topic,
 )
+from .workflow import (
+    Expectation,
+    ExpectationLookup,
+    FutureStepError,
+    MissingCausationError,
+    MissingWorkflowStepError,
+    StaleHandler,
+    StepDecision,
+    check_expected_step,
+    check_participant_step,
+    in_workflow_order,
+    matching_workflow_step,
+)
 
 __all__ = [
     "ALL_TOPICS",
@@ -34,26 +55,45 @@ __all__ = [
     "BootstrapReport",
     "EnvelopeError",
     "EventEnvelope",
+    "Expectation",
+    "ExpectationLookup",
+    "FutureEventError",
+    "FutureStepError",
     "Handler",
     "InboxConsumer",
     "KeyBy",
+    "MissingCausationError",
+    "MissingVersionError",
+    "MissingWorkflowStepError",
     "OutboxPublisher",
     "OutgoingMessage",
     "PermanentError",
     "ProcessResult",
+    "SequenceCheck",
+    "SequenceDecision",
+    "StaleHandler",
+    "StepDecision",
     "TopicKeyError",
     "TopicMismatchError",
     "TopicSpec",
     "TransientError",
+    "aggregate_versions",
+    "check_and_advance",
+    "check_expected_step",
+    "check_participant_step",
     "consumer_groups",
     "create_consumer",
     "create_producer",
     "dead_letter_topic",
     "enqueue",
     "ensure_topics",
+    "in_version_order",
+    "in_workflow_order",
     "inbox",
+    "matching_workflow_step",
     "metadata",
     "outbox",
     "process_once",
     "retry_topic",
+    "workflow_steps",
 ]
