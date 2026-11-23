@@ -11,6 +11,8 @@ from functools import lru_cache
 from typing import Protocol
 from uuid import UUID, uuid4
 
+from ledgermesh_messaging import EventEnvelope
+from ledgermesh_messaging.schema import outbox
 from sqlalchemy import Connection, Engine, create_engine, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 
@@ -35,6 +37,7 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     "saga": frozenset(
         {
             "REQUESTED->DEDUCTING_POINTS",
+            "REQUESTED->FAILED",
             "DEDUCTING_POINTS->POINTS_DEDUCTED",
             "DEDUCTING_POINTS->FAILED",
             "DEDUCTING_POINTS->COMPENSATING",
@@ -67,6 +70,27 @@ class TransitionRecord:
     workflow_step: int
     reason: str | None
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class WorkflowRecord(RedemptionRecord):
+    user_id: str = ""
+    reward_id: str = ""
+    quantity: int = 0
+    point_cost: int | None = None
+    reward_version: int | None = None
+    total_points: int | None = None
+    workflow_step: int = 0
+
+
+RECOVERABLE_2PC_STATES = (
+    "REQUESTED",
+    "PREPARING",
+    "COMMIT_DECIDED",
+    "ABORT_DECIDED",
+)
+
+IN_DOUBT_2PC_STATES = ("PREPARING", "COMMIT_DECIDED", "ABORT_DECIDED")
 
 
 class CoordinatorRepository(Protocol):
@@ -178,6 +202,101 @@ class PostgresCoordinatorRepository:
             raise RedemptionNotFound(f"Redemption {transaction_id} does not exist.", transaction_id)
         return self._redemption(row)
 
+    def get_workflow(self, transaction_id: UUID) -> WorkflowRecord:
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(redemptions).where(redemptions.c.transaction_id == transaction_id)
+            ).one_or_none()
+        if row is None:
+            raise RedemptionNotFound(f"Redemption {transaction_id} does not exist.", transaction_id)
+        return self._workflow(row)
+
+    def list_recoverable_2pc(self, limit: int = 100) -> list[WorkflowRecord]:
+        """Return durable 2PC work in a stable order for a bounded recovery pass."""
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(redemptions)
+                .where(
+                    redemptions.c.coordination_mode == "two_phase_commit",
+                    redemptions.c.status.in_(RECOVERABLE_2PC_STATES),
+                )
+                .order_by(redemptions.c.updated_at.asc(), redemptions.c.transaction_id.asc())
+                .limit(limit)
+            ).all()
+        return [self._workflow(row) for row in rows]
+
+    def list_in_doubt_2pc(self, limit: int = 100) -> list[WorkflowRecord]:
+        """Return transactions that need a recovery decision or acknowledgement."""
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(redemptions)
+                .where(
+                    redemptions.c.coordination_mode == "two_phase_commit",
+                    redemptions.c.status.in_(IN_DOUBT_2PC_STATES),
+                )
+                .order_by(redemptions.c.updated_at.asc(), redemptions.c.transaction_id.asc())
+                .limit(limit)
+            ).all()
+        return [self._workflow(row) for row in rows]
+
+    def record_quote(
+        self, transaction_id: UUID, point_cost: int, reward_version: int
+    ) -> WorkflowRecord:
+        with self.engine.begin() as connection:
+            current = connection.execute(
+                select(redemptions)
+                .where(redemptions.c.transaction_id == transaction_id)
+                .with_for_update()
+            ).one()
+            updated = connection.execute(
+                update(redemptions)
+                .where(redemptions.c.transaction_id == transaction_id)
+                .values(
+                    point_cost=point_cost,
+                    reward_version=reward_version,
+                    total_points=point_cost * current.quantity,
+                    updated_at=datetime.now(UTC),
+                )
+                .returning(*redemptions.c)
+            ).one()
+        return self._workflow(updated)
+
+    def finalize_with_audit(
+        self, transaction_id: UUID, terminal_status: str, reason: str
+    ) -> tuple[WorkflowRecord, EventEnvelope]:
+        """Persist terminal state and its audit outbox entry atomically."""
+        with self.engine.begin() as connection:
+            updated = self._transition(connection, transaction_id, terminal_status, reason)
+            workflow = self._workflow_row(connection, transaction_id)
+            envelope = EventEnvelope(
+                event_type=f"redemption.{terminal_status.lower()}",
+                transaction_id=transaction_id,
+                correlation_id=workflow.correlation_id,
+                aggregate_type="redemption",
+                aggregate_id=str(transaction_id),
+                aggregate_version=workflow.workflow_step,
+                workflow_step=workflow.workflow_step,
+                fencing_token=None,
+                payload={
+                    "status": terminal_status,
+                    "coordination_mode": workflow.coordination_mode,
+                    "user_id": workflow.user_id,
+                    "reward_id": workflow.reward_id,
+                    "quantity": workflow.quantity,
+                    "total_points": workflow.total_points,
+                },
+            )
+            connection.execute(
+                insert(outbox).values(
+                    event_id=envelope.event_id,
+                    topic="redemption.events",
+                    message_key=str(transaction_id),
+                    envelope=envelope.to_json(),
+                )
+            )
+        del updated
+        return workflow, envelope
+
     def transition(
         self,
         transaction_id: UUID,
@@ -276,3 +395,27 @@ class PostgresCoordinatorRepository:
             reason=row.reason,
             created_at=row.created_at,
         )
+
+    @staticmethod
+    def _workflow(row) -> WorkflowRecord:
+        return WorkflowRecord(
+            transaction_id=row.transaction_id,
+            correlation_id=row.correlation_id,
+            status=row.status,
+            coordination_mode=row.coordination_mode,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            user_id=row.user_id,
+            reward_id=row.reward_id,
+            quantity=row.quantity,
+            point_cost=row.point_cost,
+            reward_version=row.reward_version,
+            total_points=row.total_points,
+            workflow_step=row.workflow_step,
+        )
+
+    def _workflow_row(self, connection: Connection, transaction_id: UUID) -> WorkflowRecord:
+        row = connection.execute(
+            select(redemptions).where(redemptions.c.transaction_id == transaction_id)
+        ).one()
+        return self._workflow(row)

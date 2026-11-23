@@ -100,3 +100,15 @@ jobs:
 
       - name: Migrate every service and check its constraints
         run: uv run pytest tests/db -q
+
+      - name: Run 2PC atomicity and blocking experiments
+        run: make test-2pc-integration
+
+      - name: Retain 2PC integration measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 2pc-integration-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14

@@ -124,8 +124,13 @@ services:
       - "${COORDINATOR_PORT:-8000}:8000"
     environment:
       SERVICE_NAME: coordinator
+      LEDGERMESH_ENV: local
       DATABASE_URL: postgresql+psycopg://coordinator:${POSTGRES_PASSWORD:-ledgermesh_dev}@coordinator-db:5432/coordinator
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      COORDINATOR_RECOVERY_ENABLED: "true"
+      COORDINATOR_RECOVERY_INTERVAL_SECONDS: "5"
+      WALLET_URL: http://wallet:8001
+      CATALOG_URL: http://catalog:8002
     depends_on:
       coordinator-db:
         condition: service_healthy

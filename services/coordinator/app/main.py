@@ -1,23 +1,48 @@
+import os
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from services.coordinator.app.errors import CoordinatorError
 from services.coordinator.app.models import (
     CreateRedemptionRequest,
+    InDoubtTransactionView,
     Problem,
+    RecoveryRunResponse,
     RedemptionResponse,
     TransitionView,
 )
+from services.coordinator.app.recovery import (
+    RecoveryWorker,
+    TwoPhaseCommitRecovery,
+    recovery_enabled,
+)
 from services.coordinator.app.repository import PostgresCoordinatorRepository, get_engine
 from services.coordinator.app.service import CoordinatorService
+from services.coordinator.app.two_phase_commit import TwoPhaseCommitWorkflow, default_workflow
 
 SERVICE_NAME = "coordinator"
 
-app = FastAPI(title="LedgerMesh Redemption Coordinator", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    worker: RecoveryWorker | None = None
+    if recovery_enabled():
+        interval = float(os.environ.get("COORDINATOR_RECOVERY_INTERVAL_SECONDS", "5"))
+        worker = RecoveryWorker(get_two_phase_commit_recovery(), interval)
+        worker.start()
+    try:
+        yield
+    finally:
+        if worker:
+            worker.stop()
+
+
+app = FastAPI(title="LedgerMesh Redemption Coordinator", version="0.1.0", lifespan=lifespan)
 
 
 @lru_cache
@@ -26,10 +51,37 @@ def get_coordinator_service() -> CoordinatorService:
 
 
 CoordinatorServiceDependency = Annotated[CoordinatorService, Depends(get_coordinator_service)]
+
+
+@lru_cache
+def get_two_phase_commit_workflow() -> TwoPhaseCommitWorkflow:
+    return default_workflow(PostgresCoordinatorRepository(get_engine()))
+
+
+TwoPhaseCommitDependency = Annotated[TwoPhaseCommitWorkflow, Depends(get_two_phase_commit_workflow)]
+
+
+@lru_cache
+def get_two_phase_commit_recovery() -> TwoPhaseCommitRecovery:
+    repository = PostgresCoordinatorRepository(get_engine())
+    return TwoPhaseCommitRecovery(repository, get_two_phase_commit_workflow())
+
+
+TwoPhaseCommitRecoveryDependency = Annotated[
+    TwoPhaseCommitRecovery, Depends(get_two_phase_commit_recovery)
+]
 IdempotencyKey = Annotated[
     str,
     Header(alias="Idempotency-Key", min_length=1, max_length=128),
 ]
+
+
+def require_local_internal_routes() -> None:
+    if os.environ.get("LEDGERMESH_ENV") not in {"local", "test"}:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+
+InternalRouteDependency = Annotated[None, Depends(require_local_internal_routes)]
 
 
 @app.exception_handler(CoordinatorError)
@@ -90,3 +142,41 @@ def list_redemption_transitions(
     transaction_id: UUID, service: CoordinatorServiceDependency
 ) -> list[TransitionView]:
     return service.list_transitions(transaction_id)
+
+
+@app.post(
+    "/internal/v1/redemptions/{transaction_id}/execute-2pc",
+    response_model=RedemptionResponse,
+    responses={404: {"model": Problem}, 409: {"model": Problem}},
+    tags=["internal"],
+)
+def execute_two_phase_commit(
+    transaction_id: UUID,
+    workflow: TwoPhaseCommitDependency,
+    _internal: InternalRouteDependency,
+) -> RedemptionResponse:
+    return RedemptionResponse.model_validate(workflow.execute(transaction_id), from_attributes=True)
+
+
+@app.get(
+    "/internal/v1/2pc/in-doubt",
+    response_model=list[InDoubtTransactionView],
+    tags=["internal"],
+)
+def list_in_doubt_transactions(
+    recovery: TwoPhaseCommitRecoveryDependency,
+    _internal: InternalRouteDependency,
+) -> list[InDoubtTransactionView]:
+    return recovery.in_doubt()
+
+
+@app.post(
+    "/internal/v1/2pc/recovery/run",
+    response_model=RecoveryRunResponse,
+    tags=["internal"],
+)
+def run_two_phase_commit_recovery(
+    recovery: TwoPhaseCommitRecoveryDependency,
+    _internal: InternalRouteDependency,
+) -> RecoveryRunResponse:
+    return recovery.run_once()
