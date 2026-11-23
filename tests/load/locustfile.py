@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
 from collections import Counter
 from pathlib import Path
@@ -32,6 +33,14 @@ def add_arguments(parser) -> None:
     parser.add_argument("--mode", choices=MODES, default="two_phase_commit")
     parser.add_argument("--lm-user", default="user-alice", help="user that redeems")
     parser.add_argument("--lm-reward", default="reward-coffee", help="reward being redeemed")
+
+
+@events.test_start.add_listener
+def mark_load_start(environment, **_kwargs) -> None:
+    # Faults are scheduled relative to this moment, not to when Locust launched.
+    run_dir = os.environ.get("LM_RUN_DIR")
+    if run_dir:
+        (Path(run_dir) / "load_started.txt").write_text(str(time.time()))
 
 
 @events.test_stop.add_listener
