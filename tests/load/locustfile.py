@@ -13,8 +13,11 @@ starts from the same balances and inventory.
 
 from __future__ import annotations
 
+import json
+import os
 import uuid
 from collections import Counter
+from pathlib import Path
 
 from locust import HttpUser, between, events, task
 
@@ -32,9 +35,13 @@ def add_arguments(parser) -> None:
 
 
 @events.test_stop.add_listener
-def print_outcomes(environment, **_kwargs) -> None:
+def report_outcomes(environment, **_kwargs) -> None:
     mode = environment.parsed_options.mode
     print(f"\nRedemption outcomes ({mode}): {dict(outcomes)}")
+    # tests/load/run.py sets LM_RUN_DIR so the tally is saved with the run.
+    run_dir = os.environ.get("LM_RUN_DIR")
+    if run_dir:
+        (Path(run_dir) / "outcomes.json").write_text(json.dumps(dict(outcomes), indent=2))
 
 
 class RedemptionUser(HttpUser):
