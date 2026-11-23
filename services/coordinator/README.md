@@ -44,7 +44,8 @@ Later issues reuse this foundation:
 
 - LM-015 drives the 2PC workflow;
 - LM-016 resumes incomplete 2PC transactions;
-- LM-022 drives and recovers the Saga state machine.
+- LM-022 drives and recovers the Saga state machine;
+- LM-023 sequences and durably records Saga compensations.
 
 ## Saga worker (LM-022)
 
@@ -80,6 +81,28 @@ bad request cannot stop the starter, result consumer, or outbox publisher.
 
 The Audit Ledger consumer publishes unsupported or malformed transition events
 to `redemption.events.dlq`; such an event no longer stops the consumer.
+
+## Saga compensation (LM-023)
+
+A definite Catalog rejection proves that no reservation was applied, so the
+Coordinator requests exactly one Wallet refund. For an unknown reservation
+outcome, such as the timeout detected by LM-024, Catalog release is requested
+first. Only after `catalog.inventory_released` is confirmed does the
+Coordinator request the Wallet refund. This avoids releasing inventory for a
+known rejection while still covering a reservation whose result was lost.
+
+Every move into or within `COMPENSATING`, its audit event, and the next
+compensation command commit in the same Coordinator transaction. A restart
+therefore resumes through the inbox/outbox without inventing another business
+effect. Participant compensation commands are idempotent and create tombstones
+when their forward operation did not happen.
+
+`COMPENSATED` is terminal and distinct from successful `COMPLETED`. A rejected
+compensation stays non-terminal in `COMPENSATING`; retry/backoff tooling calls
+`retry_compensation` and can alert operators without creating a terminal
+`COMPENSATION_FAILED` outcome. The retry API derives the required action from
+the durable current command, so a caller cannot refund before a required
+inventory release has been confirmed.
 
 ## Local use
 
