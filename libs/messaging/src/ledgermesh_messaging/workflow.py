@@ -28,7 +28,14 @@ for it, so it checks a result exactly:
 - a transaction that is finished or unknown ignores the result (the
   terminal-state rule in ADR-001 section 10).
 
-Both reject a non-root message with no ``causation_id``.
+Both apply the shared root-message rule (``causation.require_causation``)
+before touching any state, with an explicit policy:
+
+- participants accept a root command at ``first_step`` and require a cause
+  on every later step;
+- the Coordinator requires a cause on results at every step, because a result
+  always answers a command it sent. A result without one is malformed: it is
+  dead-lettered, not classified as a wrong cause and silently ignored.
 """
 
 from __future__ import annotations
@@ -43,6 +50,10 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# MissingCausationError lives in causation.py; re-exported here for callers
+# that already import it from this module.
+from .causation import MissingCausationError as MissingCausationError
+from .causation import require_causation
 from .consumer import PermanentError, TransientError
 from .envelope import EventEnvelope
 from .inbox import Handler
@@ -89,22 +100,15 @@ class MissingWorkflowStepError(PermanentError, ValueError):
     """The message has no workflow_step, so it cannot be ordered within its transaction."""
 
 
-class MissingCausationError(PermanentError):
-    """Only the root message of a transaction may have no causation_id."""
-
-    def __init__(self, envelope: EventEnvelope) -> None:
-        super().__init__(
-            f"{envelope.event_type} {envelope.event_id} is at step {envelope.workflow_step} "
-            "but has no causation_id"
-        )
+# The Coordinator never receives a root message: every result answers a command.
+RESULTS_HAVE_NO_ROOT = None
 
 
-def _validate(envelope: EventEnvelope, first_step: int) -> int:
+def _validate(envelope: EventEnvelope, *, root_step: int | None) -> int:
     step = envelope.workflow_step
     if step is None:
         raise MissingWorkflowStepError(f"{envelope.event_type} has no workflow_step to order by")
-    if envelope.causation_id is None and step > first_step:
-        raise MissingCausationError(envelope)
+    require_causation(envelope, root_step=root_step)
     return step
 
 
@@ -116,7 +120,8 @@ async def check_participant_step(
     Must run inside the caller's transaction. The transaction's row stays
     locked until it ends, so two messages for one transaction never both pass.
     """
-    step = _validate(envelope, first_step)
+    # A participant's root is the transaction's first command.
+    step = _validate(envelope, root_step=first_step)
     key = (
         workflow_steps.c.consumer == consumer,
         workflow_steps.c.transaction_id == envelope.transaction_id,
@@ -140,11 +145,13 @@ async def check_participant_step(
     return StepDecision.APPLY
 
 
-def check_expected_step(
-    envelope: EventEnvelope, expected: Expectation | None, *, first_step: int = FIRST_STEP
-) -> StepDecision:
-    """Compare a result with the step and command its transaction is waiting for."""
-    step = _validate(envelope, first_step)
+def check_expected_step(envelope: EventEnvelope, expected: Expectation | None) -> StepDecision:
+    """Compare a result with the step and command its transaction is waiting for.
+
+    A result must name its cause at every step; one that doesn't raises
+    ``MissingCausationError`` instead of being classified as ``WRONG_CAUSE``.
+    """
+    step = _validate(envelope, root_step=RESULTS_HAVE_NO_ROOT)
     if expected is None:
         return StepDecision.FINISHED
     if step < expected.step:
@@ -189,9 +196,7 @@ def in_workflow_order(
     """
 
     async def ordered(session: AsyncSession, envelope: EventEnvelope):
-        decision = await check_participant_step(
-            session, consumer, envelope, first_step=first_step
-        )
+        decision = await check_participant_step(session, consumer, envelope, first_step=first_step)
         if decision is StepDecision.STALE:
             _log_ignored(envelope, decision)
             return await on_stale(session, envelope)
@@ -200,9 +205,7 @@ def in_workflow_order(
     return ordered
 
 
-def matching_workflow_step(
-    handler: Handler, *, expectation: ExpectationLookup, first_step: int = FIRST_STEP
-) -> Handler:
+def matching_workflow_step(handler: Handler, *, expectation: ExpectationLookup) -> Handler:
     """Wrap the Coordinator's result ``handler`` so only the awaited result is applied.
 
     ``expectation`` reads the transaction's current step and the ``event_id``
@@ -213,8 +216,10 @@ def matching_workflow_step(
     """
 
     async def ordered(session: AsyncSession, envelope: EventEnvelope):
+        # Reject a malformed result before reading or locking any state.
+        _validate(envelope, root_step=RESULTS_HAVE_NO_ROOT)
         expected = await expectation(session, envelope)
-        decision = check_expected_step(envelope, expected, first_step=first_step)
+        decision = check_expected_step(envelope, expected)
         if decision is StepDecision.FUTURE:
             raise FutureStepError(envelope, expected=expected.step)
         if decision is not StepDecision.APPLY:
