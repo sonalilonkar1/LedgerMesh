@@ -3,8 +3,6 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
-
 from ledgermesh_messaging import InboxConsumer, OutgoingMessage, inbox, process_once
 from ledgermesh_messaging.schema import workflow_steps
 from ledgermesh_messaging.workflow import (
@@ -15,6 +13,7 @@ from ledgermesh_messaging.workflow import (
     in_workflow_order,
     matching_workflow_step,
 )
+from sqlalchemy import func, select
 
 from .conftest import increment_and_reply, make_envelope, read_counter
 
@@ -52,6 +51,18 @@ async def highest_step(session_factory, transaction_id, consumer=WALLET):
 async def inbox_rows(session_factory):
     async with session_factory() as session:
         return await session.scalar(select(func.count()).select_from(inbox))
+
+
+def dead_letter_consumer(session_factory, handler, name):
+    dead_letters = []
+
+    async def capture(record, exc):
+        dead_letters.append(exc)
+
+    consumer = InboxConsumer(
+        None, session_factory, name=name, handler=handler, on_dead_letter=capture
+    )
+    return consumer, dead_letters
 
 
 participant = in_workflow_order(increment_and_reply, consumer=WALLET)
@@ -154,12 +165,34 @@ async def test_root_command_may_have_no_causation(session_factory):
     assert await read_counter(session_factory) == 1
 
 
+async def test_participant_root_rule_applies_only_up_to_first_step(session_factory):
+    from_two = in_workflow_order(increment_and_reply, consumer=WALLET, first_step=2)
+
+    await deliver(session_factory, command(uuid4(), 2, causation_id=None), from_two)
+    with pytest.raises(MissingCausationError):
+        await deliver(session_factory, command(uuid4(), 3, causation_id=None), from_two)
+
+    assert await read_counter(session_factory) == 1
+
+
 async def test_later_command_without_causation_is_rejected(session_factory):
     with pytest.raises(MissingCausationError):
         await deliver(session_factory, command(uuid4(), 2, causation_id=None), participant)
 
     assert await read_counter(session_factory) == 0
     assert await inbox_rows(session_factory) == 0
+
+
+async def test_participant_dead_letters_a_later_command_without_causation(session_factory):
+    consumer, dead_letters = dead_letter_consumer(session_factory, participant, WALLET)
+    uncaused = command(uuid4(), 3, causation_id=None)
+
+    assert await consumer.handle(SimpleNamespace(value=uncaused.to_bytes())) is None
+
+    assert [type(exc) for exc in dead_letters] == [MissingCausationError]
+    assert await read_counter(session_factory) == 0
+    assert await inbox_rows(session_factory) == 0
+    assert await highest_step(session_factory, uncaused.transaction_id) is None
 
 
 async def test_message_without_a_workflow_step_is_dead_lettered(session_factory):
@@ -262,6 +295,46 @@ async def test_coordinator_ignores_results_for_finished_transactions(session_fac
     assert result.result_event_ids == ()
     assert await read_counter(session_factory) == 0
     assert await inbox_rows(session_factory) == 1
+
+
+@pytest.mark.parametrize("step", [1, 2, 3])
+async def test_coordinator_dead_letters_a_result_without_causation_at_any_step(
+    session_factory, step
+):
+    # Step 1 included: a result always answers a command, so it is never a root.
+    transaction_id = uuid4()
+    waiting = Waiting()
+    waiting.by_transaction[transaction_id] = Expectation(step=step, causation_id=uuid4())
+    handler = matching_workflow_step(increment_and_reply, expectation=waiting)
+    consumer, dead_letters = dead_letter_consumer(session_factory, handler, COORDINATOR)
+    uncaused = result_for(transaction_id, step, None)
+
+    assert await consumer.handle(SimpleNamespace(value=uncaused.to_bytes())) is None
+
+    # Rejected as malformed: not applied, and not recorded as an ignored result.
+    assert [type(exc) for exc in dead_letters] == [MissingCausationError]
+    assert await read_counter(session_factory) == 0
+    assert await inbox_rows(session_factory) == 0
+
+
+async def test_coordinator_rejects_an_uncaused_result_before_looking_up_state(session_factory):
+    lookups = []
+
+    async def expectation(session, envelope):
+        lookups.append(envelope.event_id)
+        return None
+
+    with pytest.raises(MissingCausationError):
+        await deliver(
+            session_factory,
+            result_for(uuid4(), 1, None),
+            matching_workflow_step(increment_and_reply, expectation=expectation),
+            consumer=COORDINATOR,
+        )
+
+    # Even for a finished transaction it is malformed, not "ignored as finished".
+    assert lookups == []
+    assert await inbox_rows(session_factory) == 0
 
 
 async def test_coordinator_dead_letters_a_result_that_never_becomes_current(session_factory):
