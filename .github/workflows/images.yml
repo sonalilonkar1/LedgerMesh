@@ -21,6 +21,7 @@ on:
       - "infra/Dockerfile.service"
       - "infra/docker/**"
       - "infra/scripts/check_image.sh"
+      - "infra/scripts/ghcr_digest.sh"
       - ".dockerignore"
       - ".trivyignore"
       - "pyproject.toml"
@@ -120,36 +121,56 @@ jobs:
         env:
           SHA: ${{ steps.verify.outputs.sha }}
           VERSION: ${{ steps.verify.outputs.version }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           owner="${GITHUB_REPOSITORY_OWNER,,}"
 
-          remote_digest() {
-            docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' \
-              | python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])'
-          }
+          # 0 = exists (digest printed), 3 = confirmed not found, else = lookup failed.
+          lookup() { bash infra/scripts/ghcr_digest.sh "${owner}/$1" "$2"; }
 
           for image in ledgermesh-coordinator ledgermesh-wallet ledgermesh-catalog ledgermesh-audit-ledger; do
             repo="ghcr.io/${owner}/${image}"
-            if ! digest="$(remote_digest "${repo}:${SHA}" 2>/dev/null)"; then
-              echo "::error::${repo}:${SHA} was never published; merge and let main publish it first" >&2
-              exit 1
-            fi
 
-            if existing="$(remote_digest "${repo}:${VERSION}" 2>/dev/null)"; then
-              if [[ "$existing" != "$digest" ]]; then
-                echo "::error::${repo}:${VERSION} already points at ${existing}, not ${digest}" >&2
+            status=0
+            digest="$(lookup "$image" "$SHA")" || status=$?
+            case "$status" in
+              0) ;;
+              3)
+                echo "::error::${repo}:${SHA} was never published; merge and let main publish it first" >&2
                 exit 1
-              fi
-              echo "- \`${repo}:${VERSION}\` already = \`${digest}\`" >> "$GITHUB_STEP_SUMMARY"
-              continue
-            fi
+                ;;
+              *)
+                echo "::error::could not look up ${repo}:${SHA}; refusing to release" >&2
+                exit 1
+                ;;
+            esac
+
+            # Only a registry-confirmed "not found" may create the semver tag.
+            status=0
+            existing="$(lookup "$image" "$VERSION")" || status=$?
+            case "$status" in
+              0)
+                if [[ "$existing" != "$digest" ]]; then
+                  echo "::error::${repo}:${VERSION} already points at ${existing}, not ${digest}" >&2
+                  exit 1
+                fi
+                echo "- \`${repo}:${VERSION}\` already = \`${digest}\`" >> "$GITHUB_STEP_SUMMARY"
+                continue
+                ;;
+              3) ;;
+              *)
+                echo "::error::could not determine whether ${repo}:${VERSION} exists; refusing to tag" >&2
+                exit 1
+                ;;
+            esac
 
             # A carbon copy of the existing manifest: same digest, no rebuild.
             docker buildx imagetools create --prefer-index=false \
               -t "${repo}:${VERSION}" "${repo}@${digest}"
 
-            tagged="$(remote_digest "${repo}:${VERSION}")"
+            tagged="$(lookup "$image" "$VERSION")"
             if [[ "$tagged" != "$digest" ]]; then
               echo "::error::${repo}:${VERSION} is ${tagged}, expected ${digest}" >&2
               exit 1
