@@ -1,3 +1,4 @@
+from .causation import is_root, require_causation
 from .consumer import InboxConsumer, PermanentError, TransientError
 from .envelope import EnvelopeError, EventEnvelope
 from .inbox import Handler, ProcessResult, process_once
@@ -90,10 +91,12 @@ __all__ = [
     "in_version_order",
     "in_workflow_order",
     "inbox",
+    "is_root",
     "matching_workflow_step",
     "metadata",
     "outbox",
     "process_once",
+    "require_causation",
     "retry_topic",
     "workflow_steps",
 ]
