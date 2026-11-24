@@ -51,7 +51,7 @@ await enqueue(session, WALLET_COMMANDS.message(deduct_points_command))
 
 - Commands are keyed by the wallet or reward they change, so every command for one user (or one reward) lands on the same partition of that topic and is read in the order it was published there. Sending a `reward` envelope to `wallet.commands` raises `TopicKeyError`.
 - Results are keyed by `transaction_id` for stable transaction affinity within each topic. Kafka does not provide ordering across `wallet.results` and `catalog.results`; the Coordinator validates workflow step and causation before applying a result.
-- Every topic above also has `<topic>.retry`, with the same key and partition count and consumed by `<group>.retry`, and `<topic>.dlq`, with 1 partition and no consumer group. LM-024 ([#26](https://github.com/sonalilonkar1/LedgerMesh/issues/26)) adds the retry and dead-letter logic that uses them.
+- Every topic above also has `<topic>.retry`, with the same key and partition count and consumed by `<group>.retry`, and `<topic>.dlq`, with 1 partition and no consumer group. [Retries, timeouts and dead letters](#retries-timeouts-and-dead-letters-lm-024) describes how LM-024 uses them.
 - Retry topics preserve the original message key and partition count, but they are independent Kafka topics and therefore do not preserve ordering relative to the main topic. LM-024 and LM-026 must handle delayed and out-of-order retries explicitly.
 
 **Kafka orders messages only within one partition of one topic.** A key gives stable partition affinity and ordering only within each individual topic partition. There is no order:
@@ -196,6 +196,74 @@ Ignored messages are logged with their `transaction_id`, `event_id`, step and ca
 | An event without `causation_id` is dead-lettered, not applied or recorded; `root_step` opts in to root events | `test_event_without_causation_is_dead_lettered_not_applied`, `test_uncaused_event_is_rejected_even_when_it_would_be_stale`, `test_root_event_may_omit_causation_when_the_consumer_allows_roots`, `test_uncaused_event_exactly_at_the_root_step_is_accepted`, `test_uncaused_event_below_the_root_step_is_dead_lettered`, `test_non_root_event_needs_causation_even_when_roots_are_allowed` |
 | Messages without a version or workflow step are dead-lettered | `test_message_without_a_workflow_step_is_dead_lettered`, `test_consumer_dead_letters_an_event_without_a_version` |
 
+## Retries, timeouts and dead letters (LM-024)
+
+Every service worker passes a `FailureRouter` to its `InboxConsumer`s. A failing message then moves through three tiers:
+
+| Tier | When | What happens |
+|---|---|---|
+| In-process attempts | `TransientError`, a database `OperationalError`, or a handler running longer than `handler_timeout_seconds` | Retried `attempts` times with exponential `backoff_seconds`. A timed-out attempt is cancelled and its transaction rolled back |
+| Retry topic | the in-process attempts ran out | The **original value and key** are republished to `<topic>.retry`, with `lm-retry-count`, `lm-not-before-ms`, `lm-last-error` and the original topic/partition/offset. A second consumer (group `<group>.retry`) reads it once it is due. The main partition is not blocked |
+| Dead-letter topic | `redeliveries` trips through the retry topic failed, or at once for an invalid envelope or a `PermanentError` | Published to `<topic>.dlq` with the reason headers below, and logged at error level |
+
+Because the message value is never rewritten, **retries keep the `event_id` and `transaction_id`**. Both consumers use the same inbox name, so a retry of a message that did commit is reported as a duplicate, not applied twice.
+
+```python
+policy = RetryPolicy.from_env()          # LM_RETRY_* overrides, validated at startup
+router = FailureRouter(producer, consumer="wallet-saga", policy=policy)
+main = InboxConsumer(consumer, sessions, name="wallet-saga", handler=handler, router=router)
+retries = InboxConsumer(
+    create_retry_consumer(bootstrap, WALLET_COMMANDS),
+    sessions, name="wallet-saga", handler=handler, router=router,
+)
+```
+
+### Configuration
+
+| Setting | Variable | Default |
+|---|---|---|
+| In-process attempts | `LM_RETRY_ATTEMPTS` | 3 |
+| Backoff between attempts (doubles) | `LM_RETRY_BACKOFF_SECONDS` | 0.2 |
+| Trips through the retry topic | `LM_RETRY_REDELIVERIES` | 5 |
+| Delay before a redelivery (doubles) | `LM_RETRY_REDELIVERY_DELAY_SECONDS` | 5 |
+| Cap on any wait | `LM_RETRY_MAX_DELAY_SECONDS` | 60 |
+| Handler timeout per attempt | `LM_RETRY_HANDLER_TIMEOUT_SECONDS` | 30 |
+
+An invalid value stops the worker at startup. Keep `LM_RETRY_MAX_DELAY_SECONDS` well below Kafka's `max.poll.interval.ms` (300 s), because the retry consumer waits for a message's due time between polls. Messages in one retry partition are processed in order, so a long delay can hold back shorter ones behind it.
+
+### Dead-letter reasons
+
+| Header | Meaning |
+|---|---|
+| `lm-dlq-reason` | `invalid_envelope`, `permanent_error` or `retries_exhausted` |
+| `lm-dlq-error` | the final error (`repr`, at most 1000 characters) |
+| `lm-last-error` | the error that sent it to the retry topic, if it went there |
+| `lm-dlq-consumer` | the consumer group that gave up |
+| `lm-dlq-failed-at` | when, in UTC |
+| `lm-retry-count` | how many retry-topic trips it had |
+| `lm-original-topic` / `-partition` / `-offset` | where it was first read |
+
+To see them:
+
+```bash
+uv run ledgermesh-dlq wallet.commands.dlq
+uv run ledgermesh-dlq wallet.commands.dlq --limit 20 --json
+```
+
+It reads the topic from the beginning without joining a consumer group, so it never moves anyone's offsets. Each line shows the reason, the consumer, the retry count, the event type, `event_id` and `transaction_id`, the original position and the error.
+
+### Tests
+
+| Guarantee | Test |
+|---|---|
+| Retry count, backoff and timeout are configurable and validated | `test_policy_reads_every_setting_from_the_environment`, `test_invalid_settings_fail_at_startup`, `test_backoff_and_redelivery_delay_double_up_to_the_cap` |
+| Retries keep the original bytes, event and transaction ids, and first position | `test_first_retry_republishes_the_original_bytes_to_the_retry_topic`, `test_later_retries_keep_the_original_position_and_count_up` |
+| Exhausted messages reach the source topic's DLQ | `test_exhausted_redeliveries_go_to_the_source_topics_dlq`, `test_every_main_and_retry_topic_routes_to_its_own_retry_and_dlq`, `test_a_message_that_keeps_failing_ends_on_the_dlq_with_its_reason` |
+| A retried message applies once on the retry consumer | `test_exhausted_attempts_move_to_the_retry_topic_and_apply_there` |
+| A slow handler times out, rolls back and is retried | `test_a_handler_that_exceeds_the_timeout_is_retried_not_applied` |
+| Retry consumers wait until a message is due, and stop cleanly | `test_the_retry_consumer_waits_until_a_message_is_due`, `test_stopping_while_waiting_does_not_process_the_message` |
+| The reason is recorded and readable | `test_dead_letter_headers_record_reason_error_consumer_and_time`, `test_describe_shows_reason_ids_and_origin_of_a_dead_letter`, `test_describe_handles_an_invalid_envelope` |
+
 ## Duplicate replay is opt-in
 
 A duplicate always returns the stored result event ids, and its business change is never applied twice.
@@ -269,5 +337,4 @@ GitHub Actions runs the full suite, including the PostgreSQL and Kafka integrati
 ## Not yet included
 
 - `EventEnvelope` is provisional until the shared contracts from LM-004 exist.
-- Dead-letter topics and retry topics come with LM-024. Until then `on_dead_letter` defaults to re-raising, which stops the consumer instead of skipping a message.
 - Trace propagation: `headers` are carried through, and LM-033 will fill in `traceparent`.

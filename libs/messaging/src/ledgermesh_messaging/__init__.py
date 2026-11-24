@@ -5,6 +5,13 @@ from .inbox import Handler, ProcessResult, process_once
 from .kafka import create_consumer, create_producer
 from .outbox import OutgoingMessage, enqueue
 from .publisher import BatchResult, OutboxPublisher
+from .retry import (
+    DeadLetterReason,
+    FailureRouter,
+    RetryConfigError,
+    RetryPolicy,
+    create_retry_consumer,
+)
 from .schema import aggregate_versions, inbox, metadata, outbox, workflow_steps
 from .sequence import (
     FutureEventError,
@@ -54,10 +61,12 @@ __all__ = [
     "WALLET_RESULTS",
     "BatchResult",
     "BootstrapReport",
+    "DeadLetterReason",
     "EnvelopeError",
     "EventEnvelope",
     "Expectation",
     "ExpectationLookup",
+    "FailureRouter",
     "FutureEventError",
     "FutureStepError",
     "Handler",
@@ -70,6 +79,8 @@ __all__ = [
     "OutgoingMessage",
     "PermanentError",
     "ProcessResult",
+    "RetryConfigError",
+    "RetryPolicy",
     "SequenceCheck",
     "SequenceDecision",
     "StaleHandler",
@@ -85,6 +96,7 @@ __all__ = [
     "consumer_groups",
     "create_consumer",
     "create_producer",
+    "create_retry_consumer",
     "dead_letter_topic",
     "enqueue",
     "ensure_topics",
