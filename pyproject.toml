@@ -38,6 +38,7 @@ pythonpath = ["."]
 markers = [
     "database: needs PostgreSQL (make infra-up, or LM_TEST_POSTGRES_URL)",
     "integration: crosses service-owned databases using real infrastructure",
+    "invariant_checker: intentionally injects invalid states to test the invariant checker",
 ]
 
 [tool.ruff]
