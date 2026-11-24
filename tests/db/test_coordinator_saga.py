@@ -426,7 +426,71 @@ def test_unknown_reservation_releases_before_refund_and_survives_restarts(databa
     assert audit_count == transition_count
 
 
-def test_rejected_release_remains_compensating_and_can_be_retried(database_url, saga_db):
+def test_lost_release_result_can_be_retried_and_compensation_completes(database_url, saga_db):
+    created = create(PostgresCoordinatorRepository(saga_db))
+    asyncio.run(start(database_url, created.transaction_id))
+    deducting = row(saga_db, created.transaction_id)
+    asyncio.run(
+        consume(
+            database_url,
+            result(
+                deducting,
+                "wallet.points_deducted",
+                aggregate_type="wallet",
+                aggregate_id=deducting.user_id,
+            ),
+        )
+    )
+    asyncio.run(
+        begin_compensation(
+            database_url,
+            created.transaction_id,
+            reservation_may_exist=True,
+        )
+    )
+    releasing = row(saga_db, created.transaction_id)
+    # The first release may have succeeded at Catalog, but its result was
+    # lost. Reissue the still-pending idempotent command with a new event ID.
+    assert event_types(saga_db).count("catalog.release_inventory") == 1
+    asyncio.run(retry_compensation(database_url, created.transaction_id))
+    retried = row(saga_db, created.transaction_id)
+    assert retried.status == "COMPENSATING"
+    assert retried.current_command_id != releasing.current_command_id
+    assert event_types(saga_db).count("catalog.release_inventory") == 2
+
+    # Catalog's durable outcome for the original operation is replayed as a
+    # duplicate, acknowledging this retry without releasing twice.
+    asyncio.run(
+        consume(
+            database_url,
+            result(
+                retried,
+                "catalog.inventory_released",
+                aggregate_type="reward",
+                aggregate_id=retried.reward_id,
+                payload={"outcome": "duplicate"},
+            ),
+        )
+    )
+    refunding = row(saga_db, created.transaction_id)
+    assert refunding.status == "COMPENSATING"
+    assert event_types(saga_db).count("wallet.refund_points") == 1
+
+    asyncio.run(
+        consume(
+            database_url,
+            result(
+                refunding,
+                "wallet.points_refunded",
+                aggregate_type="wallet",
+                aggregate_id=refunding.user_id,
+            ),
+        )
+    )
+    assert row(saga_db, created.transaction_id).status == "COMPENSATED"
+
+
+def test_permanent_release_rejection_is_not_automatically_retried(database_url, saga_db):
     created = create(PostgresCoordinatorRepository(saga_db))
     asyncio.run(start(database_url, created.transaction_id))
     deducting = row(saga_db, created.transaction_id)
@@ -457,20 +521,18 @@ def test_rejected_release_remains_compensating_and_can_be_retried(database_url, 
                 "catalog.release_rejected",
                 aggregate_type="reward",
                 aggregate_id=releasing.reward_id,
-                payload={"reason": "temporary_failure"},
+                payload={"reason": "conflict"},
             ),
         )
     )
+    rejected = row(saga_db, created.transaction_id)
+    assert rejected.status == "COMPENSATING"
+    assert rejected.current_command_id is None
 
-    waiting = row(saga_db, created.transaction_id)
-    assert waiting.status == "COMPENSATING"
+    with pytest.raises(InvalidSagaResult, match="requires operator review"):
+        asyncio.run(retry_compensation(database_url, created.transaction_id))
+
     assert event_types(saga_db).count("catalog.release_inventory") == 1
-
-    asyncio.run(retry_compensation(database_url, created.transaction_id))
-    retried = row(saga_db, created.transaction_id)
-    assert retried.status == "COMPENSATING"
-    assert retried.current_command_id != waiting.current_command_id
-    assert event_types(saga_db).count("catalog.release_inventory") == 2
     assert event_types(saga_db).count("wallet.refund_points") == 0
 
 

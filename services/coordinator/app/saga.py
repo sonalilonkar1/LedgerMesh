@@ -281,15 +281,23 @@ class CoordinatorSagaMachine:
         transaction_id: UUID,
         reason: str = "compensation retry requested",
     ):
-        """Reissue one still-required idempotent compensation command.
+        """Reissue a compensation command whose result is still unknown.
 
-        This is the durable boundary used by retry/backoff tooling. Reissuing a
-        command is safe because Wallet and Catalog persist outcomes by
-        transaction and operation.
+        This covers a lost result/acknowledgement: participants persist their
+        outcome by transaction and operation, so replay returns the same
+        applied result (or duplicate) without repeating the business effect.
+        A durable ``release_rejected`` result is not retryable here; Catalog
+        will replay that rejection for this transaction and operation. Such a
+        case remains COMPENSATING for operator investigation.
         """
         row = self._locked(connection, transaction_id)
         if row.coordination_mode != "saga" or row.status != "COMPENSATING":
             raise InvalidSagaResult("only a compensating Saga can be retried")
+        if row.current_command_id is None:
+            raise InvalidSagaResult(
+                "no compensation command is pending; its result was already received "
+                "and requires operator review"
+            )
         command = connection.scalar(
             select(outbox.c.envelope).where(outbox.c.event_id == row.current_command_id)
         )
@@ -380,11 +388,15 @@ class CoordinatorSagaMachine:
             row,
             "COMPENSATING",
             reason,
-            command_id=row.current_command_id,
+            # The durable rejection is a completed response, not a pending
+            # command. Keeping its ID here would make retry tooling replay a
+            # Catalog outcome that is permanently stored for this operation.
+            command_id=None,
         )
-        # There is deliberately no terminal COMPENSATION_FAILED state. LM-024
-        # can call retry_compensation with bounded backoff after alerting. The
-        # rejected command remains the durable description of what must retry.
+        # There is deliberately no terminal COMPENSATION_FAILED state. Keep the
+        # redemption visible in COMPENSATING for operator investigation, but
+        # clear the pending command because Catalog's durable rejection cannot
+        # be changed by replaying that operation.
         return [
             _audit_event(
                 updated,
