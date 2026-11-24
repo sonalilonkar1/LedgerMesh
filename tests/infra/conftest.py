@@ -73,8 +73,9 @@ def install(path: Path, source: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
-def digest(char: str) -> str:
-    return "sha256:" + char * 64
+def digest(pattern: str) -> str:
+    """A valid sha256 digest built by repeating ``pattern`` to exactly 64 hex digits."""
+    return "sha256:" + (pattern * 64)[:64]
 
 
 def manifest_body(config: str) -> str:
