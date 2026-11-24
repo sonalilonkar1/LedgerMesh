@@ -47,24 +47,64 @@ if [[ "$uid" == "0" || "$gid" == "0" ]]; then
 fi
 echo "ok: runs as uid=${uid} gid=${gid}"
 
-# Scan as root so directories the service user cannot read are covered too.
-# Any *.key file fails; a *.pem fails only if it holds a private key, because
-# public CA bundles (e.g. certifi's cacert.pem) are legitimately present.
-found="$(docker exec -u 0 "$name" sh -c '
-  find / -xdev \( -name ".env" -o -name ".env.*" -o -name ".git" \
-     -o -name ".git-credentials" -o -name ".netrc" -o -name "*.key" \) \
-     -print 2>/dev/null
-  find / -xdev -type f -name "*.pem" -exec grep -l "PRIVATE KEY" {} + 2>/dev/null
-' || true)"
+# The forbidden-file scan, run inside the container as root so directories the
+# service user cannot read are covered too. $1 is the directory to scan ("/").
+#
+# It prints every forbidden path, and exits 0 only if the scan COMPLETED; any
+# other exit means it did not, and the check fails instead of reading the empty
+# output as "clean":
+#   - any *.key file, .env*, .git, .git-credentials or .netrc is forbidden;
+#   - a *.pem is forbidden only if it holds a private key, because public CA
+#     bundles (e.g. certifi's cacert.pem) are legitimately present. grep exits
+#     1 for "no private key", which is clean; 2 or more is a scan failure.
+read -r -d '' SCAN <<'EOF' || true
+set -u
+root="$1"
+find "$root" -xdev \( -name ".env" -o -name ".env.*" -o -name ".git" \
+   -o -name ".git-credentials" -o -name ".netrc" -o -name "*.key" \) -print \
+   || exit 10
+pems="$(find "$root" -xdev -type f -name "*.pem" -print)" || exit 11
+[ -n "$pems" ] || exit 0
+printf '%s\n' "$pems" | while IFS= read -r pem; do
+  status=0
+  grep -l "PRIVATE KEY" "$pem" || status=$?
+  [ "$status" -le 1 ] || exit 12
+done
+EOF
+
+scan_status=0
+found="$(docker exec -u 0 "$name" sh -c "$SCAN" scan /)" || scan_status=$?
+if [[ "$scan_status" -ne 0 ]]; then
+  echo "FAIL: the forbidden-file scan did not complete (exit ${scan_status})" >&2
+  exit 1
+fi
 if [[ -n "$found" ]]; then
   echo "FAIL: forbidden files in image:" >&2
   echo "$found" >&2
   exit 1
 fi
-if docker exec "$name" env | grep -iE '^(GITHUB_TOKEN|GH_TOKEN|.*_SECRET|.*PASSWORD)=' >/dev/null; then
-  echo "FAIL: credentials present in the image environment" >&2
+
+# Read the environment first, so a failed `docker exec` fails the check instead
+# of looking like "no credential variables".
+env_status=0
+env_output="$(docker exec "$name" env)" || env_status=$?
+if [[ "$env_status" -ne 0 ]]; then
+  echo "FAIL: could not read the container environment (exit ${env_status})" >&2
   exit 1
 fi
+match_status=0
+grep -iqE '^(GITHUB_TOKEN|GH_TOKEN|.*_SECRET|.*PASSWORD)=' <<<"$env_output" || match_status=$?
+case "$match_status" in
+  0)
+    echo "FAIL: credentials present in the image environment" >&2
+    exit 1
+    ;;
+  1) ;;
+  *)
+    echo "FAIL: could not check the container environment (grep exit ${match_status})" >&2
+    exit 1
+    ;;
+esac
 echo "ok: no .env files, git metadata, private keys or credentials"
 
 # Read the logs once: piping straight into `grep -q` can SIGPIPE docker logs,
