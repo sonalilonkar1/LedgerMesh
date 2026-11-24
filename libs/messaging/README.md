@@ -169,9 +169,11 @@ The Coordinator knows from its own state which step each transaction is waiting 
 
 | Wrapper | Root policy | A message without `causation_id` is accepted only if |
 |---|---|---|
-| `in_workflow_order` | `root_step = first_step` (default 1) | it is at or below `first_step`: the transaction's first command |
+| `in_workflow_order` | `root_step = first_step` (default 1) | it is exactly at `first_step`: the transaction's first command |
 | `matching_workflow_step` | no roots | never. A result always answers a command, so this holds at every step, including step 1 |
-| `in_version_order` | no roots by default; pass `root_step=` to allow one | `root_step` is set and the event's `workflow_step` is at or below it |
+| `in_version_order` | no roots by default; pass `root_step=` to allow one | `root_step` is set and the event's `workflow_step` is exactly `root_step` |
+
+The root step is exact. A message *before* the root step can't be a root either, so without a cause it is dead-lettered like any other malformed message. It never reaches `on_stale`, and never touches version or step state.
 
 The rule runs before any state is read or written. A message that breaks it raises `MissingCausationError`, a `PermanentError`, so `InboxConsumer` **dead-letters** it. It is malformed rather than stale, so it is never applied and never recorded in the inbox as ignored. A message without `workflow_step` raises `MissingWorkflowStepError`, and is dead-lettered the same way.
 
@@ -189,9 +191,9 @@ Ignored messages are logged with their `transaction_id`, `event_id`, step and ca
 | The Coordinator applies only the awaited result | `test_coordinator_applies_the_awaited_result`, `test_coordinator_ignores_a_result_for_an_earlier_step`, `test_coordinator_ignores_a_result_caused_by_a_different_command` |
 | A future result waits for its step, then is dead-lettered | `test_coordinator_defers_a_future_result_until_its_step`, `test_coordinator_dead_letters_a_result_that_never_becomes_current` |
 | Results for finished transactions are ignored | `test_coordinator_ignores_results_for_finished_transactions` |
-| Only a participant's root command may lack `causation_id` | `test_root_command_may_have_no_causation`, `test_later_command_without_causation_is_rejected`, `test_participant_root_rule_applies_only_up_to_first_step`, `test_participant_dead_letters_a_later_command_without_causation` |
+| Only a participant's root command may lack `causation_id` | `test_root_command_may_have_no_causation`, `test_later_command_without_causation_is_rejected`, `test_participant_accepts_an_uncaused_command_exactly_at_first_step`, `test_uncaused_command_below_first_step_is_dead_lettered_before_on_stale`, `test_caused_command_below_first_step_is_still_treated_as_stale`, `test_participant_dead_letters_a_later_command_without_causation` |
 | A Coordinator result without `causation_id` is dead-lettered at every step, before any state lookup | `test_coordinator_dead_letters_a_result_without_causation_at_any_step`, `test_coordinator_rejects_an_uncaused_result_before_looking_up_state` |
-| An event without `causation_id` is dead-lettered, not applied or recorded; `root_step` opts in to root events | `test_event_without_causation_is_dead_lettered_not_applied`, `test_uncaused_event_is_rejected_even_when_it_would_be_stale`, `test_root_event_may_omit_causation_when_the_consumer_allows_roots`, `test_non_root_event_needs_causation_even_when_roots_are_allowed` |
+| An event without `causation_id` is dead-lettered, not applied or recorded; `root_step` opts in to root events | `test_event_without_causation_is_dead_lettered_not_applied`, `test_uncaused_event_is_rejected_even_when_it_would_be_stale`, `test_root_event_may_omit_causation_when_the_consumer_allows_roots`, `test_uncaused_event_exactly_at_the_root_step_is_accepted`, `test_uncaused_event_below_the_root_step_is_dead_lettered`, `test_non_root_event_needs_causation_even_when_roots_are_allowed` |
 | Messages without a version or workflow step are dead-lettered | `test_message_without_a_workflow_step_is_dead_lettered`, `test_consumer_dead_letters_an_event_without_a_version` |
 
 ## Duplicate replay is opt-in
