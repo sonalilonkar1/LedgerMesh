@@ -12,7 +12,9 @@ Inventory changes use optimistic concurrency (LM-028, ADR-001 section 8.4):
 4. if either write finds the state changed (another change won, or another
    command took the transaction id), roll back the savepoint, reload and
    decide again, up to ``max_attempts`` times. A request is never replayed
-   against inventory it did not check.
+   against inventory it did not check. Only the unique-key clash on
+   ``reservations.transaction_id`` counts as such a race; any other integrity
+   error is a real fault and propagates on the first attempt.
 
 Reservation status changes are conditional on the row still being
 ``reserved``, so a concurrent release and fulfilment can't both apply.
@@ -27,6 +29,7 @@ from functools import lru_cache
 from typing import Protocol
 from uuid import UUID
 
+from psycopg.errors import UniqueViolation
 from sqlalchemy import Connection, Engine, create_engine, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
@@ -47,6 +50,20 @@ MAX_VERSION_ATTEMPTS = 10
 
 class _LostRace(Exception):
     """Internal: a concurrent change won this attempt; reload and decide again."""
+
+
+# The only integrity error that means "another command took this transaction
+# id first". Every other violation (check, foreign key, not null, or another
+# unique constraint) is a real error and must propagate, never be retried.
+TRANSACTION_ID_CONSTRAINT = "uq_reservations_transaction"
+
+
+def _is_transaction_id_race(error: IntegrityError) -> bool:
+    cause = error.orig
+    return (
+        isinstance(cause, UniqueViolation)
+        and getattr(cause.diag, "constraint_name", None) == TRANSACTION_ID_CONSTRAINT
+    )
 
 
 @dataclass(frozen=True)
@@ -124,6 +141,9 @@ class PostgresCatalogRepository:
     """Applies each inventory mutation and reservation row in one transaction."""
 
     def __init__(self, engine: Engine, *, max_attempts: int = MAX_VERSION_ATTEMPTS) -> None:
+        if max_attempts < 1:
+            # Fewer than one attempt would report contention without trying.
+            raise ValueError(f"max_attempts must be at least 1, got {max_attempts}")
         self.engine = engine
         self.max_attempts = max_attempts
 
@@ -237,10 +257,14 @@ class PostgresCatalogRepository:
                         )
                         .returning(*reservations.c)
                     ).one()
-            except (_LostRace, IntegrityError):
-                # Another change won the version, or another command (a
-                # duplicate, a release tombstone, a different reservation)
-                # took this transaction id. The reload decides which.
+            except _LostRace:
+                continue  # another change won the version
+            except IntegrityError as error:
+                if not _is_transaction_id_race(error):
+                    raise
+                # Another command (a duplicate, a release tombstone, a
+                # different reservation) took this transaction id first. The
+                # reload decides which.
                 continue
             return self._reservation_result(connection, reservation)
 
@@ -290,7 +314,9 @@ class PostgresCatalogRepository:
                             )
                             .returning(*reservations.c)
                         ).one()
-                except IntegrityError:
+                except IntegrityError as error:
+                    if not _is_transaction_id_race(error):
+                        raise
                     continue  # a concurrent command took the id; the reload decides
                 return self._reservation_result(connection, tombstone, tombstone=True)
 
