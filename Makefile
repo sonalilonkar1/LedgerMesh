@@ -1,4 +1,4 @@
-.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean
+.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean images-build images-check
 
 COMPOSE_FILE ?= infra/compose.yaml
 COMPOSE := docker compose -f $(COMPOSE_FILE)
@@ -119,4 +119,23 @@ db-prepared-list:
 
 db-prepared-clean:
 	uv run python -m infra.scripts.prepared_transactions cleanup $(SERVICES)
+
+# Production service images (LM-047). Builds the same images CI publishes,
+# tagged locally with the current commit, then runs the image checks.
+IMAGE_REVISION ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+
+images-build:
+	for spec in coordinator:coordinator:8000 wallet:wallet:8001 catalog:catalog:8002 audit_ledger:audit-ledger:8003; do \
+	  service=$${spec%%:*}; rest=$${spec#*:}; name=$${rest%%:*}; port=$${rest#*:}; \
+	  docker build -f infra/Dockerfile.service \
+	    --build-arg SERVICE=$$service --build-arg SERVICE_NAME=$$name --build-arg PORT=$$port \
+	    --build-arg LEDGERMESH_REVISION=$(IMAGE_REVISION) \
+	    -t ledgermesh-$$name:$(IMAGE_REVISION) . || exit 1; \
+	done
+
+images-check: images-build
+	for spec in coordinator:8000 wallet:8001 catalog:8002 audit-ledger:8003; do \
+	  name=$${spec%%:*}; port=$${spec#*:}; \
+	  bash infra/scripts/check_image.sh ledgermesh-$$name:$(IMAGE_REVISION) $$name $$port || exit 1; \
+	done
 

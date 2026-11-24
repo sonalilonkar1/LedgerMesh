@@ -1,3 +1,4 @@
+from .causation import is_root, require_causation
 from .consumer import InboxConsumer, PermanentError, TransientError
 from .envelope import EnvelopeError, EventEnvelope
 from .inbox import Handler, ProcessResult, process_once
@@ -11,7 +12,15 @@ from .retry import (
     RetryPolicy,
     create_retry_consumer,
 )
-from .schema import inbox, metadata, outbox
+from .schema import aggregate_versions, inbox, metadata, outbox, workflow_steps
+from .sequence import (
+    FutureEventError,
+    MissingVersionError,
+    SequenceCheck,
+    SequenceDecision,
+    check_and_advance,
+    in_version_order,
+)
 from .topics import (
     ALL_TOPICS,
     CATALOG_COMMANDS,
@@ -29,6 +38,19 @@ from .topics import (
     ensure_topics,
     retry_topic,
 )
+from .workflow import (
+    Expectation,
+    ExpectationLookup,
+    FutureStepError,
+    MissingCausationError,
+    MissingWorkflowStepError,
+    StaleHandler,
+    StepDecision,
+    check_expected_step,
+    check_participant_step,
+    in_workflow_order,
+    matching_workflow_step,
+)
 
 __all__ = [
     "ALL_TOPICS",
@@ -42,20 +64,35 @@ __all__ = [
     "DeadLetterReason",
     "EnvelopeError",
     "EventEnvelope",
+    "Expectation",
+    "ExpectationLookup",
     "FailureRouter",
+    "FutureEventError",
+    "FutureStepError",
     "Handler",
     "InboxConsumer",
     "KeyBy",
+    "MissingCausationError",
+    "MissingVersionError",
+    "MissingWorkflowStepError",
     "OutboxPublisher",
     "OutgoingMessage",
     "PermanentError",
     "ProcessResult",
     "RetryConfigError",
     "RetryPolicy",
+    "SequenceCheck",
+    "SequenceDecision",
+    "StaleHandler",
+    "StepDecision",
     "TopicKeyError",
     "TopicMismatchError",
     "TopicSpec",
     "TransientError",
+    "aggregate_versions",
+    "check_and_advance",
+    "check_expected_step",
+    "check_participant_step",
     "consumer_groups",
     "create_consumer",
     "create_producer",
@@ -63,9 +100,15 @@ __all__ = [
     "dead_letter_topic",
     "enqueue",
     "ensure_topics",
+    "in_version_order",
+    "in_workflow_order",
     "inbox",
+    "is_root",
+    "matching_workflow_step",
     "metadata",
     "outbox",
     "process_once",
+    "require_causation",
     "retry_topic",
+    "workflow_steps",
 ]

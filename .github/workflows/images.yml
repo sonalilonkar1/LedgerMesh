@@ -1,0 +1,181 @@
+name: Service images
+
+# LM-047: build, scan and publish immutable service images to GHCR.
+#
+# - pull_request: build each image once, check, scan and generate SBOMs.
+#   Never pushes, and the token has no packages: write.
+# - main: after core-ci (lint, unit, database and 2PC integration tests) has
+#   succeeded for that exact commit, build once, check, scan and push that same
+#   image under its full commit SHA. An existing SHA tag is never overwritten.
+# - v* tags: nothing is rebuilt. The tagged commit must be on main and have a
+#   successful core-ci run; the semver tag is then added to the digest already
+#   published for that SHA.
+#
+# There is no `latest` tag.
+
+on:
+  pull_request:
+    paths:
+      - "services/**"
+      - "libs/messaging/**"
+      - "infra/Dockerfile.service"
+      - "infra/docker/**"
+      - "infra/scripts/check_image.sh"
+      - "infra/scripts/ghcr_digest.sh"
+      - "infra/scripts/image_config_digest.py"
+      - "infra/scripts/verify_existing_tag.sh"
+      - ".dockerignore"
+      - ".trivyignore"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/images.yml"
+      - ".github/workflows/image-build.yml"
+  workflow_run:
+    workflows: ["core-ci"]
+    types: [completed]
+    branches: [main]
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.event.workflow_run.head_sha || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/image-build.yml
+    with:
+      revision: ${{ github.sha }}
+      publish: false
+
+  publish:
+    # Only a successful core-ci run for a push to main publishes.
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/image-build.yml
+    with:
+      # workflow_run runs on the default branch; build the commit CI tested.
+      revision: ${{ github.event.workflow_run.head_sha }}
+      publish: true
+
+  release:
+    name: release ${{ github.ref_name }}
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The tag must point at a tested commit on main
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::${TAG} is not vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+          sha="$(git rev-parse "${TAG}^{commit}")"
+
+          if ! git merge-base --is-ancestor "$sha" origin/main; then
+            echo "::error::${TAG} (${sha}) is not on main" >&2
+            exit 1
+          fi
+
+          passed="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${sha}&event=push&status=success" \
+            --jq '.total_count')"
+          if [[ "$passed" -lt 1 ]]; then
+            echo "::error::core-ci has no successful push run for ${sha}" >&2
+            exit 1
+          fi
+
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR with the short-lived workflow token
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+
+      - name: Add the semver tag to the already-published SHA digest
+        env:
+          SHA: ${{ steps.verify.outputs.sha }}
+          VERSION: ${{ steps.verify.outputs.version }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+
+          # 0 = exists (digest printed), 3 = confirmed not found, else = lookup failed.
+          lookup() { bash infra/scripts/ghcr_digest.sh "${owner}/$1" "$2"; }
+
+          for image in ledgermesh-coordinator ledgermesh-wallet ledgermesh-catalog ledgermesh-audit-ledger; do
+            repo="ghcr.io/${owner}/${image}"
+
+            status=0
+            digest="$(lookup "$image" "$SHA")" || status=$?
+            case "$status" in
+              0) ;;
+              3)
+                echo "::error::${repo}:${SHA} was never published; merge and let main publish it first" >&2
+                exit 1
+                ;;
+              *)
+                echo "::error::could not look up ${repo}:${SHA}; refusing to release" >&2
+                exit 1
+                ;;
+            esac
+
+            # Only a registry-confirmed "not found" may create the semver tag.
+            status=0
+            existing="$(lookup "$image" "$VERSION")" || status=$?
+            case "$status" in
+              0)
+                if [[ "$existing" != "$digest" ]]; then
+                  echo "::error::${repo}:${VERSION} already points at ${existing}, not ${digest}" >&2
+                  exit 1
+                fi
+                echo "- \`${repo}:${VERSION}\` already = \`${digest}\`" >> "$GITHUB_STEP_SUMMARY"
+                continue
+                ;;
+              3) ;;
+              *)
+                echo "::error::could not determine whether ${repo}:${VERSION} exists; refusing to tag" >&2
+                exit 1
+                ;;
+            esac
+
+            # A carbon copy of the existing manifest: same digest, no rebuild.
+            docker buildx imagetools create --prefer-index=false \
+              -t "${repo}:${VERSION}" "${repo}@${digest}"
+
+            tagged="$(lookup "$image" "$VERSION")"
+            if [[ "$tagged" != "$digest" ]]; then
+              echo "::error::${repo}:${VERSION} is ${tagged}, expected ${digest}" >&2
+              exit 1
+            fi
+            echo "- \`${repo}:${VERSION}\` = \`${repo}:${SHA}\` = \`${digest}\`" >> "$GITHUB_STEP_SUMMARY"
+          done

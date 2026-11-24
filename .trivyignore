@@ -1,0 +1,11 @@
+# Vulnerability exceptions for the service image scan (LM-047).
+#
+# Policy: the image build fails on any HIGH or CRITICAL vulnerability that has a
+# fix available. Unfixed vulnerabilities are reported but do not fail the build.
+#
+# Add an exception only when a fixed version cannot be adopted yet. Each entry
+# needs: the CVE id, the affected package, why it does not apply or cannot be
+# fixed yet, who approved it, and a review date. Remove it once a fix lands.
+#
+# Example:
+# CVE-0000-00000  # pkg 1.2.3: not reachable from our code; approved <name>; review 2026-12-31

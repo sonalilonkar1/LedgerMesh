@@ -1,18 +1,37 @@
+# Source control and CI metadata (LM-047: never in an image).
 .git
+.gitignore
 .github
+
+# Local environments, secrets and credentials.
+.env
+.env.*
+**/.env
+**/.env.*
+infra/.env
+*.pem
+*.key
+.netrc
+.git-credentials
 .venv
 **/.venv
+
+# Caches and build output.
 **/__pycache__
 **/*.pyc
 .pytest_cache
+**/.pytest_cache
 .ruff_cache
 .mypy_cache
-.DS_Store
+artifacts
 *.log
+.DS_Store
+
+# Not needed at runtime.
 docs
 tests
-# Services install the messaging library, but not its test environment.
+**/tests
+libs/contracts
 libs/messaging/tests
 libs/messaging/docker-compose.test.yml
-**/.pytest_cache
-
+libs/messaging/README.md
