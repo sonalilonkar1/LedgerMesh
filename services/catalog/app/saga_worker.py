@@ -1,4 +1,9 @@
-"""Run the Catalog Saga inbox consumer and outbox publisher (LM-021)."""
+"""Run the Catalog Saga inbox consumer and outbox publisher (LM-021).
+
+Failures (LM-024): transient errors are retried in process, then through
+``catalog.commands.retry`` (read by a second consumer), then parked on
+``catalog.commands.dlq`` with the reason. Limits come from ``LM_RETRY_*``.
+"""
 
 from __future__ import annotations
 
@@ -9,11 +14,13 @@ import signal
 
 from ledgermesh_messaging import (
     CATALOG_COMMANDS,
+    FailureRouter,
     InboxConsumer,
     OutboxPublisher,
+    RetryPolicy,
     create_consumer,
     create_producer,
-    dead_letter_topic,
+    create_retry_consumer,
 )
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -22,7 +29,6 @@ from services.catalog.app.saga import CatalogSagaHandler
 
 logger = logging.getLogger(__name__)
 CONSUMER_GROUP = CATALOG_COMMANDS.consumer_group
-DEAD_LETTER_TOPIC = dead_letter_topic(CATALOG_COMMANDS).name
 
 
 def bootstrap_servers() -> str:
@@ -30,36 +36,28 @@ def bootstrap_servers() -> str:
 
 
 async def run(stop: asyncio.Event) -> None:
+    policy = RetryPolicy.from_env()  # fails fast on an invalid LM_RETRY_* value
     engine = create_async_engine(database_url(), pool_pre_ping=True)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     producer = create_producer(bootstrap_servers())
     consumer = create_consumer(bootstrap_servers(), CONSUMER_GROUP, CATALOG_COMMANDS.name)
+    retry_consumer = create_retry_consumer(bootstrap_servers(), CATALOG_COMMANDS)
     attempted = []
     try:
-        for client in (producer, consumer):
+        for client in (producer, consumer, retry_consumer):
             # Track before awaiting start(), so partial startup is also cleaned up.
             attempted.append(client)
             await client.start()
 
-        async def dead_letter(record, error: Exception) -> None:
-            logger.error("dead-lettering Catalog command at offset %s: %r", record.offset, error)
-            await producer.send_and_wait(
-                DEAD_LETTER_TOPIC,
-                value=record.value,
-                key=record.key,
-                headers=[("error", repr(error)[:1000].encode())],
-            )
-
+        router = FailureRouter(producer, consumer=CONSUMER_GROUP, policy=policy)
         handler = CatalogSagaHandler(PostgresCatalogRepository(get_engine()))
-        inbox_consumer = InboxConsumer(
-            consumer,
-            sessions,
-            name=CONSUMER_GROUP,
-            handler=handler,
-            on_dead_letter=dead_letter,
+        # Both consumers share the inbox name, so a retried command is still a duplicate.
+        main_consumer, retries = (
+            InboxConsumer(source, sessions, name=CONSUMER_GROUP, handler=handler, router=router)
+            for source in (consumer, retry_consumer)
         )
         publisher = OutboxPublisher(sessions, producer, name="catalog")
-        await asyncio.gather(inbox_consumer.run(stop), publisher.run(stop))
+        await asyncio.gather(main_consumer.run(stop), retries.run(stop), publisher.run(stop))
     finally:
         for client in reversed(attempted):
             try:

@@ -11,6 +11,10 @@ database transaction (inbox row, Wallet change and reply) has committed. A crash
 in between redelivers the command, and the inbox reports it as a duplicate
 instead of applying it again. Replies left in the outbox are published by
 ``OutboxPublisher`` after the restart.
+
+Failures (LM-024): transient errors are retried in process, then through
+``wallet.commands.retry`` (read by a second consumer), then parked on
+``wallet.commands.dlq`` with the reason. Limits come from ``LM_RETRY_*``.
 """
 
 from __future__ import annotations
@@ -22,11 +26,13 @@ import signal
 
 from ledgermesh_messaging import (
     WALLET_COMMANDS,
+    FailureRouter,
     InboxConsumer,
     OutboxPublisher,
+    RetryPolicy,
     create_consumer,
     create_producer,
-    dead_letter_topic,
+    create_retry_consumer,
 )
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -36,7 +42,6 @@ from services.wallet.app.saga import WalletSagaHandler
 logger = logging.getLogger(__name__)
 
 CONSUMER_GROUP = WALLET_COMMANDS.consumer_group
-DEAD_LETTER_TOPIC = dead_letter_topic(WALLET_COMMANDS).name
 
 
 def bootstrap_servers() -> str:
@@ -44,19 +49,21 @@ def bootstrap_servers() -> str:
 
 
 async def run(stop: asyncio.Event) -> None:
+    policy = RetryPolicy.from_env()  # fails fast on an invalid LM_RETRY_* value
     engine = create_async_engine(database_url(), pool_pre_ping=True)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     producer = create_producer(bootstrap_servers())
     consumer = create_consumer(bootstrap_servers(), CONSUMER_GROUP, WALLET_COMMANDS.name)
+    retry_consumer = create_retry_consumer(bootstrap_servers(), WALLET_COMMANDS)
     # A client is tracked *before* its start() is awaited, so one whose start()
     # fails part-way is still stopped. Each stop is isolated, so a failure to stop
     # one client does not skip the others or the engine.
     attempted = []
     try:
-        for client in (producer, consumer):
+        for client in (producer, consumer, retry_consumer):
             attempted.append(client)
             await client.start()
-        await _serve(stop, sessions, producer, consumer)
+        await _serve(stop, sessions, producer, consumer, retry_consumer, policy)
     finally:
         for client in reversed(attempted):
             try:
@@ -66,24 +73,18 @@ async def run(stop: asyncio.Event) -> None:
         await engine.dispose()
 
 
-async def _serve(stop: asyncio.Event, sessions, producer, consumer) -> None:
-    async def dead_letter(record, error: Exception) -> None:
-        # Retry topics and alerting arrive with LM-024; until then a command that
-        # can never succeed is parked on the DLQ instead of blocking its partition.
-        logger.error("dead-lettering Wallet command at offset %s: %r", record.offset, error)
-        await producer.send_and_wait(
-            DEAD_LETTER_TOPIC,
-            value=record.value,
-            key=record.key,
-            headers=[("error", repr(error)[:1000].encode())],
-        )
-
+async def _serve(
+    stop: asyncio.Event, sessions, producer, consumer, retry_consumer, policy: RetryPolicy
+) -> None:
+    router = FailureRouter(producer, consumer=CONSUMER_GROUP, policy=policy)
     handler = WalletSagaHandler(PostgresWalletRepository(get_engine()))
-    inbox_consumer = InboxConsumer(
-        consumer, sessions, name=CONSUMER_GROUP, handler=handler, on_dead_letter=dead_letter
+    # Both consumers share the inbox name, so a retried command is still a duplicate.
+    main_consumer, retries = (
+        InboxConsumer(source, sessions, name=CONSUMER_GROUP, handler=handler, router=router)
+        for source in (consumer, retry_consumer)
     )
     publisher = OutboxPublisher(sessions, producer, name="wallet")
-    await asyncio.gather(inbox_consumer.run(stop), publisher.run(stop))
+    await asyncio.gather(main_consumer.run(stop), retries.run(stop), publisher.run(stop))
 
 
 def main() -> None:
