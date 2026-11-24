@@ -31,8 +31,10 @@ for it, so it checks a result exactly:
 Both apply the shared root-message rule (``causation.require_causation``)
 before touching any state, with an explicit policy:
 
-- participants accept a root command at ``first_step`` and require a cause
-  on every later step;
+- participants accept an uncaused root command exactly at ``first_step`` and
+  require a cause on every other step, earlier or later. An uncaused message
+  below ``first_step`` is dead-lettered before ``on_stale`` or any step state
+  is touched;
 - the Coordinator requires a cause on results at every step, because a result
   always answers a command it sent. A result without one is malformed: it is
   dead-lettered, not classified as a wrong cause and silently ignored.

@@ -16,7 +16,7 @@ Only events emitted by the aggregate's owner carry a version. Commands have
 (``causation.require_causation``) before reading or writing any version. An
 aggregate's events are emitted in response to a command, so by default every
 event must name its cause; a consumer that can receive a transaction's root
-event passes ``root_step`` to allow a missing cause at or below that step.
+event passes ``root_step`` to allow a missing cause exactly at that step.
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ def in_version_order(
     hook (LM-024).
 
     An event without ``causation_id`` raises ``MissingCausationError`` unless
-    it is a root at or below ``root_step`` (default ``None``: no root events),
+    it is a root exactly at ``root_step`` (default ``None``: no root events),
     so ``InboxConsumer`` dead-letters it without touching the version table.
     """
 
