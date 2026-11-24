@@ -22,6 +22,8 @@ on:
       - "infra/docker/**"
       - "infra/scripts/check_image.sh"
       - "infra/scripts/ghcr_digest.sh"
+      - "infra/scripts/image_config_digest.py"
+      - "infra/scripts/verify_existing_tag.sh"
       - ".dockerignore"
       - ".trivyignore"
       - "pyproject.toml"

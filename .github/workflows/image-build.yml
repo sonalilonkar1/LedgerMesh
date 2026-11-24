@@ -76,8 +76,12 @@ jobs:
             --label org.opencontainers.image.version="$REVISION" \
             -t "$CANDIDATE" .
           image_id="$(docker image inspect --format '{{.Id}}' "$CANDIDATE")"
+          # The config digest survives a push, so it identifies this candidate
+          # in the registry (used if the SHA tag already exists).
+          config_digest="$(python3 infra/scripts/image_config_digest.py "$CANDIDATE")"
           echo "image_id=$image_id" >> "$GITHUB_OUTPUT"
-          echo "Built \`$CANDIDATE\` as \`$image_id\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "config_digest=$config_digest" >> "$GITHUB_OUTPUT"
+          echo "Built \`$CANDIDATE\` as \`$image_id\` (config \`$config_digest\`)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Start, health, non-root and no-secrets checks
         run: bash infra/scripts/check_image.sh "$CANDIDATE" "$HEALTH_NAME" "$PORT"
@@ -125,6 +129,7 @@ jobs:
         if: inputs.publish
         env:
           SCANNED_ID: ${{ steps.build.outputs.image_id }}
+          CANDIDATE_CONFIG: ${{ steps.build.outputs.config_digest }}
           GHCR_USER: ${{ github.actor }}
           GHCR_TOKEN: ${{ github.token }}
         run: |
@@ -142,8 +147,15 @@ jobs:
           existing="$(lookup "$REVISION")" || status=$?
           case "$status" in
             0)
-              echo "::notice::${ref} is already published as ${existing}; not overwriting it."
-              echo "- \`${ref}\` already published as \`${existing}\`; left unchanged" >> "$GITHUB_STEP_SUMMARY"
+              # Accept an existing tag only if it holds this checked candidate;
+              # a different image, or a failed comparison, stops the job.
+              if ! bash infra/scripts/verify_existing_tag.sh \
+                  "${owner}/${IMAGE}" "$REVISION" "$CANDIDATE_CONFIG"; then
+                echo "::error::${ref} already exists but is not the image checked in this run; SHA tags are never replaced" >&2
+                exit 1
+              fi
+              echo "::notice::${ref} already holds this checked candidate (${existing}); nothing to push."
+              echo "- \`${ref}\` already = this candidate (config \`${CANDIDATE_CONFIG}\`); left unchanged" >> "$GITHUB_STEP_SUMMARY"
               exit 0
               ;;
             3) ;;
