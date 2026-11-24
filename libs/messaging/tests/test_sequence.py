@@ -210,6 +210,31 @@ async def test_root_event_may_omit_causation_when_the_consumer_allows_roots(sess
     assert await read_counter(session_factory) == 1
 
 
+async def test_uncaused_event_below_the_root_step_is_dead_lettered(session_factory):
+    # root_step=2 allows an uncaused event exactly at step 2, never before it.
+    from_two = in_version_order(increment_and_reply, consumer=CONSUMER, root_step=2)
+    consumer, dead_letters = dead_letter_consumer(session_factory, handler=from_two)
+    below_root = wallet_event(1, causation_id=None, workflow_step=1)
+
+    assert await consumer.handle(SimpleNamespace(value=below_root.to_bytes())) is None
+
+    assert [type(exc) for exc in dead_letters] == [MissingCausationError]
+    assert await read_counter(session_factory) == 0
+    assert await inbox_rows(session_factory) == 0
+    assert await latest_version(session_factory) is None
+
+
+async def test_uncaused_event_exactly_at_the_root_step_is_accepted(session_factory):
+    from_two = in_version_order(increment_and_reply, consumer=CONSUMER, root_step=2)
+
+    await deliver(
+        session_factory, wallet_event(1, causation_id=None, workflow_step=2), handler=from_two
+    )
+
+    assert await read_counter(session_factory) == 1
+    assert await latest_version(session_factory) == 1
+
+
 async def test_non_root_event_needs_causation_even_when_roots_are_allowed(session_factory):
     with_roots = in_version_order(increment_and_reply, consumer=CONSUMER, root_step=1)
 

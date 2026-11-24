@@ -165,7 +165,7 @@ async def test_root_command_may_have_no_causation(session_factory):
     assert await read_counter(session_factory) == 1
 
 
-async def test_participant_root_rule_applies_only_up_to_first_step(session_factory):
+async def test_participant_accepts_an_uncaused_command_exactly_at_first_step(session_factory):
     from_two = in_workflow_order(increment_and_reply, consumer=WALLET, first_step=2)
 
     await deliver(session_factory, command(uuid4(), 2, causation_id=None), from_two)
@@ -173,6 +173,51 @@ async def test_participant_root_rule_applies_only_up_to_first_step(session_facto
         await deliver(session_factory, command(uuid4(), 3, causation_id=None), from_two)
 
     assert await read_counter(session_factory) == 1
+
+
+async def test_uncaused_command_below_first_step_is_dead_lettered_before_on_stale(
+    session_factory,
+):
+    # With first_step=2 a step-1 command would be stale, but without a cause it
+    # is malformed: it must not reach on_stale or write any step state.
+    stale_calls = []
+
+    async def on_stale(session, envelope):
+        stale_calls.append(envelope.event_id)
+        return []
+
+    from_two = in_workflow_order(
+        increment_and_reply, consumer=WALLET, first_step=2, on_stale=on_stale
+    )
+    consumer, dead_letters = dead_letter_consumer(session_factory, from_two, WALLET)
+    below_root = command(uuid4(), 1, causation_id=None)
+
+    assert await consumer.handle(SimpleNamespace(value=below_root.to_bytes())) is None
+
+    assert [type(exc) for exc in dead_letters] == [MissingCausationError]
+    assert stale_calls == []
+    assert await read_counter(session_factory) == 0
+    assert await inbox_rows(session_factory) == 0
+    assert await highest_step(session_factory, below_root.transaction_id) is None
+
+
+async def test_caused_command_below_first_step_is_still_treated_as_stale(session_factory):
+    # The exact-root rule only concerns missing causes; ordering is unchanged.
+    stale_calls = []
+
+    async def on_stale(session, envelope):
+        stale_calls.append(envelope.event_id)
+        return []
+
+    from_two = in_workflow_order(
+        increment_and_reply, consumer=WALLET, first_step=2, on_stale=on_stale
+    )
+    caused = command(uuid4(), 1, causation_id=uuid4())
+
+    await deliver(session_factory, caused, from_two)
+
+    assert stale_calls == [caused.event_id]
+    assert await read_counter(session_factory) == 0
 
 
 async def test_later_command_without_causation_is_rejected(session_factory):
