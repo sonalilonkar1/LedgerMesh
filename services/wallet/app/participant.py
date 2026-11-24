@@ -21,6 +21,7 @@ from services.wallet.app.db.schema import (
     wallet_operations,
 )
 from services.wallet.app.errors import ParticipantConflict, ParticipantTransactionNotFound
+from services.wallet.app.repository import MAX_VERSION_ATTEMPTS
 
 
 @dataclass(frozen=True)
@@ -191,23 +192,37 @@ class PostgresWalletParticipantRepository:
         )
         connection = connect(url.render_as_string(hide_password=False))
         try:
-            wallet = connection.execute(
-                "SELECT available_points FROM wallets WHERE user_id = %s FOR UPDATE", (user_id,)
-            ).fetchone()
-            if wallet is None or wallet[0] < points:
+            # Optimistic concurrency, as in the Wallet repository (LM-027):
+            # decide from an unlocked read, then deduct only if the version is
+            # unchanged and the balance stays non-negative. A lost race reloads
+            # and decides again; running out of attempts votes NO.
+            for _attempt in range(MAX_VERSION_ATTEMPTS):
+                wallet = connection.execute(
+                    "SELECT available_points, version FROM wallets WHERE user_id = %s",
+                    (user_id,),
+                ).fetchone()
+                if wallet is None or wallet[0] < points:
+                    connection.rollback()
+                    return "ABORTED"
+                updated = connection.execute(
+                    """
+                    UPDATE wallets
+                       SET available_points = available_points - %s,
+                           version = version + 1,
+                           updated_at = now()
+                     WHERE user_id = %s
+                       AND version = %s
+                       AND available_points >= %s
+                    RETURNING version
+                    """,
+                    (points, user_id, wallet[1], points),
+                ).fetchone()
+                if updated is not None:
+                    break
+            else:
                 connection.rollback()
                 return "ABORTED"
 
-            connection.execute(
-                """
-                UPDATE wallets
-                   SET available_points = available_points - %s,
-                       version = version + 1,
-                       updated_at = now()
-                 WHERE user_id = %s
-                """,
-                (points, user_id),
-            )
             connection.execute(
                 """
                 INSERT INTO wallet_operations

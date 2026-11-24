@@ -1,4 +1,20 @@
-"""PostgreSQL repository for Wallet core operations (LM-007)."""
+"""PostgreSQL repository for Wallet core operations (LM-007).
+
+Balance changes use optimistic concurrency (LM-027, ADR-001 section 8.4):
+
+1. read the wallet and its ``version`` without locking it;
+2. decide from that state (duplicate? enough points?);
+3. apply the change with a compare-and-set ``UPDATE`` that only matches while
+   the row still has the version that was read *and* the new balance is not
+   negative;
+4. if no row matched, another change won: reload the current state and decide
+   again, up to ``max_attempts`` times. A request is never replayed against a
+   balance it did not check.
+
+Under PostgreSQL's default READ COMMITTED isolation each reload sees the latest
+committed row, and a competing ``UPDATE`` waits for the winner and then finds
+the version changed, so only one update per version can succeed.
+"""
 
 from __future__ import annotations
 
@@ -15,12 +31,17 @@ from sqlalchemy.exc import IntegrityError
 
 from services.wallet.app.db.schema import deduction_rejections, wallet_operations, wallets
 from services.wallet.app.errors import (
+    ConcurrentUpdateConflict,
     DeductionAlreadyApplied,
     DeductionNotFound,
     InsufficientPoints,
     OperationConflict,
     WalletNotFound,
 )
+
+# Each lost attempt means another change to the same wallet committed, so this
+# bounds how long one request can keep losing before it gives up.
+MAX_VERSION_ATTEMPTS = 10
 
 
 @dataclass(frozen=True)
@@ -77,8 +98,40 @@ def get_engine(url: str | None = None) -> Engine:
 class PostgresWalletRepository:
     """Applies each balance mutation and operation record in one DB transaction."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, max_attempts: int = MAX_VERSION_ATTEMPTS) -> None:
         self.engine = engine
+        self.max_attempts = max_attempts
+
+    def compare_and_set_balance(
+        self, connection: Connection, user_id: str, *, expected_version: int, delta: int
+    ) -> BalanceRecord | None:
+        """Add ``delta`` points only if the wallet is still at ``expected_version``.
+
+        The version and the balance check are both in the ``WHERE`` clause, so
+        the check and the write are one atomic statement. Returns the new
+        balance, or ``None`` if the version moved on or the balance would go
+        negative; nothing is changed in that case.
+        """
+        row = connection.execute(
+            update(wallets)
+            .where(
+                wallets.c.user_id == user_id,
+                wallets.c.version == expected_version,
+                wallets.c.available_points + delta >= 0,
+            )
+            .values(
+                available_points=wallets.c.available_points + delta,
+                version=wallets.c.version + 1,
+                updated_at=datetime.now(UTC),
+            )
+            .returning(
+                wallets.c.user_id,
+                wallets.c.available_points,
+                wallets.c.version,
+                wallets.c.updated_at,
+            )
+        ).one_or_none()
+        return None if row is None else BalanceRecord(**row._mapping)
 
     def get_balance(self, user_id: str) -> BalanceRecord:
         with self.engine.connect() as connection:
@@ -116,29 +169,30 @@ class PostgresWalletRepository:
         points: int,
         event_id: UUID | None,
     ) -> OperationRecord:
-        wallet = self._locked_wallet(connection, user_id)
-        duplicate = self._existing_operation(connection, transaction_id, "deduct")
-        if duplicate is not None:
-            self._require_same_operation(duplicate, user_id, points, transaction_id)
-            return self._operation_result(
-                connection, duplicate, transaction_id, "deduct", duplicate=True
-            )
+        for _attempt in range(self.max_attempts):
+            # Reload on every attempt: a lost attempt means the state changed.
+            wallet = self._current_wallet(connection, user_id)
+            duplicate = self._existing_operation(connection, transaction_id, "deduct")
+            if duplicate is not None:
+                self._require_same_operation(duplicate, user_id, points, transaction_id)
+                return self._operation_result(
+                    connection, duplicate, transaction_id, "deduct", duplicate=True
+                )
 
-        if wallet.available_points < points:
-            raise InsufficientPoints(
-                f"Wallet {user_id!r} has {wallet.available_points} points; {points} required.",
-                transaction_id,
-            )
+            if wallet.available_points < points:
+                raise InsufficientPoints(
+                    f"Wallet {user_id!r} has {wallet.available_points} points; {points} required.",
+                    transaction_id,
+                )
 
-        connection.execute(
-            update(wallets)
-            .where(wallets.c.user_id == user_id)
-            .values(
-                available_points=wallets.c.available_points - points,
-                version=wallets.c.version + 1,
-                updated_at=datetime.now(UTC),
+            if self.compare_and_set_balance(
+                connection, user_id, expected_version=wallet.version, delta=-points
+            ):
+                break
+        else:
+            raise ConcurrentUpdateConflict(
+                f"Wallet {user_id!r} kept changing; no deduction was applied.", transaction_id
             )
-        )
         try:
             operation = connection.execute(
                 insert(wallet_operations)
@@ -178,37 +232,37 @@ class PostgresWalletRepository:
         transaction_id: UUID,
         event_id: UUID | None,
     ) -> OperationRecord:
-        self._locked_wallet(connection, user_id)
-        existing_refund = self._existing_operation(connection, transaction_id, "refund")
-        if existing_refund is not None:
-            if existing_refund.user_id != user_id:
-                raise OperationConflict(
-                    "The transaction ID belongs to another wallet.", transaction_id
+        for _attempt in range(self.max_attempts):
+            wallet = self._current_wallet(connection, user_id)
+            existing_refund = self._existing_operation(connection, transaction_id, "refund")
+            if existing_refund is not None:
+                if existing_refund.user_id != user_id:
+                    raise OperationConflict(
+                        "The transaction ID belongs to another wallet.", transaction_id
+                    )
+                return self._operation_result(
+                    connection, existing_refund, transaction_id, "refund", duplicate=True
                 )
-            return self._operation_result(
-                connection, existing_refund, transaction_id, "refund", duplicate=True
-            )
 
-        deduction = self._existing_operation(connection, transaction_id, "deduct")
-        if deduction is None or deduction.status != "applied":
-            raise DeductionNotFound(
-                "Refund requires an applied deduction with the same transaction ID.",
-                transaction_id,
-            )
-        if deduction.user_id != user_id:
-            raise OperationConflict(
-                "The original deduction belongs to another wallet.", transaction_id
-            )
+            deduction = self._existing_operation(connection, transaction_id, "deduct")
+            if deduction is None or deduction.status != "applied":
+                raise DeductionNotFound(
+                    "Refund requires an applied deduction with the same transaction ID.",
+                    transaction_id,
+                )
+            if deduction.user_id != user_id:
+                raise OperationConflict(
+                    "The original deduction belongs to another wallet.", transaction_id
+                )
 
-        connection.execute(
-            update(wallets)
-            .where(wallets.c.user_id == user_id)
-            .values(
-                available_points=wallets.c.available_points + deduction.points,
-                version=wallets.c.version + 1,
-                updated_at=datetime.now(UTC),
+            if self.compare_and_set_balance(
+                connection, user_id, expected_version=wallet.version, delta=deduction.points
+            ):
+                break
+        else:
+            raise ConcurrentUpdateConflict(
+                f"Wallet {user_id!r} kept changing; no refund was applied.", transaction_id
             )
-        )
         try:
             operation = connection.execute(
                 insert(wallet_operations)
@@ -260,8 +314,10 @@ class PostgresWalletRepository:
         points: int,
         event_id: UUID | None,
     ) -> OperationRecord:
-        # Same lock as deduct, so a deduction cannot slip in between the check
-        # and the insert.
+        # Lock the wallet so two compensations for one wallet are serialized.
+        # The balance and version do not change here, so an optimistic
+        # deduction racing this tombstone is stopped by the unique
+        # (transaction_id, operation) key and rolls back as a conflict.
         self._locked_wallet(connection, user_id)
         existing = self._existing_operation(connection, transaction_id, "deduct")
         if existing is not None:
@@ -361,6 +417,13 @@ class PostgresWalletRepository:
                 wallet_operations.c.operation == operation,
             )
         ).one_or_none()
+
+    def _current_wallet(self, connection: Connection, user_id: str):
+        """Read the latest committed wallet row, without locking it."""
+        row = connection.execute(select(wallets).where(wallets.c.user_id == user_id)).one_or_none()
+        if row is None:
+            raise WalletNotFound(f"Wallet {user_id!r} does not exist.")
+        return row
 
     @staticmethod
     def _locked_wallet(connection: Connection, user_id: str):

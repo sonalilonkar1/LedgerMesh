@@ -44,6 +44,17 @@ class DeductionAlreadyApplied(WalletError):
     problem_type = "urn:ledgermesh:wallet:deduction-already-applied"
 
 
+class ConcurrentUpdateConflict(WalletError):
+    """Every versioned attempt lost to a concurrent change (LM-027).
+
+    Nothing was applied. The caller can retry the whole request.
+    """
+
+    status = 409
+    title = "Concurrent wallet update"
+    problem_type = "urn:ledgermesh:wallet:concurrent-update"
+
+
 class InvalidAmount(WalletError):
     status = 422
     title = "Invalid point amount"
