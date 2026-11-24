@@ -4,6 +4,13 @@ from .inbox import Handler, ProcessResult, process_once
 from .kafka import create_consumer, create_producer
 from .outbox import OutgoingMessage, enqueue
 from .publisher import BatchResult, OutboxPublisher
+from .retry import (
+    DeadLetterReason,
+    FailureRouter,
+    RetryConfigError,
+    RetryPolicy,
+    create_retry_consumer,
+)
 from .schema import inbox, metadata, outbox
 from .topics import (
     ALL_TOPICS,
@@ -32,8 +39,10 @@ __all__ = [
     "WALLET_RESULTS",
     "BatchResult",
     "BootstrapReport",
+    "DeadLetterReason",
     "EnvelopeError",
     "EventEnvelope",
+    "FailureRouter",
     "Handler",
     "InboxConsumer",
     "KeyBy",
@@ -41,6 +50,8 @@ __all__ = [
     "OutgoingMessage",
     "PermanentError",
     "ProcessResult",
+    "RetryConfigError",
+    "RetryPolicy",
     "TopicKeyError",
     "TopicMismatchError",
     "TopicSpec",
@@ -48,6 +59,7 @@ __all__ = [
     "consumer_groups",
     "create_consumer",
     "create_producer",
+    "create_retry_consumer",
     "dead_letter_topic",
     "enqueue",
     "ensure_topics",
