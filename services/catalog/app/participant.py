@@ -235,34 +235,30 @@ class PostgresCatalogParticipantRepository:
         )
         connection = connect(url.render_as_string(hide_password=False))
         try:
-            reward = connection.execute(
-                """
-                SELECT available_inventory, version, point_cost
-                  FROM rewards
-                 WHERE reward_id = %s
-                   FOR UPDATE
-                """,
-                (reward_id,),
-            ).fetchone()
-            if (
-                reward is None
-                or reward[0] < quantity
-                or reward[1] != expected_reward_version
-                or reward[2] != expected_point_cost
-            ):
-                connection.rollback()
-                return "ABORTED"
-
-            connection.execute(
+            # Optimistic concurrency (LM-028): one compare-and-set against the
+            # version and price the Coordinator quoted. The check and the write
+            # are a single statement, so no lock is taken before deciding. If the
+            # reward moved on, the quote is stale and this participant votes NO,
+            # exactly as before; there is nothing to reload, because the
+            # Coordinator's expected version is part of the request.
+            reserved = connection.execute(
                 """
                 UPDATE rewards
                    SET available_inventory = available_inventory - %s,
                        version = version + 1,
                        updated_at = now()
                  WHERE reward_id = %s
+                   AND version = %s
+                   AND point_cost = %s
+                   AND available_inventory >= %s
+                RETURNING version
                 """,
-                (quantity, reward_id),
-            )
+                (quantity, reward_id, expected_reward_version, expected_point_cost, quantity),
+            ).fetchone()
+            if reserved is None:
+                connection.rollback()
+                return "ABORTED"
+
             connection.execute(
                 """
                 INSERT INTO reservations

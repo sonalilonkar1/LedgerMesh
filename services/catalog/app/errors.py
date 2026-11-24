@@ -44,6 +44,17 @@ class InvalidReservationTransition(CatalogError):
     problem_type = "urn:ledgermesh:catalog:invalid-transition"
 
 
+class ConcurrentUpdateConflict(CatalogError):
+    """Every versioned attempt lost to a concurrent change (LM-028).
+
+    Nothing was applied. The caller can retry the whole request.
+    """
+
+    status = 409
+    title = "Concurrent catalog update"
+    problem_type = "urn:ledgermesh:catalog:concurrent-update"
+
+
 class InvalidQuantity(CatalogError):
     status = 422
     title = "Invalid reservation quantity"
