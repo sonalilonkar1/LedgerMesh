@@ -10,6 +10,7 @@ from ledgermesh_messaging import (
     EventEnvelope,
     OutgoingMessage,
     PermanentError,
+    TransientError,
 )
 from sqlalchemy import Connection, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -17,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.catalog.app.db.schema import catalog_saga_outcomes, reservations
 from services.catalog.app.errors import (
+    ConcurrentUpdateConflict,
     InsufficientInventory,
     InvalidReservationTransition,
     ReservationConflict,
@@ -35,6 +37,14 @@ RESERVE_STEP = 3
 
 class InvalidCommand(PermanentError):
     """The command is malformed or reuses an existing command identity."""
+
+
+class ContendedReward(TransientError):
+    """Every optimistic attempt lost to concurrent changes (LM-028).
+
+    Nothing was applied and no outcome was stored, so the command is retried:
+    first in process, then through the retry topic (LM-024).
+    """
 
 
 @dataclass(frozen=True)
@@ -200,6 +210,8 @@ class CatalogSagaHandler:
             return self._reserve_rejected(command, "conflict", error.detail)
         except InvalidReservationTransition as error:
             return self._reserve_rejected(command, "conflict", error.detail)
+        except ConcurrentUpdateConflict as error:
+            raise ContendedReward(error.detail) from error
 
         return result_envelope(
             command,
@@ -229,6 +241,8 @@ class CatalogSagaHandler:
             return self._release_rejected(command, "conflict", error.detail)
         except InvalidReservationTransition as error:
             return self._release_rejected(command, "invalid_state", error.detail)
+        except ConcurrentUpdateConflict as error:
+            raise ContendedReward(error.detail) from error
 
         outcome = (
             "cancelled_before_reservation"
