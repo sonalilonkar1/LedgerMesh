@@ -943,7 +943,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "jsonschema" },
     { name = "locust" },
     { name = "openapi-spec-validator" },
@@ -966,7 +965,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = ">=0.27,<1" },
     { name = "jsonschema", specifier = ">=4.23,<5" },
     { name = "locust", specifier = ">=2.32,<3" },
     { name = "openapi-spec-validator", specifier = ">=0.7,<1" },
