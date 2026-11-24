@@ -6,8 +6,10 @@ consumer can legitimately receive as a root depends on its role, so each
 wrapper states its policy explicitly with ``root_step``:
 
 - ``root_step=1``: the consumer can receive the transaction's first command
-  (a Saga participant receiving the step-1 command). A message at or below
-  that step may omit its cause; any later one must name it.
+  (a Saga participant receiving the step-1 command). Only a message exactly
+  at that step may omit its cause. Every other step must name one: a later
+  step answers an earlier message, and a step before the root cannot be a
+  root at all, so an uncaused message there is malformed too.
 - ``root_step=None``: the consumer never receives a root message, so every
   message must name its cause. The Coordinator's results always answer a
   command it sent, and an aggregate's events are always emitted in response
@@ -31,7 +33,7 @@ class MissingCausationError(PermanentError):
         if root_step is None:
             rule = "this consumer receives no root messages"
         else:
-            rule = f"only a root message at workflow_step <= {root_step} may omit it"
+            rule = f"only a root message exactly at workflow_step {root_step} may omit it"
         super().__init__(
             f"{envelope.event_type} {envelope.event_id} (workflow_step "
             f"{envelope.workflow_step}) has no causation_id; {rule}"
@@ -40,9 +42,8 @@ class MissingCausationError(PermanentError):
 
 
 def is_root(envelope: EventEnvelope, *, root_step: int | None) -> bool:
-    """True if ``envelope`` is in the step range where this consumer accepts roots."""
-    step = envelope.workflow_step
-    return root_step is not None and step is not None and step <= root_step
+    """True only if ``envelope`` is exactly at this consumer's root step."""
+    return root_step is not None and envelope.workflow_step == root_step
 
 
 def require_causation(envelope: EventEnvelope, *, root_step: int | None) -> None:
