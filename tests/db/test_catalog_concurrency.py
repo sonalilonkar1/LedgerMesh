@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import Engine, func, select, update
+from sqlalchemy.exc import IntegrityError
 
 from services.catalog.app.db.schema import reservations, rewards
 from services.catalog.app.errors import (
@@ -345,3 +346,46 @@ def test_retries_are_bounded_and_apply_nothing(catalog_db):
     # Only the three competing changes landed; the reservation did not.
     assert reward(catalog_db).available_inventory == 7
     assert reservation_count(catalog_db) == 0
+
+
+# --- Only the transaction-id race is retried -------------------------------
+#
+# The transaction-id unique-key race is covered above: it reloads and resolves
+# to a duplicate (test_lost_race_reload_finds_the_winning_duplicate) or a
+# cancellation (test_a_tombstone_landing_mid_reservation_cancels_it). Any other
+# integrity error is a real fault and must surface on the first attempt.
+
+
+def counting(engine: Engine, **kwargs) -> RacingRepository:
+    """Counts reward reads, i.e. attempts, without racing anything."""
+    return RacingRepository(engine, lambda: None, races=0, **kwargs)
+
+
+def test_a_check_violation_on_reserve_propagates_instead_of_retrying(catalog_db):
+    # quantity 0 passes the inventory check but violates ck_reservations_quantity_positive.
+    repository = counting(catalog_db)
+    before = reward(catalog_db)
+
+    with pytest.raises(IntegrityError, match="ck_reservations_quantity_positive"):
+        repository.reserve(REWARD, uuid4(), 0, None)
+
+    assert repository.reads == 1
+    current = reward(catalog_db)
+    assert (current.available_inventory, current.version) == (10, before.version)
+    assert reservation_count(catalog_db) == 0
+
+
+def test_a_check_violation_on_a_tombstone_propagates_instead_of_retrying(catalog_db):
+    repository = counting(catalog_db)
+
+    with pytest.raises(IntegrityError, match="ck_reservations_quantity_positive"):
+        repository.release(REWARD, uuid4(), 0, None)
+
+    assert repository.reads == 1
+    assert reservation_count(catalog_db) == 0
+
+
+@pytest.mark.parametrize("max_attempts", [0, -1])
+def test_a_retry_limit_below_one_is_rejected(catalog_db, max_attempts):
+    with pytest.raises(ValueError, match="max_attempts must be at least 1"):
+        PostgresCatalogRepository(catalog_db, max_attempts=max_attempts)
