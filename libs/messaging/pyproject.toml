@@ -12,6 +12,7 @@ dependencies = [
 
 [project.scripts]
 ledgermesh-topics = "ledgermesh_messaging.topics:main"
+ledgermesh-dlq = "ledgermesh_messaging.dlq:main"
 
 [dependency-groups]
 dev = [
