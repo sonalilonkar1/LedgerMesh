@@ -114,7 +114,9 @@ def test_wrong_arguments_fail(registry):
 
 def test_config_of_a_single_image_manifest(registry):
     result, _ = lookup(
-        registry, {"FAKE_MANIFEST_BODY": manifest_body(digest("c1")), "FAKE_DIGEST": MANIFEST}, "--config"
+        registry,
+        {"FAKE_MANIFEST_BODY": manifest_body(digest("c1")), "FAKE_DIGEST": MANIFEST},
+        "--config",
     )
 
     assert result.returncode == 0

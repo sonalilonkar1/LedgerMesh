@@ -67,7 +67,9 @@ def image_root(tmp_path: Path) -> Path:
     (root / "app" / "services" / "main.py").write_text("app = None\n")
     certifi = root / "app" / ".venv" / "lib" / "certifi"
     certifi.mkdir(parents=True)
-    (certifi / "cacert.pem").write_text("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
+    (certifi / "cacert.pem").write_text(
+        "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+    )
     return root
 
 
@@ -105,7 +107,14 @@ def test_a_clean_image_passes(check_image):
 
 @pytest.mark.parametrize(
     "relative",
-    [".env", "app/.env.production", "app/.git", "root/.netrc", "root/.git-credentials", "etc/tls.key"],
+    [
+        ".env",
+        "app/.env.production",
+        "app/.git",
+        "root/.netrc",
+        "root/.git-credentials",
+        "etc/tls.key",
+    ],
 )
 def test_a_forbidden_file_fails(check_image, image_root, relative):
     path = image_root / relative
