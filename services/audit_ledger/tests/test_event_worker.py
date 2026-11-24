@@ -3,13 +3,17 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from ledgermesh_messaging import EventEnvelope, PermanentError
-
-from services.audit_ledger.app.event_worker import (
-    DEAD_LETTER_TOPIC,
-    AuditEventHandler,
-    publish_dead_letter,
+from ledgermesh_messaging import (
+    REDEMPTION_EVENTS,
+    DeadLetterReason,
+    EventEnvelope,
+    FailureRouter,
+    PermanentError,
+    RetryPolicy,
+    dead_letter_topic,
 )
+
+from services.audit_ledger.app.event_worker import CONSUMER_GROUP, AuditEventHandler
 
 
 class RecordingRepository:
@@ -57,13 +61,25 @@ def test_unrelated_event_is_rejected():
         )
 
 
-def test_unsupported_event_can_be_published_to_the_dead_letter_topic():
+def test_unsupported_event_is_dead_lettered_with_its_reason():
     producer = FakeProducer()
-    record = SimpleNamespace(offset=7, value=b"event", key=b"transaction")
+    record = SimpleNamespace(
+        topic=REDEMPTION_EVENTS.name,
+        partition=0,
+        offset=7,
+        value=b"event",
+        key=b"transaction",
+        headers=[],
+    )
+    router = FailureRouter(producer, consumer=CONSUMER_GROUP, policy=RetryPolicy())
 
-    asyncio.run(publish_dead_letter(producer, record, PermanentError("unsupported")))
+    asyncio.run(
+        router.dead_letter(record, PermanentError("unsupported"), DeadLetterReason.PERMANENT_ERROR)
+    )
 
-    assert producer.sent[0][0] == DEAD_LETTER_TOPIC
-    assert producer.sent[0][1]["value"] == b"event"
-    assert producer.sent[0][1]["key"] == b"transaction"
-    assert producer.sent[0][1]["headers"][0][0] == "error"
+    [(topic, kwargs)] = producer.sent
+    assert topic == dead_letter_topic(REDEMPTION_EVENTS).name
+    assert (kwargs["value"], kwargs["key"]) == (b"event", b"transaction")
+    headers = dict(kwargs["headers"])
+    assert headers["lm-dlq-reason"] == b"permanent_error"
+    assert headers["lm-dlq-consumer"] == b"audit-ledger"

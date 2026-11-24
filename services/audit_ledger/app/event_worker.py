@@ -1,4 +1,9 @@
-"""Persist Coordinator transition events from Kafka in the Audit Ledger."""
+"""Persist Coordinator transition events from Kafka in the Audit Ledger.
+
+Failures (LM-024): transient errors are retried in process, then through
+``redemption.events.retry`` (read by a second consumer), then parked on
+``redemption.events.dlq`` with the reason. Limits come from ``LM_RETRY_*``.
+"""
 
 from __future__ import annotations
 
@@ -9,18 +14,20 @@ import signal
 
 from ledgermesh_messaging import (
     REDEMPTION_EVENTS,
+    FailureRouter,
     InboxConsumer,
     PermanentError,
+    RetryPolicy,
     create_consumer,
     create_producer,
-    dead_letter_topic,
+    create_retry_consumer,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from services.audit_ledger.app.repository import PostgresAuditRepository, database_url, get_engine
 
 logger = logging.getLogger(__name__)
-DEAD_LETTER_TOPIC = dead_letter_topic(REDEMPTION_EVENTS).name
+CONSUMER_GROUP = REDEMPTION_EVENTS.consumer_group
 
 
 class AuditEventHandler:
@@ -36,42 +43,31 @@ class AuditEventHandler:
         return []
 
 
-async def publish_dead_letter(producer, record, error: Exception) -> None:
-    logger.error("dead-lettering audit event at offset %s: %r", record.offset, error)
-    await producer.send_and_wait(
-        DEAD_LETTER_TOPIC,
-        value=record.value,
-        key=record.key,
-        headers=[("error", repr(error)[:1000].encode())],
-    )
+def bootstrap_servers() -> str:
+    return os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:29092")
 
 
 async def run(stop: asyncio.Event) -> None:
+    policy = RetryPolicy.from_env()  # fails fast on an invalid LM_RETRY_* value
     engine = create_async_engine(database_url(), pool_pre_ping=True)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    consumer = create_consumer(
-        os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:29092"),
-        REDEMPTION_EVENTS.consumer_group,
-        REDEMPTION_EVENTS.name,
-    )
-    producer = create_producer(os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:29092"))
+    consumer = create_consumer(bootstrap_servers(), CONSUMER_GROUP, REDEMPTION_EVENTS.name)
+    retry_consumer = create_retry_consumer(bootstrap_servers(), REDEMPTION_EVENTS)
+    producer = create_producer(bootstrap_servers())
     attempted = []
     try:
-        for client in (producer, consumer):
+        for client in (producer, consumer, retry_consumer):
             attempted.append(client)
             await client.start()
 
-        async def dead_letter(record, error: Exception) -> None:
-            await publish_dead_letter(producer, record, error)
-
-        inbox = InboxConsumer(
-            consumer,
-            sessions,
-            name=REDEMPTION_EVENTS.consumer_group,
-            handler=AuditEventHandler(PostgresAuditRepository(get_engine())),
-            on_dead_letter=dead_letter,
+        router = FailureRouter(producer, consumer=CONSUMER_GROUP, policy=policy)
+        handler = AuditEventHandler(PostgresAuditRepository(get_engine()))
+        # Both consumers share the inbox name, so a retried event is still a duplicate.
+        inbox, retries = (
+            InboxConsumer(source, sessions, name=CONSUMER_GROUP, handler=handler, router=router)
+            for source in (consumer, retry_consumer)
         )
-        await inbox.run(stop)
+        await asyncio.gather(inbox.run(stop), retries.run(stop))
     finally:
         for client in reversed(attempted):
             try:
