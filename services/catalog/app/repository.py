@@ -1,4 +1,22 @@
-"""PostgreSQL repository for Catalog core operations (LM-008)."""
+"""PostgreSQL repository for Catalog core operations (LM-008).
+
+Inventory changes use optimistic concurrency (LM-028, ADR-001 section 8.4):
+
+1. read the reward and its ``version``, and the transaction's reservation,
+   without locking anything;
+2. decide from that state (duplicate? cancelled? enough units?);
+3. in one savepoint, apply the inventory change with a compare-and-set
+   ``UPDATE`` that only matches while the reward still has the version that
+   was read and the new inventory stays within ``0..total_inventory``, and
+   write the reservation row (insert it, or move it out of ``reserved``);
+4. if either write finds the state changed (another change won, or another
+   command took the transaction id), roll back the savepoint, reload and
+   decide again, up to ``max_attempts`` times. A request is never replayed
+   against inventory it did not check.
+
+Reservation status changes are conditional on the row still being
+``reserved``, so a concurrent release and fulfilment can't both apply.
+"""
 
 from __future__ import annotations
 
@@ -14,12 +32,21 @@ from sqlalchemy.exc import IntegrityError
 
 from services.catalog.app.db.schema import reservations, rewards
 from services.catalog.app.errors import (
+    ConcurrentUpdateConflict,
     InsufficientInventory,
     InvalidReservationTransition,
     ReservationConflict,
     ReservationNotFound,
     RewardNotFound,
 )
+
+# Each lost attempt means another change to the same reward or reservation
+# committed, so this bounds how long one request can keep losing.
+MAX_VERSION_ATTEMPTS = 10
+
+
+class _LostRace(Exception):
+    """Internal: a concurrent change won this attempt; reload and decide again."""
 
 
 @dataclass(frozen=True)
@@ -96,8 +123,36 @@ def get_engine(url: str | None = None) -> Engine:
 class PostgresCatalogRepository:
     """Applies each inventory mutation and reservation row in one transaction."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, max_attempts: int = MAX_VERSION_ATTEMPTS) -> None:
         self.engine = engine
+        self.max_attempts = max_attempts
+
+    def compare_and_set_inventory(
+        self, connection: Connection, reward_id: str, *, expected_version: int, delta: int
+    ) -> RewardRecord | None:
+        """Add ``delta`` units only if the reward is still at ``expected_version``.
+
+        The version check and both inventory bounds are in the ``WHERE``
+        clause, so the check and the write are one atomic statement. Returns
+        the new reward state, or ``None`` with nothing changed if the version
+        moved on or the inventory would leave ``0..total_inventory``.
+        """
+        row = connection.execute(
+            update(rewards)
+            .where(
+                rewards.c.reward_id == reward_id,
+                rewards.c.version == expected_version,
+                rewards.c.available_inventory + delta >= 0,
+                rewards.c.available_inventory + delta <= rewards.c.total_inventory,
+            )
+            .values(
+                available_inventory=rewards.c.available_inventory + delta,
+                version=rewards.c.version + 1,
+                updated_at=datetime.now(UTC),
+            )
+            .returning(*rewards.c)
+        ).one_or_none()
+        return None if row is None else self._reward_record(row)
 
     def list_rewards(self, *, available_only: bool = True) -> list[RewardRecord]:
         statement = select(rewards).order_by(rewards.c.reward_id)
@@ -138,53 +193,60 @@ class PostgresCatalogRepository:
         quantity: int,
         event_id: UUID | None,
     ) -> ReservationRecord:
-        reward = self._locked_reward(connection, reward_id)
-        existing = self._existing_reservation(connection, transaction_id)
-        if existing is not None:
-            self._require_same_reservation(existing, reward_id, quantity, transaction_id)
-            if existing.status == "reserved":
-                return self._reservation_result(connection, existing, duplicate=True)
-            if existing.status == "tombstone":
-                raise ReservationConflict(
-                    "The reservation was cancelled before it could be applied.", transaction_id
+        for _attempt in range(self.max_attempts):
+            # Reload on every attempt: a lost attempt means the state changed.
+            reward = self._current_reward(connection, reward_id)
+            existing = self._existing_reservation(connection, transaction_id)
+            if existing is not None:
+                self._require_same_reservation(existing, reward_id, quantity, transaction_id)
+                if existing.status == "reserved":
+                    return self._reservation_result(connection, existing, duplicate=True)
+                if existing.status == "tombstone":
+                    raise ReservationConflict(
+                        "The reservation was cancelled before it could be applied.",
+                        transaction_id,
+                    )
+                raise InvalidReservationTransition(
+                    f"A {existing.status} reservation cannot be reserved again.", transaction_id
                 )
-            raise InvalidReservationTransition(
-                f"A {existing.status} reservation cannot be reserved again.", transaction_id
-            )
 
-        if reward.available_inventory < quantity:
-            raise InsufficientInventory(
-                f"Reward {reward_id!r} has {reward.available_inventory} units; "
-                f"{quantity} required.",
-                transaction_id,
-            )
+            if reward.available_inventory < quantity:
+                raise InsufficientInventory(
+                    f"Reward {reward_id!r} has {reward.available_inventory} units; "
+                    f"{quantity} required.",
+                    transaction_id,
+                )
 
-        connection.execute(
-            update(rewards)
-            .where(rewards.c.reward_id == reward_id)
-            .values(
-                available_inventory=rewards.c.available_inventory - quantity,
-                version=rewards.c.version + 1,
-                updated_at=datetime.now(UTC),
-            )
+            try:
+                with connection.begin_nested():
+                    if (
+                        self.compare_and_set_inventory(
+                            connection, reward_id, expected_version=reward.version, delta=-quantity
+                        )
+                        is None
+                    ):
+                        raise _LostRace
+                    reservation = connection.execute(
+                        insert(reservations)
+                        .values(
+                            transaction_id=transaction_id,
+                            reward_id=reward_id,
+                            quantity=quantity,
+                            status="reserved",
+                            event_id=event_id,
+                        )
+                        .returning(*reservations.c)
+                    ).one()
+            except (_LostRace, IntegrityError):
+                # Another change won the version, or another command (a
+                # duplicate, a release tombstone, a different reservation)
+                # took this transaction id. The reload decides which.
+                continue
+            return self._reservation_result(connection, reservation)
+
+        raise ConcurrentUpdateConflict(
+            f"Reward {reward_id!r} kept changing; no reservation was applied.", transaction_id
         )
-        try:
-            reservation = connection.execute(
-                insert(reservations)
-                .values(
-                    transaction_id=transaction_id,
-                    reward_id=reward_id,
-                    quantity=quantity,
-                    status="reserved",
-                    event_id=event_id,
-                )
-                .returning(*reservations.c)
-            ).one()
-        except IntegrityError as error:
-            raise ReservationConflict(
-                "The transaction ID is already used by another reservation.", transaction_id
-            ) from error
-        return self._reservation_result(connection, reservation)
 
     def release(
         self,
@@ -208,56 +270,65 @@ class PostgresCatalogRepository:
         quantity: int,
         event_id: UUID | None,
     ) -> ReservationRecord:
-        self._locked_reward(connection, reward_id)
-        existing = self._existing_reservation(connection, transaction_id)
-        if existing is None:
+        for _attempt in range(self.max_attempts):
+            reward = self._current_reward(connection, reward_id)
+            existing = self._existing_reservation(connection, transaction_id)
+            if existing is None:
+                # ADR-001 7.1: a release before its reservation leaves a
+                # tombstone, so the late reservation is refused. Inventory and
+                # version are unchanged.
+                try:
+                    with connection.begin_nested():
+                        tombstone = connection.execute(
+                            insert(reservations)
+                            .values(
+                                transaction_id=transaction_id,
+                                reward_id=reward_id,
+                                quantity=quantity,
+                                status="tombstone",
+                                event_id=event_id,
+                            )
+                            .returning(*reservations.c)
+                        ).one()
+                except IntegrityError:
+                    continue  # a concurrent command took the id; the reload decides
+                return self._reservation_result(connection, tombstone, tombstone=True)
+
+            self._require_same_reservation(existing, reward_id, quantity, transaction_id)
+            if existing.status in {"released", "tombstone"}:
+                return self._reservation_result(
+                    connection,
+                    existing,
+                    duplicate=True,
+                    tombstone=existing.status == "tombstone",
+                )
+            if existing.status == "fulfilled":
+                raise InvalidReservationTransition(
+                    "A fulfilled reservation cannot be released.", transaction_id
+                )
+
             try:
-                tombstone = connection.execute(
-                    insert(reservations)
-                    .values(
-                        transaction_id=transaction_id,
-                        reward_id=reward_id,
-                        quantity=quantity,
-                        status="tombstone",
-                        event_id=event_id,
-                    )
-                    .returning(*reservations.c)
-                ).one()
-            except IntegrityError as error:
-                raise ReservationConflict(
-                    "The transaction ID is already used by another reservation.", transaction_id
-                ) from error
-            return self._reservation_result(connection, tombstone, tombstone=True)
+                with connection.begin_nested():
+                    if (
+                        self.compare_and_set_inventory(
+                            connection,
+                            reward_id,
+                            expected_version=reward.version,
+                            delta=existing.quantity,
+                        )
+                        is None
+                    ):
+                        raise _LostRace
+                    released = self._move_reserved(connection, existing.id, "released")
+                    if released is None:
+                        raise _LostRace  # released or fulfilled concurrently
+            except _LostRace:
+                continue
+            return self._reservation_result(connection, released)
 
-        self._require_same_reservation(existing, reward_id, quantity, transaction_id)
-        if existing.status in {"released", "tombstone"}:
-            return self._reservation_result(
-                connection,
-                existing,
-                duplicate=True,
-                tombstone=existing.status == "tombstone",
-            )
-        if existing.status == "fulfilled":
-            raise InvalidReservationTransition(
-                "A fulfilled reservation cannot be released.", transaction_id
-            )
-
-        connection.execute(
-            update(rewards)
-            .where(rewards.c.reward_id == reward_id)
-            .values(
-                available_inventory=rewards.c.available_inventory + existing.quantity,
-                version=rewards.c.version + 1,
-                updated_at=datetime.now(UTC),
-            )
+        raise ConcurrentUpdateConflict(
+            f"Reward {reward_id!r} kept changing; no release was applied.", transaction_id
         )
-        released = connection.execute(
-            update(reservations)
-            .where(reservations.c.id == existing.id)
-            .values(status="released", updated_at=datetime.now(UTC))
-            .returning(*reservations.c)
-        ).one()
-        return self._reservation_result(connection, released)
 
     def fulfill(
         self,
@@ -282,30 +353,43 @@ class PostgresCatalogRepository:
         # The row's event_id identifies the command that created the reservation.
         # Transition-specific event history belongs in the inbox/audit ledger.
         del event_id
-        self._locked_reward(connection, reward_id)
-        existing = self._existing_reservation(connection, transaction_id)
-        if existing is None:
-            raise ReservationNotFound(
-                "Fulfillment requires an existing reservation.", transaction_id
-            )
-        if existing.reward_id != reward_id:
-            raise ReservationConflict(
-                "The transaction ID belongs to another reward.", transaction_id
-            )
-        if existing.status == "fulfilled":
-            return self._reservation_result(connection, existing, duplicate=True)
-        if existing.status != "reserved":
-            raise InvalidReservationTransition(
-                f"A {existing.status} reservation cannot be fulfilled.", transaction_id
-            )
+        for _attempt in range(self.max_attempts):
+            self._current_reward(connection, reward_id)
+            existing = self._existing_reservation(connection, transaction_id)
+            if existing is None:
+                raise ReservationNotFound(
+                    "Fulfillment requires an existing reservation.", transaction_id
+                )
+            if existing.reward_id != reward_id:
+                raise ReservationConflict(
+                    "The transaction ID belongs to another reward.", transaction_id
+                )
+            if existing.status == "fulfilled":
+                return self._reservation_result(connection, existing, duplicate=True)
+            if existing.status != "reserved":
+                raise InvalidReservationTransition(
+                    f"A {existing.status} reservation cannot be fulfilled.", transaction_id
+                )
 
-        fulfilled = connection.execute(
+            # Inventory doesn't change, but a concurrent release might: only
+            # a row that is still reserved can be fulfilled.
+            fulfilled = self._move_reserved(connection, existing.id, "fulfilled")
+            if fulfilled is not None:
+                return self._reservation_result(connection, fulfilled)
+
+        raise ConcurrentUpdateConflict(
+            "The reservation kept changing; it was not fulfilled.", transaction_id
+        )
+
+    @staticmethod
+    def _move_reserved(connection: Connection, reservation_id: int, status: str):
+        """Move a reservation out of ``reserved``; ``None`` if it already left it."""
+        return connection.execute(
             update(reservations)
-            .where(reservations.c.id == existing.id)
-            .values(status="fulfilled", updated_at=datetime.now(UTC))
+            .where(reservations.c.id == reservation_id, reservations.c.status == "reserved")
+            .values(status=status, updated_at=datetime.now(UTC))
             .returning(*reservations.c)
-        ).one()
-        return self._reservation_result(connection, fulfilled)
+        ).one_or_none()
 
     @staticmethod
     def _existing_reservation(connection: Connection, transaction_id: UUID):
@@ -313,10 +397,10 @@ class PostgresCatalogRepository:
             select(reservations).where(reservations.c.transaction_id == transaction_id)
         ).one_or_none()
 
-    @staticmethod
-    def _locked_reward(connection: Connection, reward_id: str):
+    def _current_reward(self, connection: Connection, reward_id: str):
+        """Read the latest committed reward row, without locking it."""
         row = connection.execute(
-            select(rewards).where(rewards.c.reward_id == reward_id).with_for_update()
+            select(rewards).where(rewards.c.reward_id == reward_id)
         ).one_or_none()
         if row is None:
             raise RewardNotFound(f"Reward {reward_id!r} does not exist.")
