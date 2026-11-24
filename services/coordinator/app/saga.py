@@ -1,4 +1,4 @@
-"""Durable Coordinator state machine for the Saga redemption workflow (LM-022)."""
+"""Durable Coordinator Saga workflow and compensations (LM-022/LM-023)."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from ledgermesh_messaging import (
     PermanentError,
     enqueue,
 )
+from ledgermesh_messaging.schema import outbox
 from sqlalchemy import Connection, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -34,14 +35,24 @@ DEDUCTION_REJECTED = "wallet.deduction_rejected"
 POINTS_REFUNDED = "wallet.points_refunded"
 INVENTORY_RESERVED = "catalog.inventory_reserved"
 RESERVATION_REJECTED = "catalog.reservation_rejected"
+INVENTORY_RELEASED = "catalog.inventory_released"
+RELEASE_REJECTED = "catalog.release_rejected"
 RESULT_AGGREGATES = {
     POINTS_DEDUCTED: "wallet",
     DEDUCTION_REJECTED: "wallet",
     POINTS_REFUNDED: "wallet",
     INVENTORY_RESERVED: "reward",
     RESERVATION_REJECTED: "reward",
+    INVENTORY_RELEASED: "reward",
+    RELEASE_REJECTED: "reward",
 }
 TERMINAL_SAGA_STATES = {"COMPLETED", "FAILED", "COMPENSATED"}
+COMMAND_RESULTS = {
+    "wallet.deduct_points": {POINTS_DEDUCTED, DEDUCTION_REJECTED},
+    "catalog.reserve_inventory": {INVENTORY_RESERVED, RESERVATION_REJECTED},
+    "catalog.release_inventory": {INVENTORY_RELEASED, RELEASE_REJECTED},
+    "wallet.refund_points": {POINTS_REFUNDED},
+}
 
 
 class InvalidSagaResult(PermanentError):
@@ -152,7 +163,7 @@ class CoordinatorSagaMachine:
             )
             return []
 
-        self._validate_current_command(row, envelope)
+        self._validate_current_command(connection, row, envelope)
 
         if row.status == "DEDUCTING_POINTS":
             if envelope.event_type == POINTS_DEDUCTED:
@@ -165,11 +176,30 @@ class CoordinatorSagaMachine:
             if envelope.event_type == INVENTORY_RESERVED:
                 return self._terminal(connection, row, envelope, "COMPLETED", "inventory reserved")
             if envelope.event_type == RESERVATION_REJECTED:
-                return self._compensate(connection, row, envelope)
-        elif row.status == "COMPENSATING" and envelope.event_type == POINTS_REFUNDED:
-            return self._terminal(
-                connection, row, envelope, "COMPENSATED", "wallet points refunded"
-            )
+                # A definite rejection proves that Catalog did not reserve, so
+                # only the confirmed Wallet deduction needs compensation.
+                return self._request_refund(
+                    connection,
+                    row,
+                    "inventory reservation rejected; refund requested",
+                    envelope.event_id,
+                )
+        elif row.status == "COMPENSATING":
+            if envelope.event_type == INVENTORY_RELEASED:
+                # Release is sequenced before refund when the reservation outcome
+                # was unknown. Once Catalog confirms, refund the known deduction.
+                return self._request_refund(
+                    connection,
+                    row,
+                    "inventory release confirmed; refund requested",
+                    envelope.event_id,
+                )
+            if envelope.event_type == RELEASE_REJECTED:
+                return self._compensation_rejected(connection, row, envelope)
+            if envelope.event_type == POINTS_REFUNDED:
+                return self._terminal(
+                    connection, row, envelope, "COMPENSATED", "wallet points refunded"
+                )
 
         raise InvalidSagaResult(
             f"{envelope.event_type} is not expected while redemption is {row.status}"
@@ -215,15 +245,85 @@ class CoordinatorSagaMachine:
             CATALOG_COMMANDS.message(command),
         ]
 
-    def _compensate(self, connection: Connection, row, result: EventEnvelope):
+    def begin_compensation(
+        self,
+        connection: Connection,
+        transaction_id: UUID,
+        reason: str,
+        *,
+        reservation_may_exist: bool,
+    ):
+        """Enter compensation after a timeout or another unknown outcome.
+
+        LM-024 calls this boundary when it owns timeout detection. A deduction
+        timeout requires a safe refund/tombstone. A reservation timeout first
+        releases inventory because the reservation may have committed, then
+        refunds the confirmed deduction.
+        """
+        row = self._locked(connection, transaction_id)
+        if row.coordination_mode != "saga":
+            raise InvalidSagaResult("only Saga redemptions can be compensated")
+        if row.status in TERMINAL_SAGA_STATES or row.status == "COMPENSATING":
+            return []
+        if row.status == "DEDUCTING_POINTS":
+            if reservation_may_exist:
+                raise InvalidSagaResult("inventory cannot exist before the deduction completes")
+            return self._request_refund(connection, row, reason, row.current_command_id)
+        if row.status == "RESERVING_INVENTORY":
+            if reservation_may_exist:
+                return self._request_release(connection, row, reason, row.current_command_id)
+            return self._request_refund(connection, row, reason, row.current_command_id)
+        raise InvalidSagaResult(f"cannot compensate a redemption in {row.status}")
+
+    def retry_compensation(
+        self,
+        connection: Connection,
+        transaction_id: UUID,
+        reason: str = "compensation retry requested",
+    ):
+        """Reissue a compensation command whose result is still unknown.
+
+        This covers a lost result/acknowledgement: participants persist their
+        outcome by transaction and operation, so replay returns the same
+        applied result (or duplicate) without repeating the business effect.
+        A durable ``release_rejected`` result is not retryable here; Catalog
+        will replay that rejection for this transaction and operation. Such a
+        case remains COMPENSATING for operator investigation.
+        """
+        row = self._locked(connection, transaction_id)
+        if row.coordination_mode != "saga" or row.status != "COMPENSATING":
+            raise InvalidSagaResult("only a compensating Saga can be retried")
+        if row.current_command_id is None:
+            raise InvalidSagaResult(
+                "no compensation command is pending; its result was already received "
+                "and requires operator review"
+            )
+        command = connection.scalar(
+            select(outbox.c.envelope).where(outbox.c.event_id == row.current_command_id)
+        )
+        if command is None:
+            raise InvalidSagaResult("the pending compensation command is not durable")
+        if command["event_type"] == "catalog.release_inventory":
+            return self._request_release(connection, row, reason, row.current_command_id)
+        if command["event_type"] == "wallet.refund_points":
+            return self._request_refund(connection, row, reason, row.current_command_id)
+        raise InvalidSagaResult("the current command is not a compensation")
+
+    def _request_refund(
+        self,
+        connection: Connection,
+        row,
+        reason: str,
+        causation_id: UUID | None,
+    ):
         command = EventEnvelope(
             event_type="wallet.refund_points",
             transaction_id=row.transaction_id,
             correlation_id=row.correlation_id,
-            causation_id=result.event_id,
+            causation_id=causation_id,
             aggregate_type="wallet",
             aggregate_id=row.user_id,
-            workflow_step=4,
+            workflow_step=row.workflow_step + 1,
             fencing_token=row.fencing_token,
             payload={"user_id": row.user_id, "points": row.total_points},
         )
@@ -231,18 +331,80 @@ class CoordinatorSagaMachine:
             connection,
             row,
             "COMPENSATING",
-            "inventory reservation rejected; refund requested",
+            reason,
             command_id=command.event_id,
         )
         return [
             _audit_event(
                 updated,
-                "RESERVING_INVENTORY",
+                row.status,
                 "COMPENSATING",
-                "inventory reservation rejected; refund requested",
-                result.event_id,
+                reason,
+                causation_id,
             ),
             WALLET_COMMANDS.message(command),
+        ]
+
+    def _request_release(
+        self,
+        connection: Connection,
+        row,
+        reason: str,
+        causation_id: UUID | None,
+    ):
+        command = EventEnvelope(
+            event_type="catalog.release_inventory",
+            transaction_id=row.transaction_id,
+            correlation_id=row.correlation_id,
+            causation_id=causation_id,
+            aggregate_type="reward",
+            aggregate_id=row.reward_id,
+            workflow_step=row.workflow_step + 1,
+            fencing_token=row.fencing_token,
+            payload={"reward_id": row.reward_id, "quantity": row.quantity},
+        )
+        updated = self._transition(
+            connection,
+            row,
+            "COMPENSATING",
+            reason,
+            command_id=command.event_id,
+        )
+        return [
+            _audit_event(
+                updated,
+                row.status,
+                "COMPENSATING",
+                reason,
+                causation_id,
+            ),
+            CATALOG_COMMANDS.message(command),
+        ]
+
+    def _compensation_rejected(self, connection: Connection, row, result: EventEnvelope):
+        reason = f"inventory release rejected: {result.payload.get('reason', 'unknown')}"
+        updated = self._transition(
+            connection,
+            row,
+            "COMPENSATING",
+            reason,
+            # The durable rejection is a completed response, not a pending
+            # command. Keeping its ID here would make retry tooling replay a
+            # Catalog outcome that is permanently stored for this operation.
+            command_id=None,
+        )
+        # There is deliberately no terminal COMPENSATION_FAILED state. Keep the
+        # redemption visible in COMPENSATING for operator investigation, but
+        # clear the pending command because Catalog's durable rejection cannot
+        # be changed by replaying that operation.
+        return [
+            _audit_event(
+                updated,
+                "COMPENSATING",
+                "COMPENSATING",
+                reason,
+                result.event_id,
+            )
         ]
 
     def _terminal(
@@ -270,11 +432,19 @@ class CoordinatorSagaMachine:
             raise InvalidSagaResult("result targets the wrong aggregate")
 
     @staticmethod
-    def _validate_current_command(row, envelope: EventEnvelope) -> None:
+    def _validate_current_command(connection: Connection, row, envelope: EventEnvelope) -> None:
         if envelope.causation_id != row.current_command_id:
             raise InvalidSagaResult("result does not acknowledge the current command")
         if envelope.workflow_step != row.workflow_step:
             raise InvalidSagaResult("result workflow_step does not match the current step")
+        command = connection.scalar(
+            select(outbox.c.envelope).where(outbox.c.event_id == row.current_command_id)
+        )
+        if command is None:
+            raise InvalidSagaResult("the current command is not durable")
+        expected = COMMAND_RESULTS.get(command["event_type"], set())
+        if envelope.event_type not in expected:
+            raise InvalidSagaResult("result type does not match the current command")
 
     def fail_start(self, connection: Connection, transaction_id: UUID, reason: str):
         row = self._locked(connection, transaction_id)

@@ -238,6 +238,28 @@ def test_release_restores_inventory_once(database_url, catalog_db):
     )
 
 
+def test_release_retry_with_new_event_id_replays_success_without_releasing_twice(
+    database_url, catalog_db
+):
+    transaction_id = uuid4()
+    deliver(database_url, catalog_db, command(RESERVE_INVENTORY, transaction_id))
+    first_release = command(RELEASE_INVENTORY, transaction_id, step=4)
+    deliver(database_url, catalog_db, first_release)
+
+    # Simulate a retry after the release committed but its result was lost.
+    retry = command(RELEASE_INVENTORY, transaction_id, step=5)
+    deliver(database_url, catalog_db, retry)
+
+    assert inventory(catalog_db) == (10, 2)
+    release, duplicate = replies(catalog_db)[-2:]
+    assert release.event_type == duplicate.event_type == INVENTORY_RELEASED
+    assert release.payload["outcome"] == "applied"
+    assert duplicate.payload["outcome"] == "duplicate"
+    assert duplicate.event_id != release.event_id
+    assert duplicate.causation_id == retry.event_id
+    assert duplicate.workflow_step == retry.workflow_step
+
+
 def test_early_release_tombstones_and_cancels_late_reserve(database_url, catalog_db):
     transaction_id = uuid4()
     deliver(database_url, catalog_db, command(RELEASE_INVENTORY, transaction_id, step=4))
