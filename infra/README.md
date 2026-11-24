@@ -11,6 +11,9 @@ LM-003 provides a reproducible local stack containing:
 The messaging library's test-only environment remains separate at
 `libs/messaging/docker-compose.test.yml`.
 
+The same `infra/Dockerfile.service` also builds the production images that CI
+publishes to GHCR. See [Service images (LM-047)](IMAGES.md).
+
 ## Start the stack
 
 From the repository root:
