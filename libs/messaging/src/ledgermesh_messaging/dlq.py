@@ -82,11 +82,21 @@ def format_line(entry: dict[str, Any]) -> str:
 
 
 async def read_dead_letters(
-    bootstrap_servers: str, topic: str, limit: int | None = None
+    bootstrap_servers: str,
+    topic: str,
+    limit: int | None = None,
+    *,
+    consumer: Any | None = None,
 ) -> list[dict[str, Any]]:
-    consumer = AIOKafkaConsumer(
-        bootstrap_servers=bootstrap_servers, group_id=None, enable_auto_commit=False
-    )
+    """Read ``topic`` from the beginning up to the end offsets seen at the start.
+
+    Messages dead-lettered while this runs are left for the next run, so the
+    read always finishes. ``consumer`` replaces the Kafka consumer in tests.
+    """
+    if consumer is None:
+        consumer = AIOKafkaConsumer(
+            bootstrap_servers=bootstrap_servers, group_id=None, enable_auto_commit=False
+        )
     await consumer.start()
     try:
         partitions = consumer.partitions_for_topic(topic) or set()
@@ -97,14 +107,28 @@ async def read_dead_letters(
         await consumer.seek_to_beginning(*assigned)
         end = await consumer.end_offsets(assigned)
         entries: list[dict[str, Any]] = []
-        while any(await consumer.position(tp) < end[tp] for tp in assigned):
+        while await _behind(consumer, assigned, end):
             batches = await consumer.getmany(*assigned, timeout_ms=1000)
-            for records in batches.values():
-                entries.extend(describe(record) for record in records)
+            for partition, records in batches.items():
+                entries.extend(
+                    describe(record) for record in records if record.offset < end[partition]
+                )
         entries.sort(key=lambda entry: entry["dlq_offset"])
         return entries[-limit:] if limit else entries
     finally:
         await consumer.stop()
+
+
+async def _behind(consumer: Any, assigned: list[TopicPartition], end: dict) -> bool:
+    """True while any partition's position is short of its captured end offset.
+
+    Positions are awaited one by one first: ``any()`` cannot iterate an
+    async generator, so the comparison must run on plain values.
+    """
+    positions = [await consumer.position(partition) for partition in assigned]
+    return any(
+        position < end[partition] for position, partition in zip(positions, assigned, strict=True)
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
