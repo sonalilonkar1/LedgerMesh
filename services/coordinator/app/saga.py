@@ -143,7 +143,11 @@ class CoordinatorSagaMachine:
             row, None, "REQUESTED", "redemption created", causation_id=None
         )
         started_audit = _audit_event(
-            updated, "REQUESTED", "DEDUCTING_POINTS", "wallet deduction requested", None
+            updated,
+            "REQUESTED",
+            "DEDUCTING_POINTS",
+            "wallet deduction requested",
+            command.event_id,
         )
         return [requested_audit, started_audit, WALLET_COMMANDS.message(command)]
 
@@ -453,10 +457,15 @@ class CoordinatorSagaMachine:
         if row.status != "REQUESTED":
             return []
         updated = self._transition(connection, row, "FAILED", reason, command_id=None)
-        return [
-            _audit_event(row, None, "REQUESTED", "redemption created", causation_id=None),
-            _audit_event(updated, "REQUESTED", "FAILED", reason, causation_id=None),
-        ]
+        requested = _audit_event(row, None, "REQUESTED", "redemption created", causation_id=None)
+        failed = _audit_event(
+            updated,
+            "REQUESTED",
+            "FAILED",
+            reason,
+            causation_id=requested.envelope.event_id,
+        )
+        return [requested, failed]
 
     @staticmethod
     def _locked(connection: Connection, transaction_id: UUID):

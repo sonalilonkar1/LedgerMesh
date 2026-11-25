@@ -93,6 +93,8 @@ async def test_future_event_is_retried_then_applied_after_prerequisite(session_f
     second = event(2)
 
     await consumer.handle(record(second))
+    # Future events must not reach business logic before their predecessor.
+    assert await read_counter(session_factory) == 0
     assert len(producer.sent) == 1
     topic, message = producer.sent[0]
     assert topic == retry_topic(WALLET_RESULTS).name
