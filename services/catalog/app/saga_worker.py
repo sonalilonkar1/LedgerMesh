@@ -21,6 +21,7 @@ from ledgermesh_messaging import (
     create_consumer,
     create_producer,
     create_retry_consumer,
+    start_metrics_server,
 )
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -43,6 +44,7 @@ async def run(stop: asyncio.Event) -> None:
     consumer = create_consumer(bootstrap_servers(), CONSUMER_GROUP, CATALOG_COMMANDS.name)
     retry_consumer = create_retry_consumer(bootstrap_servers(), CATALOG_COMMANDS)
     attempted = []
+    metrics = start_metrics_server("catalog", 9102)
     try:
         for client in (producer, consumer, retry_consumer):
             # Track before awaiting start(), so partial startup is also cleaned up.
@@ -64,6 +66,7 @@ async def run(stop: asyncio.Event) -> None:
                 await client.stop()
             except Exception:
                 logger.exception("failed to stop %s during shutdown", type(client).__name__)
+        metrics.close()
         await engine.dispose()
 
 

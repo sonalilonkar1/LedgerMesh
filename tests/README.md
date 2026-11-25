@@ -50,3 +50,6 @@ server must have `max_prepared_transactions` greater than zero.
 Database-backed component tests live under `tests/db`. The LM-021 suite in
 `tests/db/test_catalog_saga.py` covers transactional Catalog commands, durable
 results, early-release tombstones, malformed messages, and restart redelivery.
+`tests/db/test_saga_duplicate_delivery.py` (LM-029) races duplicate Wallet and
+Catalog deliveries against PostgreSQL and scrapes the workers' real metrics
+endpoint to verify duplicate and rejection counter increments.
