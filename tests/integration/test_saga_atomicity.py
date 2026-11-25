@@ -7,6 +7,9 @@ from uuid import UUID, uuid4
 
 import pytest
 from ledgermesh_messaging import EventEnvelope, outbox, process_once
+from sqlalchemy import Engine, func, insert, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
 from services.audit_ledger.app.repository import PostgresAuditRepository
 from services.catalog.app.db.schema import reservations, rewards
 from services.catalog.app.repository import PostgresCatalogRepository
@@ -23,8 +26,6 @@ from services.coordinator.app.saga import (
 from services.wallet.app.db.schema import wallet_operations, wallets
 from services.wallet.app.repository import PostgresWalletRepository
 from services.wallet.app.saga import WalletSagaHandler
-from sqlalchemy import Engine, func, insert, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from tests.integration.conftest import ServiceDatabases
 
 pytestmark = [pytest.mark.database, pytest.mark.integration]
@@ -47,9 +48,7 @@ def _event(engine: Engine, topic: str, transaction_id: UUID) -> EventEnvelope:
     raise AssertionError(f"no {topic} event found for {transaction_id}")
 
 
-def _deliver(
-    database_url: str, engine: Engine, name: str, handler, envelope: EventEnvelope
-):
+def _deliver(database_url: str, engine: Engine, name: str, handler, envelope: EventEnvelope):
     async def run():
         async_engine = create_async_engine(database_url)
         try:
@@ -66,9 +65,7 @@ def _start(database_url: str, transaction_id: UUID) -> int:
         async_engine = create_async_engine(database_url)
         try:
             sessions = async_sessionmaker(async_engine, expire_on_commit=False)
-            return await SagaStarter(
-                sessions, FakeQuote(), CoordinatorSagaMachine()
-            ).run_once()
+            return await SagaStarter(sessions, FakeQuote(), CoordinatorSagaMachine()).run_once()
         finally:
             await async_engine.dispose()
 
@@ -112,9 +109,7 @@ def _assert_saga_invariants(databases: ServiceDatabases, transaction_id: UUID) -
     with wallet.connect() as connection:
         assert (
             connection.scalar(
-                select(func.count())
-                .select_from(wallets)
-                .where(wallets.c.available_points < 0)
+                select(func.count()).select_from(wallets).where(wallets.c.available_points < 0)
             )
             == 0
         )
@@ -136,15 +131,11 @@ def _assert_saga_invariants(databases: ServiceDatabases, transaction_id: UUID) -
             == 0
         )
         reservation = connection.execute(
-            select(reservations.c.status).where(
-                reservations.c.transaction_id == transaction_id
-            )
+            select(reservations.c.status).where(reservations.c.transaction_id == transaction_id)
         ).scalar_one_or_none()
     with coordinator.connect() as connection:
         status = connection.execute(
-            select(redemptions.c.status).where(
-                redemptions.c.transaction_id == transaction_id
-            )
+            select(redemptions.c.status).where(redemptions.c.transaction_id == transaction_id)
         ).scalar_one()
         transitions = connection.scalar(
             select(func.count())
@@ -168,9 +159,7 @@ def _assert_saga_invariants(databases: ServiceDatabases, transaction_id: UUID) -
 @pytest.fixture
 def saga_databases(service_databases: ServiceDatabases) -> ServiceDatabases:
     with service_databases.engines["wallet"].begin() as connection:
-        connection.execute(
-            insert(wallets).values(user_id="saga-user", available_points=1_000)
-        )
+        connection.execute(insert(wallets).values(user_id="saga-user", available_points=1_000))
     with service_databases.engines["catalog"].begin() as connection:
         connection.execute(
             insert(rewards).values(
@@ -232,9 +221,7 @@ def test_saga_happy_path_completes_and_audits_all_transitions(
 
     _run_wallet(
         databases,
-        _event(
-            databases.engines["coordinator"], "wallet.commands", created.transaction_id
-        ),
+        _event(databases.engines["coordinator"], "wallet.commands", created.transaction_id),
     )
     _coordinator_result(
         databases,
@@ -242,9 +229,7 @@ def test_saga_happy_path_completes_and_audits_all_transitions(
     )
     _run_catalog(
         databases,
-        _event(
-            databases.engines["coordinator"], "catalog.commands", created.transaction_id
-        ),
+        _event(databases.engines["coordinator"], "catalog.commands", created.transaction_id),
     )
     _coordinator_result(
         databases,
@@ -264,18 +249,14 @@ def test_saga_happy_path_completes_and_audits_all_transitions(
     with databases.engines["wallet"].connect() as connection:
         assert (
             connection.scalar(
-                select(wallets.c.available_points).where(
-                    wallets.c.user_id == "saga-user"
-                )
+                select(wallets.c.available_points).where(wallets.c.user_id == "saga-user")
             )
             == 900
         )
     with databases.engines["catalog"].connect() as connection:
         assert (
             connection.scalar(
-                select(rewards.c.available_inventory).where(
-                    rewards.c.reward_id == "saga-reward"
-                )
+                select(rewards.c.available_inventory).where(rewards.c.reward_id == "saga-reward")
             )
             == 9
         )
@@ -298,9 +279,7 @@ def test_catalog_rejection_refunds_once_and_restart_resumes_to_compensated(
     # fresh async engines and fresh handler/machine instances for each delivery.
     _run_wallet(
         databases,
-        _event(
-            databases.engines["coordinator"], "wallet.commands", created.transaction_id
-        ),
+        _event(databases.engines["coordinator"], "wallet.commands", created.transaction_id),
     )
     _coordinator_result(
         databases,
@@ -308,9 +287,7 @@ def test_catalog_rejection_refunds_once_and_restart_resumes_to_compensated(
     )
     _run_catalog(
         databases,
-        _event(
-            databases.engines["coordinator"], "catalog.commands", created.transaction_id
-        ),
+        _event(databases.engines["coordinator"], "catalog.commands", created.transaction_id),
     )
     _coordinator_result(
         databases,
@@ -318,9 +295,7 @@ def test_catalog_rejection_refunds_once_and_restart_resumes_to_compensated(
     )
     _run_wallet(
         databases,
-        _event(
-            databases.engines["coordinator"], "wallet.commands", created.transaction_id
-        ),
+        _event(databases.engines["coordinator"], "wallet.commands", created.transaction_id),
     )
     _coordinator_result(
         databases,
@@ -340,9 +315,7 @@ def test_catalog_rejection_refunds_once_and_restart_resumes_to_compensated(
     with databases.engines["wallet"].connect() as connection:
         assert (
             connection.scalar(
-                select(wallets.c.available_points).where(
-                    wallets.c.user_id == "saga-user"
-                )
+                select(wallets.c.available_points).where(wallets.c.user_id == "saga-user")
             )
             == 1_000
         )
