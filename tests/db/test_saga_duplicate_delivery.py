@@ -30,9 +30,7 @@ pytestmark = pytest.mark.database
 def wallet_db(database_url: str, engine: Engine) -> Engine:
     upgrade("wallet", database_url)
     with engine.begin() as connection:
-        connection.execute(
-            wallets.insert().values(user_id="lm029-user", available_points=100)
-        )
+        connection.execute(wallets.insert().values(user_id="lm029-user", available_points=100))
     return engine
 
 
@@ -102,10 +100,7 @@ def _race(database_url: str, engine: Engine, envelope: EventEnvelope, copies: in
 def _count(engine: Engine, table, *conditions) -> int:
     with engine.connect() as connection:
         return int(
-            connection.scalar(
-                select(func.count()).select_from(table).where(*conditions)
-            )
-            or 0
+            connection.scalar(select(func.count()).select_from(table).where(*conditions)) or 0
         )
 
 
