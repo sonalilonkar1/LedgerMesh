@@ -9,6 +9,9 @@ from uuid import uuid4
 
 import pytest
 from ledgermesh_messaging import EventEnvelope, inbox, outbox, process_once
+from sqlalchemy import Engine, func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
 from services.catalog.app.db.schema import catalog_saga_outcomes, reservations, rewards
 from services.catalog.app.repository import PostgresCatalogRepository
 from services.catalog.app.saga import CatalogSagaHandler
@@ -19,8 +22,6 @@ from services.wallet.app.db.schema import (
 )
 from services.wallet.app.repository import PostgresWalletRepository
 from services.wallet.app.saga import WalletSagaHandler
-from sqlalchemy import Engine, func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from tests.db.conftest import upgrade
 
 pytestmark = pytest.mark.database
