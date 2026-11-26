@@ -241,23 +241,29 @@ def run_request(app, path, method="GET"):
     return sent
 
 
-def test_middleware_records_latency_with_status_and_a_low_cardinality_route():
+def test_distinct_unmatched_paths_share_one_route_label():
     async def app(scope, receive, send):
-        await send({"type": "http.response.start", "status": 409, "headers": []})
+        await send({"type": "http.response.start", "status": 404, "headers": []})
         await send({"type": "http.response.body", "body": b""})
 
-    route = "/v1/transactions/{id}/prepare"
-    labels = {"service": "wallet", "method": "POST", "route": route, "status": "409"}
+    labels = {"service": "wallet", "method": "GET", "route": "unmatched", "status": "404"}
     before = value("ledgermesh_http_request_duration_seconds_count", **labels)
+    paths = [
+        f"/unknown/{uuid4()}",
+        f"/unknown/{uuid4().hex}",
+        "/v1/transactions/not-an-id/prepare",
+        "/wp-admin/setup.php",
+        "/unknown/value-1",
+        "/unknown/value-2",
+    ]
 
-    run_request(
-        MetricsMiddleware(app, service="wallet"), f"/v1/transactions/{uuid4()}/prepare", "POST"
-    )
-    run_request(
-        MetricsMiddleware(app, service="wallet"), f"/v1/transactions/{uuid4()}/prepare", "POST"
-    )
+    for path in paths:
+        run_request(MetricsMiddleware(app, service="wallet"), path)
 
-    assert value("ledgermesh_http_request_duration_seconds_count", **labels) == before + 2
+    assert value("ledgermesh_http_request_duration_seconds_count", **labels) == before + len(paths)
+    exposition = render_metrics()[0].decode()
+    for path in paths:
+        assert path not in exposition
 
 
 def test_middleware_prefers_the_framework_route_template():
@@ -282,7 +288,7 @@ def test_an_unhandled_error_is_recorded_as_500():
     async def app(scope, receive, send):
         raise RuntimeError("boom")
 
-    labels = {"service": "catalog", "method": "GET", "route": "/boom", "status": "500"}
+    labels = {"service": "catalog", "method": "GET", "route": "unmatched", "status": "500"}
     before = value("ledgermesh_http_request_duration_seconds_count", **labels)
 
     with pytest.raises(RuntimeError):
