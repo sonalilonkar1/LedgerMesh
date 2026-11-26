@@ -34,6 +34,26 @@ def make_redemption(databases: ServiceDatabases, mode: str = "saga"):
     )
 
 
+@pytest.mark.parametrize(
+    ("mode", "unfinished_status"),
+    [("saga", "COMPENSATING"), ("two_phase_commit", "PREPARING")],
+)
+def test_checker_reports_nonterminal_redemptions(service_databases, mode, unfinished_status):
+    created = make_redemption(service_databases, mode)
+    with service_databases.engines["coordinator"].begin() as connection:
+        connection.execute(
+            update(redemptions)
+            .where(redemptions.c.transaction_id == created.transaction_id)
+            .values(status=unfinished_status)
+        )
+
+    report = check_project_invariants(service_databases.engines)
+
+    assert any(
+        item.startswith("INV-07:") and unfinished_status in item for item in report.violations
+    )
+
+
 def test_checker_detects_negative_wallet_and_out_of_range_inventory(service_databases):
     wallet = service_databases.engines["wallet"]
     catalog = service_databases.engines["catalog"]

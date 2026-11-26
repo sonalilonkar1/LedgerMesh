@@ -36,6 +36,14 @@ and failed/aborted/compensated redemptions with unmatched wallet operations or
 active reservations. Tests marked `invariant_checker` intentionally inject bad
 state and assert that the checker reports the expected violation.
 
+It also reports any redemptions left non-terminal after a test, grouped by
+coordination mode and status. This catches workflows stranded in states such
+as `PREPARING` or `COMPENSATING`. Because the automatic check runs in the
+autouse fixture's teardown, an invariant violation appears in pytest as a
+teardown **ERROR** for that test, not a normal test-body **FAILED** assertion.
+The error includes the invariant details, which are also written to the JSON
+report.
+
 Measurements, explicit scenario checks, and automatic per-test checks are
 recorded in `artifacts/2pc-integration.json`. JUnit results are written to
 `artifacts/2pc-integration.xml`; CI retains both for 14 days.

@@ -69,6 +69,14 @@ def check_project_invariants(engines: dict[str, Engine]) -> InvariantReport:
         violations.append(f"INV-04: {count} transactions have multiple terminal transitions")
 
     with coordinator.connect() as connection:
+        nonterminal = connection.execute(
+            text(
+                "SELECT coordination_mode, status, count(*) FROM redemptions "
+                "WHERE status NOT IN "
+                "('COMMITTED', 'ABORTED', 'COMPLETED', 'FAILED', 'COMPENSATED') "
+                "GROUP BY coordination_mode, status ORDER BY coordination_mode, status"
+            )
+        ).all()
         successful = connection.execute(
             text(
                 "SELECT transaction_id, status FROM redemptions "
@@ -81,6 +89,13 @@ def check_project_invariants(engines: dict[str, Engine]) -> InvariantReport:
                 "WHERE status IN ('ABORTED', 'FAILED', 'COMPENSATED')"
             )
         ).all()
+
+    if nonterminal:
+        pending_count = sum(count for _, _, count in nonterminal)
+        breakdown = ", ".join(f"{mode} {status}={count}" for mode, status, count in nonterminal)
+        violations.append(
+            f"INV-07: {pending_count} redemptions remain non-terminal after the test: {breakdown}"
+        )
 
     for transaction_id, status in successful:
         wallet_effects = _scalar(
