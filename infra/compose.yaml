@@ -207,6 +207,32 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=2)"]
     networks: [backend]
 
+  # Minimal rewards and redemption UI (LM-011): http://localhost:8080
+  web:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.service
+    command: ["python", "-m", "uvicorn", "services.web.app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+    init: true
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    environment:
+      SERVICE_NAME: web
+      COORDINATOR_URL: http://coordinator:8000
+      WALLET_URL: http://wallet:8001
+      CATALOG_URL: http://catalog:8002
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      wallet:
+        condition: service_healthy
+      catalog:
+        condition: service_healthy
+    healthcheck:
+      <<: *service-healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=2)"]
+    networks: [backend]
+
 networks:
   backend:
     name: ledgermesh-backend
