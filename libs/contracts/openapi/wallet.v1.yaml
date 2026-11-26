@@ -255,7 +255,7 @@ components:
     WalletPrepareRequest:
       type: object
       additionalProperties: false
-      required: [correlation_id, user_id, points, fencing_token]
+      required: [correlation_id, user_id, points]
       properties:
         correlation_id:
           type: string
@@ -269,6 +269,7 @@ components:
         fencing_token:
           type: integer
           minimum: 0
+          default: 0
     ParticipantResponse:
       type: object
       additionalProperties: false

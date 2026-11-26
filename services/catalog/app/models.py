@@ -62,7 +62,7 @@ class CatalogPrepareRequest(StrictModel):
     quantity: int = Field(gt=0)
     expected_reward_version: int = Field(ge=0)
     expected_point_cost: int = Field(gt=0)
-    fencing_token: int = Field(ge=0)
+    fencing_token: int = Field(default=0, ge=0)
 
 
 class ParticipantResponse(StrictModel):

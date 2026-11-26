@@ -336,7 +336,6 @@ components:
         - quantity
         - expected_reward_version
         - expected_point_cost
-        - fencing_token
       properties:
         correlation_id:
           type: string
@@ -356,6 +355,7 @@ components:
         fencing_token:
           type: integer
           minimum: 0
+          default: 0
     RewardQuote:
       type: object
       additionalProperties: false

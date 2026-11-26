@@ -40,7 +40,7 @@ class WalletPrepareRequest(StrictModel):
     correlation_id: UUID
     user_id: str = Field(min_length=1)
     points: int = Field(gt=0)
-    fencing_token: int = Field(ge=0)
+    fencing_token: int = Field(default=0, ge=0)
 
 
 class ParticipantResponse(StrictModel):

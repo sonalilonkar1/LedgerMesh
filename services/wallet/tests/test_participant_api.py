@@ -77,6 +77,16 @@ def payload(*, correlation_id: UUID | None = None, user_id: str = "user-1", poin
     }
 
 
+def test_legacy_prepare_request_without_fencing_token_defaults_to_zero() -> None:
+    client, _ = client_and_repository()
+    request = payload()
+    request.pop("fencing_token")
+
+    response = client.post(f"/v1/transactions/{uuid4()}/prepare", json=request)
+
+    assert response.status_code == 200
+
+
 def test_prepare_and_status_return_participant_state() -> None:
     client, _ = client_and_repository()
     transaction_id = uuid4()
