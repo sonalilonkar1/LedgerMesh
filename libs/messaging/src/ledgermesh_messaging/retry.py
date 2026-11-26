@@ -36,6 +36,7 @@ from aiokafka import AIOKafkaConsumer
 
 from .envelope import EnvelopeError, EventEnvelope
 from .kafka import create_consumer
+from .metrics import DEAD_LETTERS, RETRIES
 from .topics import MAIN_TOPICS, TopicSpec, dead_letter_topic, retry_topic
 
 logger = logging.getLogger(__name__)
@@ -258,6 +259,7 @@ class FailureRouter:
         await self.producer.send_and_wait(
             target, value=record.value, key=record.key, headers=_encode(headers)
         )
+        RETRIES.labels(consumer=self.consumer, tier="retry_topic").inc()
 
     async def dead_letter(
         self, record: Any, error: BaseException, reason: DeadLetterReason
@@ -287,6 +289,7 @@ class FailureRouter:
         await self.producer.send_and_wait(
             target, value=record.value, key=record.key, headers=_encode(headers)
         )
+        DEAD_LETTERS.labels(consumer=self.consumer, reason=str(reason)).inc()
 
 
 def create_retry_consumer(
