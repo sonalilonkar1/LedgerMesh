@@ -2,7 +2,9 @@
 
 Runs the real Coordinator and Wallet code against their own databases (the
 LM-017 four-database harness) through ``InboxConsumer``, exactly as the
-workers do, then filters the captured JSON logs by ``transaction_id``.
+workers do, then filters the captured JSON logs by ``transaction_id``. The
+Saga is driven to ``COMPLETED`` (Coordinator, Wallet, Coordinator, Catalog,
+Coordinator), so the trail spans all three services and ends in a final state.
 """
 
 import asyncio
@@ -18,6 +20,9 @@ from ledgermesh_messaging.schema import outbox
 from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from services.catalog.app.db.schema import rewards
+from services.catalog.app.repository import PostgresCatalogRepository
+from services.catalog.app.saga import CatalogSagaHandler
 from services.coordinator.app.models import CreateRedemptionRequest
 from services.coordinator.app.repository import PostgresCoordinatorRepository
 from services.coordinator.app.saga import (
@@ -74,10 +79,43 @@ def consume(url: str, name: str, handler, envelope: EventEnvelope):
     return asyncio.run(go())
 
 
+def reply_from(engine, result) -> EventEnvelope:
+    with engine.connect() as connection:
+        return EventEnvelope.model_validate(
+            connection.scalar(
+                select(outbox.c.envelope).where(
+                    outbox.c.event_id == UUID(str(result.result_event_ids[0]))
+                )
+            )
+        )
+
+
+def next_command(engine, topic: str, transaction_id) -> EventEnvelope:
+    with engine.connect() as connection:
+        documents = connection.execute(
+            select(outbox.c.envelope).where(outbox.c.topic == topic).order_by(outbox.c.id)
+        ).scalars()
+        for document in reversed(list(documents)):
+            envelope = EventEnvelope.model_validate(document)
+            if envelope.transaction_id == transaction_id:
+                return envelope
+    raise AssertionError(f"no {topic} command for {transaction_id}")
+
+
 def test_one_saga_redemption_can_be_followed_across_services(service_databases, captured):
     engines, urls = service_databases.engines, service_databases.urls
     with engines["wallet"].begin() as connection:
         connection.execute(wallets.insert().values(user_id="user-logs", available_points=500))
+    with engines["catalog"].begin() as connection:
+        connection.execute(
+            rewards.insert().values(
+                reward_id="reward-logs",
+                name="Logs reward",
+                point_cost=100,
+                total_inventory=10,
+                available_inventory=10,
+            )
+        )
     machine = CoordinatorSagaMachine()
 
     # Coordinator: create the redemption and start the Saga.
@@ -111,16 +149,26 @@ def test_one_saga_redemption_can_be_followed_across_services(service_databases, 
             WalletSagaHandler(PostgresWalletRepository(engines["wallet"])),
             command,
         )
-    with engines["wallet"].connect() as connection:
-        reply = EventEnvelope.model_validate(
-            connection.scalar(
-                select(outbox.c.envelope).where(
-                    outbox.c.event_id == UUID(str(result.result_event_ids[0]))
-                )
-            )
-        )
+    reply = reply_from(engines["wallet"], result)
 
-    # Coordinator: apply the Wallet's result.
+    # Coordinator: apply the Wallet's result, which asks Catalog to reserve.
+    with log_context(service="coordinator"):
+        consume(
+            urls["coordinator"], "coordinator-saga", CoordinatorSagaResultHandler(machine), reply
+        )
+    reserve = next_command(engines["coordinator"], "catalog.commands", created.transaction_id)
+
+    # Catalog: reserve the inventory, as its worker would.
+    with log_context(service="catalog"):
+        result = consume(
+            urls["catalog"],
+            "catalog-saga",
+            CatalogSagaHandler(PostgresCatalogRepository(engines["catalog"])),
+            reserve,
+        )
+    reply = reply_from(engines["catalog"], result)
+
+    # Coordinator: apply the Catalog's result and complete the redemption.
     with log_context(service="coordinator"):
         consume(
             urls["coordinator"], "coordinator-saga", CoordinatorSagaResultHandler(machine), reply
@@ -130,9 +178,9 @@ def test_one_saga_redemption_can_be_followed_across_services(service_databases, 
     for line in captured:
         assert set(BASE_FIELDS + CORRELATION_FIELDS) <= set(line)
 
-    # Filtering by one transaction_id gives the whole story, from both services.
+    # Filtering by one transaction_id gives the whole story, from all three services.
     trail = [line for line in captured if line["transaction_id"] == str(created.transaction_id)]
-    assert {line["service"] for line in trail} == {"coordinator", "wallet"}
+    assert {line["service"] for line in trail} == {"coordinator", "wallet", "catalog"}
     assert {line["correlation_id"] for line in trail} == {str(created.correlation_id)}
 
     coordinator_states = [
@@ -143,6 +191,7 @@ def test_one_saga_redemption_can_be_followed_across_services(service_databases, 
         "DEDUCTING_POINTS",
         "POINTS_DEDUCTED",
         "RESERVING_INVENTORY",
+        "COMPLETED",
     ]
     wallet_lines = [line for line in trail if line["service"] == "wallet"]
     assert any(
@@ -153,5 +202,8 @@ def test_one_saga_redemption_can_be_followed_across_services(service_databases, 
     # The order across services is the order things happened.
     services_in_order = [line["service"] for line in trail]
     first_wallet = services_in_order.index("wallet")
+    first_catalog = services_in_order.index("catalog")
+    assert first_wallet < first_catalog
     assert "coordinator" in services_in_order[:first_wallet]
-    assert "coordinator" in services_in_order[first_wallet:]
+    assert "coordinator" in services_in_order[first_wallet:first_catalog]
+    assert services_in_order[-1] == "coordinator"
