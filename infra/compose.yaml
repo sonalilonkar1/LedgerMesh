@@ -207,6 +207,49 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=2)"]
     networks: [backend]
 
+  # Metrics (LM-034): Prometheus scrapes every service, Grafana shows the
+  # 2PC-vs-Saga comparison dashboard at http://localhost:3000.
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    # Workers and the invariant exporter run on the host (Linux needs this mapping).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on: [coordinator, wallet, catalog, audit-ledger]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [backend]
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    restart: unless-stopped
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      # Local only: anonymous read access to the provisioned dashboard.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/ledgermesh-comparison.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    networks: [backend]
+
 networks:
   backend:
     name: ledgermesh-backend
@@ -217,4 +260,6 @@ volumes:
   wallet_db_data:
   catalog_db_data:
   audit_ledger_db_data:
+  prometheus_data:
+  grafana_data:
 

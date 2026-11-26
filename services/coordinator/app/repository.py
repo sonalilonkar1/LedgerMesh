@@ -12,7 +12,7 @@ from functools import lru_cache
 from typing import Protocol
 from uuid import UUID, uuid4
 
-from ledgermesh_messaging import EventEnvelope
+from ledgermesh_messaging import EventEnvelope, metrics_on_commit, record_transition
 from ledgermesh_messaging.schema import outbox
 from sqlalchemy import Connection, Engine, create_engine, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -182,7 +182,8 @@ class PostgresCoordinatorRepository:
     ) -> RedemptionRecord:
         if connection is not None:
             return self._create(connection, idempotency_key, request)
-        with self.engine.begin() as owned_connection:
+        # Metrics are published only after this transaction commits (LM-034).
+        with metrics_on_commit(), self.engine.begin() as owned_connection:
             return self._create(owned_connection, idempotency_key, request)
 
     def _create(
@@ -227,6 +228,7 @@ class PostgresCoordinatorRepository:
                 reason="redemption created",
             )
         )
+        record_transition(mode=request.coordination_mode, from_state=None, to_state="REQUESTED")
         log_transition(
             transaction_id=transaction_id,
             correlation_id=correlation_id,
@@ -309,8 +311,11 @@ class PostgresCoordinatorRepository:
     def finalize_with_audit(
         self, transaction_id: UUID, terminal_status: str, reason: str
     ) -> tuple[WorkflowRecord, EventEnvelope]:
-        """Persist terminal state and its audit outbox entry atomically."""
-        with self.engine.begin() as connection:
+        """Persist terminal state and its audit outbox entry atomically.
+
+        The outcome metric is published only once both have committed (LM-034).
+        """
+        with metrics_on_commit(), self.engine.begin() as connection:
             updated = self._transition(connection, transaction_id, terminal_status, reason)
             workflow = self._workflow_row(connection, transaction_id)
             envelope = EventEnvelope(
@@ -351,8 +356,9 @@ class PostgresCoordinatorRepository:
         connection: Connection | None = None,
     ) -> RedemptionRecord:
         if connection is not None:
+            # The caller owns the transaction, so it owns metrics_on_commit too.
             return self._transition(connection, transaction_id, to_status, reason)
-        with self.engine.begin() as owned_connection:
+        with metrics_on_commit(), self.engine.begin() as owned_connection:
             return self._transition(owned_connection, transaction_id, to_status, reason)
 
     def _transition(
@@ -405,6 +411,12 @@ class PostgresCoordinatorRepository:
                 workflow_step=next_step,
                 reason=reason,
             )
+        )
+        record_transition(
+            mode=current.coordination_mode,
+            from_state=current.status,
+            to_state=to_status,
+            created_at=current.created_at,
         )
         log_transition(
             transaction_id=transaction_id,

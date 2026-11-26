@@ -1,0 +1,187 @@
+{
+  "uid": "ledgermesh-comparison",
+  "title": "LedgerMesh: 2PC vs Saga",
+  "description": "LM-034. Correctness, availability, latency, blocking, retries, compensations and duplicate rejection, with 2PC and Saga side by side.",
+  "tags": ["ledgermesh", "lm-034"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "5s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    { "id": 100, "type": "row", "title": "Outcomes: 2PC vs Saga", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "panels": [] },
+    {
+      "id": 1, "type": "timeseries", "title": "Redemptions per minute by mode and outcome",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (mode, outcome) (rate(ledgermesh_redemptions_total[1m])) * 60", "legendFormat": "{{mode}} {{outcome}}" }
+      ]
+    },
+    {
+      "id": 2, "type": "stat", "title": "Success ratio by mode (COMMITTED / COMPLETED)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "value_and_name" },
+      "targets": [
+        { "refId": "A", "expr": "sum by (mode) (rate(ledgermesh_redemptions_total{outcome=~\"COMMITTED|COMPLETED\"}[5m])) / sum by (mode) (rate(ledgermesh_redemptions_total[5m]))", "legendFormat": "{{mode}}" }
+      ]
+    },
+    {
+      "id": 3, "type": "stat", "title": "HTTP availability (non-5xx) by service",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "value_and_name" },
+      "targets": [
+        { "refId": "A", "expr": "sum by (service) (rate(ledgermesh_http_request_duration_seconds_count{status!~\"5..\"}[5m])) / sum by (service) (rate(ledgermesh_http_request_duration_seconds_count[5m]))", "legendFormat": "{{service}}" }
+      ]
+    },
+
+    { "id": 101, "type": "row", "title": "Latency: p50, p95 and p99", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 }, "panels": [] },
+    {
+      "id": 4, "type": "timeseries", "title": "2PC redemption latency (request to terminal state)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(ledgermesh_redemption_duration_seconds_bucket{mode=\"two_phase_commit\"}[5m])))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(ledgermesh_redemption_duration_seconds_bucket{mode=\"two_phase_commit\"}[5m])))", "legendFormat": "p95" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le) (rate(ledgermesh_redemption_duration_seconds_bucket{mode=\"two_phase_commit\"}[5m])))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Saga redemption latency (request to terminal state)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(ledgermesh_redemption_duration_seconds_bucket{mode=\"saga\"}[5m])))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(ledgermesh_redemption_duration_seconds_bucket{mode=\"saga\"}[5m])))", "legendFormat": "p95" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le) (rate(ledgermesh_redemption_duration_seconds_bucket{mode=\"saga\"}[5m])))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "HTTP latency p95 by service and route",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 18 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"] } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le, service, route) (rate(ledgermesh_http_request_duration_seconds_bucket[5m])))", "legendFormat": "{{service}} {{route}}" }
+      ]
+    },
+
+    { "id": 102, "type": "row", "title": "Blocking and state flow", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 }, "panels": [] },
+    {
+      "id": 7, "type": "timeseries", "title": "2PC blocking: how long prepared transactions held their locks",
+      "description": "From PREPARE until the commit or abort arrived. Saga holds no locks across steps, so it has no equivalent.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] } },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(ledgermesh_2pc_prepared_hold_seconds_bucket[5m])))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(ledgermesh_2pc_prepared_hold_seconds_bucket[5m])))", "legendFormat": "p95" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le) (rate(ledgermesh_2pc_prepared_hold_seconds_bucket[5m])))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "State transitions per minute by mode and state",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (mode, state) (rate(ledgermesh_transitions_total[1m])) * 60", "legendFormat": "{{mode}} {{state}}" }
+      ]
+    },
+
+    { "id": 103, "type": "row", "title": "Retries, compensations and duplicate rejection", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 }, "panels": [] },
+    {
+      "id": 9, "type": "timeseries", "title": "Retries per minute by consumer and tier",
+      "description": "in_process: retried on the same delivery. retry_topic: republished to <topic>.retry (LM-024). Kafka consumers carry the Saga; 2PC uses HTTP.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 36 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (consumer, tier) (rate(ledgermesh_retries_total[1m])) * 60", "legendFormat": "{{consumer}} {{tier}}" }
+      ]
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Dead letters (last 5 min) by reason",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 36 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (consumer, reason) (increase(ledgermesh_dead_letters_total[5m]))", "legendFormat": "{{consumer}} {{reason}}" }
+      ]
+    },
+    {
+      "id": 11, "type": "timeseries", "title": "Saga compensations per minute",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 36 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (attempt) (rate(ledgermesh_compensations_total{mode=\"saga\"}[1m])) * 60", "legendFormat": "{{attempt}}" }
+      ]
+    },
+    {
+      "id": 12, "type": "timeseries", "title": "Duplicates rejected per minute",
+      "description": "Redeliveries the inbox recognised and did not apply again.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 36 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (consumer) (rate(ledgermesh_duplicates_rejected_total[1m])) * 60", "legendFormat": "{{consumer}}" }
+      ]
+    },
+
+    { "id": 104, "type": "row", "title": "Correctness", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 44 }, "panels": [] },
+    {
+      "id": 13, "type": "stat", "title": "Invariant violations (latest check)",
+      "description": "INV-01..INV-06 and leaked prepared transactions, from make metrics-invariants. Any value above 0 is a correctness failure.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 18, "x": 0, "y": 45 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "textMode": "value_and_name" },
+      "targets": [
+        { "refId": "A", "expr": "max by (invariant) (ledgermesh_invariant_violations)", "legendFormat": "{{invariant}}" }
+      ]
+    },
+    {
+      "id": 14, "type": "stat", "title": "Invariant check running",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 45 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [ { "type": "value", "options": { "0": { "text": "FAILING" }, "1": { "text": "OK" } } } ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [
+        { "refId": "A", "expr": "max(ledgermesh_invariant_check_up)", "legendFormat": "check" }
+      ]
+    }
+  ]
+}

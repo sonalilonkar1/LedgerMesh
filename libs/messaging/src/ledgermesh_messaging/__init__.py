@@ -12,6 +12,15 @@ from .logs import (
     log_context,
     log_fault_injected,
 )
+from .metrics import (
+    MetricsMiddleware,
+    metrics_on_commit,
+    record_invariant_violations,
+    record_prepared_hold,
+    record_transition,
+    render_metrics,
+    start_metrics_server,
+)
 from .outbox import OutgoingMessage, enqueue
 from .publisher import BatchResult, OutboxPublisher
 from .retry import (
@@ -83,6 +92,7 @@ __all__ = [
     "Handler",
     "InboxConsumer",
     "KeyBy",
+    "MetricsMiddleware",
     "MissingCausationError",
     "MissingVersionError",
     "MissingWorkflowStepError",
@@ -122,9 +132,15 @@ __all__ = [
     "log_fault_injected",
     "matching_workflow_step",
     "metadata",
+    "metrics_on_commit",
     "outbox",
     "process_once",
+    "record_invariant_violations",
+    "record_prepared_hold",
+    "record_transition",
+    "render_metrics",
     "require_causation",
     "retry_topic",
+    "start_metrics_server",
     "workflow_steps",
 ]

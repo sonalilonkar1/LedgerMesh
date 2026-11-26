@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID
 
+from ledgermesh_messaging import record_prepared_hold
 from psycopg import connect, sql
 from psycopg.errors import UniqueViolation
 from sqlalchemy import Engine, insert, select, text, update
@@ -132,6 +133,9 @@ class PostgresWalletParticipantRepository:
 
             if self._prepared_exists(transaction_id):
                 self._finish_prepared(transaction_id, commit=True)
+                record_prepared_hold(
+                    service="wallet", decision="commit", prepared_at=current.updated_at
+                )
             elif not self._effect_exists(transaction_id):
                 raise ParticipantConflict(
                     "No durable prepared Wallet transaction exists to commit.", transaction_id
@@ -159,6 +163,9 @@ class PostgresWalletParticipantRepository:
                 )
             if self._prepared_exists(transaction_id):
                 self._finish_prepared(transaction_id, commit=False)
+                record_prepared_hold(
+                    service="wallet", decision="abort", prepared_at=current.updated_at
+                )
             return self._set_state(transaction_id, "ABORTED")
 
     def get(self, transaction_id: UUID) -> ParticipantRecord:

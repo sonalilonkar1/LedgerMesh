@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .envelope import EnvelopeError, EventEnvelope
 from .inbox import Handler, ProcessResult, process_once
 from .logs import envelope_fields, log_context
+from .metrics import DUPLICATES, HANDLING_SECONDS, RETRIES, metrics_on_commit
 from .retry import DeadLetterReason, FailureRouter, not_before
 
 logger = logging.getLogger(__name__)
@@ -85,10 +86,22 @@ class InboxConsumer:
 
     async def _process(self, envelope: EventEnvelope) -> ProcessResult:
         work = process_once(self._session_factory, self._name, envelope, self._handler)
-        if self._timeout is None:
-            return await work
-        # A timeout cancels the attempt, which rolls its transaction back.
-        return await asyncio.wait_for(work, timeout=self._timeout)
+        started = time.perf_counter()
+        try:
+            # process_once commits before it returns, so metrics recorded by the
+            # handler are published only for an attempt that committed; a failed
+            # or timed-out attempt (rolled back, then retried) publishes nothing.
+            with metrics_on_commit():
+                if self._timeout is None:
+                    result = await work
+                else:
+                    # A timeout cancels the attempt, which rolls its transaction back.
+                    result = await asyncio.wait_for(work, timeout=self._timeout)
+        finally:
+            HANDLING_SECONDS.labels(consumer=self._name).observe(time.perf_counter() - started)
+        if result.duplicate:
+            DUPLICATES.labels(consumer=self._name).inc()
+        return result
 
     async def _reject(
         self, record: ConsumerRecord, exc: Exception, reason: DeadLetterReason
@@ -130,6 +143,7 @@ class InboxConsumer:
                 if attempt == self._max_attempts:
                     await self._give_up(record, exc)
                     return None
+                RETRIES.labels(consumer=self._name, tier="in_process").inc()
                 logger.warning(
                     "retrying event %s (attempt %d/%d): %r",
                     envelope.event_id,

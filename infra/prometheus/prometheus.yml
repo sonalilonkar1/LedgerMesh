@@ -1,0 +1,37 @@
+# Prometheus for the local LedgerMesh stack (LM-034).
+#
+# The four HTTP services run in Compose and are scraped by name. The Kafka
+# workers and the invariant exporter run on the host (make run-*-saga,
+# make metrics-invariants) and are scraped through host.docker.internal; a
+# target that isn't running just shows as down.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: services
+    static_configs:
+      - targets: ["coordinator:8000"]
+        labels: { service: coordinator }
+      - targets: ["wallet:8001"]
+        labels: { service: wallet }
+      - targets: ["catalog:8002"]
+        labels: { service: catalog }
+      - targets: ["audit-ledger:8003"]
+        labels: { service: audit-ledger }
+
+  - job_name: workers
+    static_configs:
+      - targets: ["host.docker.internal:9100"]
+        labels: { service: coordinator }
+      - targets: ["host.docker.internal:9101"]
+        labels: { service: wallet }
+      - targets: ["host.docker.internal:9102"]
+        labels: { service: catalog }
+      - targets: ["host.docker.internal:9103"]
+        labels: { service: audit-ledger }
+
+  - job_name: invariants
+    static_configs:
+      - targets: ["host.docker.internal:9104"]

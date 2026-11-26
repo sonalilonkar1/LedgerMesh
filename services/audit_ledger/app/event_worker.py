@@ -23,6 +23,7 @@ from ledgermesh_messaging import (
     create_producer,
     create_retry_consumer,
     in_version_order,
+    start_metrics_server,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -109,6 +110,7 @@ async def run(stop: asyncio.Event) -> None:
 
 def main() -> None:
     configure_logging("audit-ledger")
+    start_metrics_server(9103)  # LM-034; LEDGERMESH_METRICS_PORT overrides, 0 disables
 
     async def serve() -> None:
         stop = asyncio.Event()
