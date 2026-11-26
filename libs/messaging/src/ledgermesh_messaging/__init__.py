@@ -5,6 +5,7 @@ from .inbox import Handler, ProcessResult, process_once
 from .kafka import create_consumer, create_producer
 from .metrics import (
     MetricsMiddleware,
+    metrics_on_commit,
     record_invariant_violations,
     record_prepared_hold,
     record_transition,
@@ -115,6 +116,7 @@ __all__ = [
     "is_root",
     "matching_workflow_step",
     "metadata",
+    "metrics_on_commit",
     "outbox",
     "process_once",
     "record_invariant_violations",

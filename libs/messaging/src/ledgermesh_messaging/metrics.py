@@ -27,7 +27,9 @@ import logging
 import os
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from prometheus_client import (
@@ -113,6 +115,54 @@ INVARIANT_VIOLATIONS = Gauge(
 METRICS_PORT_ENV = "LEDGERMESH_METRICS_PORT"
 
 
+# --- Publishing only what committed ------------------------------------------
+#
+# A transition is written inside a database transaction that may still roll
+# back (a later statement fails, the handler raises, the inbox insert loses a
+# race) and be retried. Counting it immediately would count transitions that
+# never became durable, and count retries twice. So inside ``metrics_on_commit``
+# the recordings are only collected, and published when the block exits
+# normally, which every caller arranges to be after its transaction commits.
+# On an exception they are discarded.
+
+_PENDING: ContextVar[list[Callable[[], None]] | None] = ContextVar(
+    "ledgermesh_pending_metrics", default=None
+)
+
+
+@contextmanager
+def metrics_on_commit() -> Iterator[None]:
+    """Publish metrics recorded inside the block only if it completes normally.
+
+    Wrap the code that owns a database transaction, so that the block ends
+    after the commit: ``with metrics_on_commit(), engine.begin() as c: ...``.
+    Nested blocks hand their metrics to the outermost one, so nothing is
+    published before the outermost transaction has committed.
+    """
+    outer = _PENDING.get()
+    pending: list[Callable[[], None]] = []
+    token = _PENDING.set(pending)
+    try:
+        yield
+    except BaseException:
+        _PENDING.reset(token)
+        raise
+    _PENDING.reset(token)
+    if outer is not None:
+        outer.extend(pending)
+        return
+    for publish in pending:
+        publish()
+
+
+def _publish_or_defer(publish: Callable[[], None]) -> None:
+    pending = _PENDING.get()
+    if pending is None:
+        publish()  # no transaction is being tracked: the caller has committed
+    else:
+        pending.append(publish)
+
+
 # --- Recording helpers -------------------------------------------------------
 
 
@@ -127,18 +177,25 @@ def record_transition(
     """Count one Coordinator state change; on a terminal state, record the outcome.
 
     ``created_at`` is the redemption's creation time (a datetime or epoch
-    seconds), used for the end-to-end duration.
+    seconds), used for the end-to-end duration. Inside ``metrics_on_commit``
+    nothing is published until the enclosing transaction has committed.
     """
-    TRANSITIONS.labels(mode=mode, state=to_state).inc()
-    if to_state == "COMPENSATING":
-        attempt = "retry" if from_state == "COMPENSATING" else "first"
-        COMPENSATIONS.labels(mode=mode, attempt=attempt).inc()
-    if to_state in TERMINAL_STATES:
-        REDEMPTIONS.labels(mode=mode, outcome=to_state).inc()
-        if created_at is not None:
-            started = created_at.timestamp() if hasattr(created_at, "timestamp") else created_at
-            elapsed = (time.time() if now is None else now) - float(started)
-            REDEMPTION_SECONDS.labels(mode=mode, outcome=to_state).observe(max(elapsed, 0.0))
+    elapsed: float | None = None
+    if to_state in TERMINAL_STATES and created_at is not None:
+        started = created_at.timestamp() if hasattr(created_at, "timestamp") else created_at
+        elapsed = max((time.time() if now is None else now) - float(started), 0.0)
+
+    def publish() -> None:
+        TRANSITIONS.labels(mode=mode, state=to_state).inc()
+        if to_state == "COMPENSATING":
+            attempt = "retry" if from_state == "COMPENSATING" else "first"
+            COMPENSATIONS.labels(mode=mode, attempt=attempt).inc()
+        if to_state in TERMINAL_STATES:
+            REDEMPTIONS.labels(mode=mode, outcome=to_state).inc()
+            if elapsed is not None:
+                REDEMPTION_SECONDS.labels(mode=mode, outcome=to_state).observe(elapsed)
+
+    _publish_or_defer(publish)
 
 
 def record_prepared_hold(

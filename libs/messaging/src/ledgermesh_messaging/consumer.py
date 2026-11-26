@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .envelope import EnvelopeError, EventEnvelope
 from .inbox import Handler, ProcessResult, process_once
-from .metrics import DUPLICATES, HANDLING_SECONDS, RETRIES
+from .metrics import DUPLICATES, HANDLING_SECONDS, RETRIES, metrics_on_commit
 from .retry import DeadLetterReason, FailureRouter, not_before
 
 logger = logging.getLogger(__name__)
@@ -87,11 +87,15 @@ class InboxConsumer:
         work = process_once(self._session_factory, self._name, envelope, self._handler)
         started = time.perf_counter()
         try:
-            if self._timeout is None:
-                result = await work
-            else:
-                # A timeout cancels the attempt, which rolls its transaction back.
-                result = await asyncio.wait_for(work, timeout=self._timeout)
+            # process_once commits before it returns, so metrics recorded by the
+            # handler are published only for an attempt that committed; a failed
+            # or timed-out attempt (rolled back, then retried) publishes nothing.
+            with metrics_on_commit():
+                if self._timeout is None:
+                    result = await work
+                else:
+                    # A timeout cancels the attempt, which rolls its transaction back.
+                    result = await asyncio.wait_for(work, timeout=self._timeout)
         finally:
             HANDLING_SECONDS.labels(consumer=self._name).observe(time.perf_counter() - started)
         if result.duplicate:
