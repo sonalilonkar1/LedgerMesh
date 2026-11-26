@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -234,15 +233,18 @@ def start_metrics_server(default_port: int) -> int | None:
     return port
 
 
+UNMATCHED_ROUTE = "unmatched"
+"""``route`` label for requests that match no route template."""
+
+
 class MetricsMiddleware:
     """ASGI middleware recording ``ledgermesh_http_request_duration_seconds``.
 
-    The ``route`` label is the matched route template when the framework
-    provides one (``/v1/transactions/{transaction_id}/prepare``); otherwise ids
-    in the path are replaced by ``{id}``, so the label stays low-cardinality.
+    The ``route`` label is the matched route template
+    (``/v1/transactions/{transaction_id}/prepare``). A request that matches no
+    route (a 404, a scanner probing random paths) is labelled ``unmatched``:
+    the raw path is never used, so arbitrary URLs can't grow the label set.
     """
-
-    _ID = re.compile(r"/(?:[0-9a-fA-F-]{36}|\d+)(?=/|$)")
 
     def __init__(self, app: Any, *, service: str) -> None:
         self.app = app
@@ -274,4 +276,4 @@ class MetricsMiddleware:
         route = scope.get("route")
         if template := getattr(route, "path", None):
             return template
-        return self._ID.sub("/{id}", scope.get("path", ""))
+        return UNMATCHED_ROUTE
