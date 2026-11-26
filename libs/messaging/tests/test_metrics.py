@@ -16,6 +16,7 @@ from ledgermesh_messaging import (
     PermanentError,
     RetryPolicy,
     TransientError,
+    metrics_on_commit,
     record_invariant_violations,
     record_prepared_hold,
     record_transition,
@@ -26,6 +27,73 @@ from ledgermesh_messaging import (
 
 def value(name: str, **labels) -> float:
     return REGISTRY.get_sample_value(name, labels) or 0.0
+
+
+# --- Only committed transitions are counted ---------------------------------
+
+
+def transitions(state: str, mode: str = "saga") -> float:
+    return value("ledgermesh_transitions_total", mode=mode, state=state)
+
+
+def test_metrics_inside_a_completed_block_are_published_when_it_ends():
+    before = transitions("POINTS_DEDUCTED")
+
+    with metrics_on_commit():
+        record_transition(mode="saga", from_state="DEDUCTING_POINTS", to_state="POINTS_DEDUCTED")
+        assert transitions("POINTS_DEDUCTED") == before  # not yet: still uncommitted
+
+    assert transitions("POINTS_DEDUCTED") == before + 1
+
+
+def test_metrics_inside_a_failed_block_are_discarded():
+    labels = {"mode": "saga", "outcome": "COMPENSATED"}
+    outcomes = value("ledgermesh_redemptions_total", **labels)
+    compensated = transitions("COMPENSATED")
+
+    with pytest.raises(RuntimeError), metrics_on_commit():
+        record_transition(mode="saga", from_state="COMPENSATING", to_state="COMPENSATED")
+        raise RuntimeError("a later statement failed; the transaction rolls back")
+
+    assert transitions("COMPENSATED") == compensated
+    assert value("ledgermesh_redemptions_total", **labels) == outcomes
+
+
+def test_a_retry_after_a_rollback_is_counted_once():
+    before = transitions("RESERVING_INVENTORY")
+
+    for attempt in (1, 2):
+        try:
+            with metrics_on_commit():
+                record_transition(
+                    mode="saga", from_state="POINTS_DEDUCTED", to_state="RESERVING_INVENTORY"
+                )
+                if attempt == 1:
+                    raise TransientError("rolled back, will retry")
+        except TransientError:
+            continue
+
+    assert transitions("RESERVING_INVENTORY") == before + 1
+
+
+def test_nested_blocks_publish_only_when_the_outermost_one_completes():
+    before = transitions("FAILED")
+
+    with pytest.raises(RuntimeError), metrics_on_commit():
+        with metrics_on_commit():
+            record_transition(mode="saga", from_state="REQUESTED", to_state="FAILED")
+        assert transitions("FAILED") == before  # the inner block ended, the outer did not
+        raise RuntimeError("the outer transaction rolls back")
+
+    assert transitions("FAILED") == before
+
+
+def test_outside_any_block_metrics_publish_immediately():
+    before = transitions("PREPARING", mode="two_phase_commit")
+
+    record_transition(mode="two_phase_commit", from_state="REQUESTED", to_state="PREPARING")
+
+    assert transitions("PREPARING", mode="two_phase_commit") == before + 1
 
 
 # --- Coordinator outcomes, latency and compensations -----------------------

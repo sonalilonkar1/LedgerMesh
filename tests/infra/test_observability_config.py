@@ -145,3 +145,13 @@ def test_invariant_violations_are_classified_with_every_invariant_present():
     assert counts["INV-05"] == 2
     assert counts["prepared_leak"] == 1
     assert counts["INV-02"] == 0
+
+
+def test_in_flight_redemptions_are_not_reported_as_live_violations():
+    # INV-07 is a post-test check: every in-flight redemption would trip it.
+    counts = classify(
+        ["INV-07: 3 redemptions remain non-terminal after the test: saga DEDUCTING_POINTS=3"]
+    )
+
+    assert "INV-07" not in counts
+    assert sum(counts.values()) == 0
