@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
+from ledgermesh_messaging import CorrelationMiddleware, configure_logging
 
 from services.wallet.app.errors import WalletError
 from services.wallet.app.models import (
@@ -21,8 +22,10 @@ from services.wallet.app.repository import PostgresWalletRepository, get_engine
 from services.wallet.app.service import WalletService
 
 SERVICE_NAME = "wallet"
+configure_logging(SERVICE_NAME)  # LM-032: JSON logs with shared field names
 
 app = FastAPI(title="LedgerMesh Wallet Service", version="0.1.0")
+app.add_middleware(CorrelationMiddleware)
 
 
 @lru_cache

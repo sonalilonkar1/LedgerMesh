@@ -45,7 +45,7 @@ EXPECTED_TABLES = {
         "inbox",
         "outbox",
     },
-    "audit_ledger": {"audit_events", "inbox"},
+    "audit_ledger": {"audit_events", "inbox", "aggregate_versions"},
 }
 
 

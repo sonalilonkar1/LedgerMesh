@@ -18,9 +18,11 @@ from ledgermesh_messaging import (
     InboxConsumer,
     PermanentError,
     RetryPolicy,
+    configure_logging,
     create_consumer,
     create_producer,
     create_retry_consumer,
+    in_version_order,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -28,6 +30,7 @@ from services.audit_ledger.app.repository import PostgresAuditRepository, databa
 
 logger = logging.getLogger(__name__)
 CONSUMER_GROUP = REDEMPTION_EVENTS.consumer_group
+SUPPORTED_EVENT_TYPES = {"coordinator.transitioned", "redemption.committed", "redemption.aborted"}
 
 
 class AuditEventHandler:
@@ -35,12 +38,39 @@ class AuditEventHandler:
         self.repository = repository
 
     async def __call__(self, session: AsyncSession, envelope):
-        if envelope.event_type != "coordinator.transitioned":
+        if envelope.event_type not in SUPPORTED_EVENT_TYPES:
             raise PermanentError(f"unsupported audit event {envelope.event_type}")
         await session.run_sync(
             lambda sync: self.repository.append(envelope, connection=sync.connection())
         )
+        # The event's ids are already bound by InboxConsumer (LM-032).
+        logger.info(
+            "audit event recorded",
+            extra={"state": envelope.payload.get("to_status")},
+        )
         return []
+
+
+def ordered_audit_handler(repository: PostgresAuditRepository):
+    """Order Saga transition events; 2PC publishes only one terminal outcome."""
+    append = AuditEventHandler(repository)
+    ordered_saga = in_version_order(
+        append,
+        consumer=CONSUMER_GROUP,
+        first_version=0,
+        root_step=0,
+    )
+
+    async def handle(session, envelope):
+        # Saga publishes every transition (including the version-zero root),
+        # so gaps must be deferred. 2PC currently publishes only its terminal
+        # outcome; requiring intermediate versions that it never emits would
+        # strand every 2PC audit event on the retry topic.
+        if envelope.payload.get("coordination_mode") == "two_phase_commit":
+            return await append(session, envelope)
+        return await ordered_saga(session, envelope)
+
+    return handle
 
 
 def bootstrap_servers() -> str:
@@ -61,7 +91,7 @@ async def run(stop: asyncio.Event) -> None:
             await client.start()
 
         router = FailureRouter(producer, consumer=CONSUMER_GROUP, policy=policy)
-        handler = AuditEventHandler(PostgresAuditRepository(get_engine()))
+        handler = ordered_audit_handler(PostgresAuditRepository(get_engine()))
         # Both consumers share the inbox name, so a retried event is still a duplicate.
         inbox, retries = (
             InboxConsumer(source, sessions, name=CONSUMER_GROUP, handler=handler, router=router)
@@ -78,7 +108,7 @@ async def run(stop: asyncio.Event) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging("audit-ledger")
 
     async def serve() -> None:
         stop = asyncio.Event()

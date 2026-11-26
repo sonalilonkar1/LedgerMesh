@@ -16,9 +16,14 @@ from sqlalchemy.exc import OperationalError
 
 from infra.scripts.prepared_transactions import cleanup_prepared
 from tests.db.conftest import upgrade
+from tests.integration.invariants import check_project_invariants
 
 SERVICES = ("coordinator", "wallet", "catalog", "audit_ledger")
-REPORT: dict[str, object] = {"scenarios": [], "invariant_violations": []}
+REPORT: dict[str, object] = {
+    "scenarios": [],
+    "invariant_violations": [],
+    "invariant_checks": [],
+}
 SERVER_URL = os.environ.get(
     "LM_TEST_POSTGRES_URL",
     "postgresql+psycopg://wallet:ledgermesh_dev@localhost:54322/wallet",
@@ -36,9 +41,27 @@ def lm017_report() -> dict[str, object]:
     return REPORT
 
 
+@pytest.fixture(autouse=True)
+def verify_invariants_after_integration_test(request, service_databases):
+    """Automatically check each integration test's final cross-service state."""
+    yield
+    if request.node.get_closest_marker("invariant_checker"):
+        return
+
+    report = check_project_invariants(service_databases.engines)
+    REPORT["invariant_checks"].append(
+        {
+            "test": request.node.nodeid,
+            "count": report.count,
+            "details": list(report.violations),
+        }
+    )
+    assert report.count == 0, "\n".join(report.violations)
+
+
 def pytest_sessionfinish(session, exitstatus) -> None:
     del session, exitstatus
-    if not REPORT["scenarios"]:
+    if not REPORT["scenarios"] and not REPORT["invariant_checks"]:
         return
     path = Path(os.environ.get("LM017_REPORT_PATH", "artifacts/2pc-integration.json"))
     path.parent.mkdir(parents=True, exist_ok=True)

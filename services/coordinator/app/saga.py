@@ -27,6 +27,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from services.coordinator.app.db.schema import redemption_transitions, redemptions
+from services.coordinator.app.repository import log_transition
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +144,11 @@ class CoordinatorSagaMachine:
             row, None, "REQUESTED", "redemption created", causation_id=None
         )
         started_audit = _audit_event(
-            updated, "REQUESTED", "DEDUCTING_POINTS", "wallet deduction requested", None
+            updated,
+            "REQUESTED",
+            "DEDUCTING_POINTS",
+            "wallet deduction requested",
+            command.event_id,
         )
         return [requested_audit, started_audit, WALLET_COMMANDS.message(command)]
 
@@ -453,10 +458,15 @@ class CoordinatorSagaMachine:
         if row.status != "REQUESTED":
             return []
         updated = self._transition(connection, row, "FAILED", reason, command_id=None)
-        return [
-            _audit_event(row, None, "REQUESTED", "redemption created", causation_id=None),
-            _audit_event(updated, "REQUESTED", "FAILED", reason, causation_id=None),
-        ]
+        requested = _audit_event(row, None, "REQUESTED", "redemption created", causation_id=None)
+        failed = _audit_event(
+            updated,
+            "REQUESTED",
+            "FAILED",
+            reason,
+            causation_id=requested.envelope.event_id,
+        )
+        return [requested, failed]
 
     @staticmethod
     def _locked(connection: Connection, transaction_id: UUID):
@@ -508,6 +518,15 @@ class CoordinatorSagaMachine:
                 workflow_step=updated.workflow_step,
                 reason=reason,
             )
+        )
+        log_transition(
+            transaction_id=row.transaction_id,
+            correlation_id=row.correlation_id,
+            coordination_mode=row.coordination_mode,
+            from_status=row.status,
+            to_status=to_status,
+            workflow_step=updated.workflow_step,
+            reason=reason,
         )
         return updated
 

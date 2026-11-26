@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .envelope import EnvelopeError, EventEnvelope
 from .inbox import Handler, ProcessResult, process_once
+from .logs import envelope_fields, log_context
 from .retry import DeadLetterReason, FailureRouter, not_before
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,14 @@ class InboxConsumer:
             await self._reject(record, exc, DeadLetterReason.INVALID_ENVELOPE)
             return None
 
+        # Every log while handling this message (handler, retries, dead
+        # letters) carries its transaction, event and correlation ids (LM-032).
+        with log_context(**envelope_fields(envelope)):
+            return await self._handle_envelope(record, envelope)
+
+    async def _handle_envelope(
+        self, record: ConsumerRecord, envelope: EventEnvelope
+    ) -> ProcessResult | None:
         for attempt in range(1, self._max_attempts + 1):
             try:
                 return await self._process(envelope)
