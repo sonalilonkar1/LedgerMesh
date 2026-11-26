@@ -23,6 +23,7 @@ class CatalogParticipantService:
                 request.quantity,
                 request.expected_reward_version,
                 request.expected_point_cost,
+                request.fencing_token,
             )
         )
 

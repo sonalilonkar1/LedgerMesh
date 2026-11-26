@@ -18,8 +18,12 @@ class CoordinatorService:
     def __init__(self, repository: CoordinatorRepository) -> None:
         self.repository = repository
 
-    def create(self, idempotency_key: str, request: CreateRedemptionRequest) -> RedemptionResponse:
-        return self._response(self.repository.create(idempotency_key, request))
+    def create(
+        self, idempotency_key: str, request: CreateRedemptionRequest, *, fencing_token: int = 0
+    ) -> RedemptionResponse:
+        return self._response(
+            self.repository.create(idempotency_key, request, fencing_token=fencing_token)
+        )
 
     def get(self, transaction_id: UUID) -> RedemptionResponse:
         return self._response(self.repository.get(transaction_id))

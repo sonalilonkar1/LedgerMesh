@@ -72,16 +72,20 @@ def get_coordinator_leadership() -> EtcdLeadership:
 CoordinatorLeadershipDependency = Annotated[EtcdLeadership, Depends(get_coordinator_leadership)]
 
 
-def require_leadership(leadership: CoordinatorLeadershipDependency) -> None:
-    if leadership_enabled() and not leadership.is_leader:
+def require_leadership(leadership: CoordinatorLeadershipDependency) -> int:
+    if not leadership_enabled():
+        return 0
+    token = leadership.fencing_token
+    if not leadership.is_leader or token is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Coordinator is not the active leader; retry the request.",
             headers={"Retry-After": "2"},
         )
+    return token
 
 
-LeadershipGuard = Annotated[None, Depends(require_leadership)]
+LeadershipGuard = Annotated[int, Depends(require_leadership)]
 
 
 @lru_cache
@@ -153,9 +157,9 @@ def create_redemption(
     request: CreateRedemptionRequest,
     idempotency_key: IdempotencyKey,
     service: CoordinatorServiceDependency,
-    _leader: LeadershipGuard,
+    fencing_token: LeadershipGuard,
 ) -> RedemptionResponse:
-    return service.create(idempotency_key, request)
+    return service.create(idempotency_key, request, fencing_token=fencing_token)
 
 
 @app.get(

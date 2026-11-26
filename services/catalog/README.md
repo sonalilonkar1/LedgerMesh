@@ -122,7 +122,7 @@ Example:
 transaction_id="33333333-3333-4333-8333-333333333333"
 curl -X POST "http://localhost:8002/v1/transactions/$transaction_id/prepare" \
   -H 'Content-Type: application/json' \
-  -d '{"correlation_id":"44444444-4444-4444-8444-444444444444","reward_id":"reward-coffee","quantity":1,"expected_reward_version":0,"expected_point_cost":100}'
+  -d '{"correlation_id":"44444444-4444-4444-8444-444444444444","reward_id":"reward-coffee","quantity":1,"expected_reward_version":0,"expected_point_cost":100,"fencing_token":0}'
 
 curl -X POST "http://localhost:8002/v1/transactions/$transaction_id/commit"
 curl "http://localhost:8002/v1/transactions/$transaction_id"
@@ -138,3 +138,6 @@ make db-prepared-list
 
 The 2PC and Saga paths reuse the same core Catalog operations while keeping
 their coordination and idempotency records separate.
+The Catalog also persists a fencing high-water mark shared by both modes;
+older tokens are rejected and recorded in `fencing_rejections`. See
+[`docs/fencing.md`](../../docs/fencing.md).

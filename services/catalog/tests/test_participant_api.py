@@ -25,6 +25,7 @@ class FakeParticipantRepository:
         quantity,
         expected_reward_version,
         expected_point_cost,
+        fencing_token,
     ):
         request = (
             correlation_id,
@@ -32,6 +33,7 @@ class FakeParticipantRepository:
             quantity,
             expected_reward_version,
             expected_point_cost,
+            fencing_token,
         )
         if transaction_id in self.records:
             if transaction_id in self.requests and self.requests[transaction_id] != request:
@@ -82,7 +84,18 @@ def payload(*, correlation_id=None, quantity=1, version=0, cost=100):
         "quantity": quantity,
         "expected_reward_version": version,
         "expected_point_cost": cost,
+        "fencing_token": 0,
     }
+
+
+def test_legacy_prepare_request_without_fencing_token_defaults_to_zero():
+    client, _ = client_and_repository()
+    request = payload()
+    request.pop("fencing_token")
+
+    response = client.post(f"/v1/transactions/{uuid4()}/prepare", json=request)
+
+    assert response.status_code == 200
 
 
 def test_prepare_status_and_commit_are_idempotent():

@@ -81,6 +81,7 @@ class WorkflowRecord(RedemptionRecord):
     reward_version: int | None = None
     total_points: int | None = None
     workflow_step: int = 0
+    fencing_token: int = 0
 
 
 RECOVERABLE_2PC_STATES = (
@@ -100,6 +101,7 @@ class CoordinatorRepository(Protocol):
         request: CreateRedemptionRequest,
         *,
         connection: Connection | None = None,
+        fencing_token: int = 0,
     ) -> RedemptionRecord: ...
 
     def get(self, transaction_id: UUID) -> RedemptionRecord: ...
@@ -143,14 +145,19 @@ class PostgresCoordinatorRepository:
         request: CreateRedemptionRequest,
         *,
         connection: Connection | None = None,
+        fencing_token: int = 0,
     ) -> RedemptionRecord:
         if connection is not None:
-            return self._create(connection, idempotency_key, request)
+            return self._create(connection, idempotency_key, request, fencing_token)
         with self.engine.begin() as owned_connection:
-            return self._create(owned_connection, idempotency_key, request)
+            return self._create(owned_connection, idempotency_key, request, fencing_token)
 
     def _create(
-        self, connection: Connection, idempotency_key: str, request: CreateRedemptionRequest
+        self,
+        connection: Connection,
+        idempotency_key: str,
+        request: CreateRedemptionRequest,
+        fencing_token: int,
     ) -> RedemptionRecord:
         digest = request_hash(request)
         transaction_id = uuid4()
@@ -167,6 +174,7 @@ class PostgresCoordinatorRepository:
                 quantity=request.quantity,
                 coordination_mode=request.coordination_mode,
                 status="REQUESTED",
+                fencing_token=fencing_token,
             )
             .on_conflict_do_nothing(index_elements=[redemptions.c.idempotency_key])
             .returning(*redemptions.c)
@@ -412,6 +420,7 @@ class PostgresCoordinatorRepository:
             reward_version=row.reward_version,
             total_points=row.total_points,
             workflow_step=row.workflow_step,
+            fencing_token=row.fencing_token if row.fencing_token is not None else 0,
         )
 
     def _workflow_row(self, connection: Connection, transaction_id: UUID) -> WorkflowRecord:

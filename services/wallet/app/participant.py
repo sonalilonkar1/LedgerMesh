@@ -20,7 +20,12 @@ from services.wallet.app.db.schema import (
     participant_transactions,
     wallet_operations,
 )
-from services.wallet.app.errors import ParticipantConflict, ParticipantTransactionNotFound
+from services.wallet.app.errors import (
+    ParticipantConflict,
+    ParticipantTransactionNotFound,
+    StaleFencingToken,
+)
+from services.wallet.app.fencing import accept_fencing_token
 from services.wallet.app.repository import MAX_VERSION_ATTEMPTS
 
 
@@ -33,7 +38,12 @@ class ParticipantRecord:
 
 class WalletParticipantRepository(Protocol):
     def prepare(
-        self, transaction_id: UUID, correlation_id: UUID, user_id: str, points: int
+        self,
+        transaction_id: UUID,
+        correlation_id: UUID,
+        user_id: str,
+        points: int,
+        fencing_token: int = 0,
     ) -> ParticipantRecord: ...
 
     def commit(self, transaction_id: UUID) -> ParticipantRecord: ...
@@ -76,42 +86,88 @@ class PostgresWalletParticipantRepository:
             )
             connection.close()
 
+    @contextmanager
+    def _fencing_lock(self) -> Iterator[None]:
+        """Serialize new Coordinator terms with an in-flight 2PC prepare."""
+        connection = self.engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+        connection.execute(
+            text("SELECT pg_advisory_lock(hashtextextended('ledgermesh:fencing', 0))")
+        )
+        try:
+            yield
+        finally:
+            connection.execute(
+                text("SELECT pg_advisory_unlock(hashtextextended('ledgermesh:fencing', 0))")
+            )
+            connection.close()
+
     def prepare(
-        self, transaction_id: UUID, correlation_id: UUID, user_id: str, points: int
+        self,
+        transaction_id: UUID,
+        correlation_id: UUID,
+        user_id: str,
+        points: int,
+        fencing_token: int = 0,
     ) -> ParticipantRecord:
         expected_hash = request_hash(correlation_id, user_id, points)
-        with self._transaction_lock(transaction_id):
-            existing = self._load(transaction_id)
-            if existing is not None:
-                if existing.request_hash is None:  # An earlier unknown ABORT created a tombstone.
-                    return self._record(existing)
-                if existing.request_hash != expected_hash:
-                    raise ParticipantConflict(
-                        "The transaction ID is already associated with a different "
-                        "prepare request.",
-                        transaction_id,
-                    )
-                if existing.state != "IN_DOUBT":
-                    return self._record(existing)
-                reconciled = self._reconcile_in_doubt(transaction_id)
-                if reconciled is not None:
-                    return reconciled
-            else:
-                self._insert_claim(transaction_id, correlation_id, user_id, points, expected_hash)
+        with self._transaction_lock(transaction_id), self._fencing_lock():
+            return self._prepare_fenced(
+                transaction_id, correlation_id, user_id, points, fencing_token, expected_hash
+            )
 
-            if self._effect_exists(transaction_id):
-                self._set_state(transaction_id, "ABORTED")
+    def _prepare_fenced(
+        self,
+        transaction_id: UUID,
+        correlation_id: UUID,
+        user_id: str,
+        points: int,
+        fencing_token: int,
+        expected_hash: str,
+    ) -> ParticipantRecord:
+        with self.engine.begin() as connection:
+            accepted, highest = accept_fencing_token(
+                connection,
+                fencing_token,
+                transaction_id,
+                "wallet.prepare",
+                "two_phase_commit",
+                acquire_lock=False,
+            )
+        if not accepted:
+            raise StaleFencingToken(
+                f"fencing token {fencing_token} is older than accepted token {highest}",
+                transaction_id,
+            )
+        existing = self._load(transaction_id)
+        if existing is not None:
+            if existing.request_hash is None:  # An earlier unknown ABORT created a tombstone.
+                return self._record(existing)
+            if existing.request_hash != expected_hash:
                 raise ParticipantConflict(
-                    "The transaction ID is already used by a Wallet deduction.", transaction_id
+                    "The transaction ID is already associated with a different prepare request.",
+                    transaction_id,
                 )
-            try:
-                vote = self._prepare_business_transaction(transaction_id, user_id, points)
-            except UniqueViolation as error:
-                self._set_state(transaction_id, "ABORTED")
-                raise ParticipantConflict(
-                    "The transaction ID is already used by a Wallet deduction.", transaction_id
-                ) from error
-            return self._set_state(transaction_id, vote)
+            if existing.state != "IN_DOUBT":
+                return self._record(existing)
+            reconciled = self._reconcile_in_doubt(transaction_id)
+            if reconciled is not None:
+                return reconciled
+        else:
+            self._insert_claim(transaction_id, correlation_id, user_id, points, expected_hash)
+
+        if self._effect_exists(transaction_id):
+            self._set_state(transaction_id, "ABORTED")
+            raise ParticipantConflict(
+                "The transaction ID is already used by a Wallet deduction.", transaction_id
+            )
+        try:
+            vote = self._prepare_business_transaction(transaction_id, user_id, points)
+        except UniqueViolation as error:
+            self._set_state(transaction_id, "ABORTED")
+            raise ParticipantConflict(
+                "The transaction ID is already used by a Wallet deduction.", transaction_id
+            ) from error
+        return self._set_state(transaction_id, vote)
 
     def commit(self, transaction_id: UUID) -> ParticipantRecord:
         with self._transaction_lock(transaction_id):

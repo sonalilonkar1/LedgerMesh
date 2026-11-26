@@ -63,6 +63,7 @@ from services.wallet.app.errors import (
     OperationConflict,
     WalletNotFound,
 )
+from services.wallet.app.fencing import accept_fencing_token
 from services.wallet.app.repository import PostgresWalletRepository
 
 logger = logging.getLogger(__name__)
@@ -151,6 +152,28 @@ class WalletSagaHandler:
         return [WALLET_RESULTS.message(reply)]
 
     def apply(self, connection: Connection, command: WalletCommand) -> EventEnvelope:
+        accepted, highest = accept_fencing_token(
+            connection,
+            command.envelope.fencing_token or 0,
+            command.envelope.transaction_id,
+            command.envelope.event_type,
+            "saga",
+        )
+        if not accepted:
+            logger.warning(
+                "rejecting stale Wallet Saga command",
+                extra={
+                    "transaction_id": str(command.envelope.transaction_id),
+                    "event_id": str(command.envelope.event_id),
+                    "fencing_token": command.envelope.fencing_token,
+                    "highest_fencing_token": highest,
+                },
+            )
+            return self._rejected(
+                command,
+                "stale_fencing_token",
+                f"fencing token is older than the accepted token {highest}",
+            )
         if command.envelope.event_type == DEDUCT_POINTS:
             return self._deduct(connection, command)
         return self._refund(connection, command)

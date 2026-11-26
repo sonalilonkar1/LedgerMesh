@@ -18,6 +18,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     MetaData,
     String,
     Table,
@@ -101,6 +102,34 @@ participant_transactions = Table(
         "AND user_id IS NOT NULL AND points IS NOT NULL)",
         name="ck_participant_transactions_request_identity",
     ),
+)
+
+# High-water mark shared by 2PC and Saga commands. It is committed before a
+# 2PC prepare is issued, independently of the prepared business transaction.
+participant_fencing_state = Table(
+    "participant_fencing_state",
+    metadata,
+    Column("singleton_id", Integer, primary_key=True),
+    Column("highest_token", BigInteger, nullable=False, server_default=text("0")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint("singleton_id = 1", name="ck_wallet_fencing_singleton"),
+    CheckConstraint("highest_token >= 0", name="ck_wallet_fencing_token_non_negative"),
+)
+
+fencing_rejections = Table(
+    "fencing_rejections",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("transaction_id", UUID(as_uuid=True), nullable=False),
+    Column("supplied_token", BigInteger, nullable=False),
+    Column("highest_token", BigInteger, nullable=False),
+    Column("command_type", String(64), nullable=False),
+    Column("coordination_mode", String(32), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint(
+        "supplied_token >= 0", name="ck_wallet_fencing_rejection_supplied_non_negative"
+    ),
+    CheckConstraint("highest_token >= 0", name="ck_wallet_fencing_rejection_highest_non_negative"),
 )
 
 deduction_rejections = Table(

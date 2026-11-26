@@ -25,8 +25,16 @@ class FakeCoordinatorRepository:
         self.redemptions: dict[UUID, RedemptionRecord] = {}
         self.keys: dict[str, tuple[str, UUID]] = {}
         self.transitions: dict[UUID, list[TransitionRecord]] = {}
+        self.fencing_tokens: list[int] = []
 
-    def create(self, idempotency_key: str, request: CreateRedemptionRequest) -> RedemptionRecord:
+    def create(
+        self,
+        idempotency_key: str,
+        request: CreateRedemptionRequest,
+        *,
+        fencing_token: int = 0,
+    ) -> RedemptionRecord:
+        self.fencing_tokens.append(fencing_token)
         digest = request_hash(request)
         existing = self.keys.get(idempotency_key)
         if existing is not None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +25,7 @@ from services.catalog.app.errors import (
     ReservationConflict,
     RewardNotFound,
 )
+from services.catalog.app.fencing import accept_fencing_token
 from services.catalog.app.repository import PostgresCatalogRepository
 
 RESERVE_INVENTORY = "catalog.reserve_inventory"
@@ -33,6 +35,7 @@ RESERVATION_REJECTED = "catalog.reservation_rejected"
 INVENTORY_RELEASED = "catalog.inventory_released"
 RELEASE_REJECTED = "catalog.release_rejected"
 RESERVE_STEP = 3
+logger = logging.getLogger(__name__)
 
 
 class InvalidCommand(PermanentError):
@@ -116,6 +119,29 @@ class CatalogSagaHandler:
         return [CATALOG_RESULTS.message(reply)]
 
     def apply(self, connection: Connection, command: CatalogCommand) -> EventEnvelope:
+        accepted, highest = accept_fencing_token(
+            connection,
+            command.envelope.fencing_token or 0,
+            command.envelope.transaction_id,
+            command.envelope.event_type,
+            "saga",
+        )
+        if not accepted:
+            logger.warning(
+                "rejecting stale Catalog Saga command",
+                extra={
+                    "transaction_id": str(command.envelope.transaction_id),
+                    "event_id": str(command.envelope.event_id),
+                    "fencing_token": command.envelope.fencing_token,
+                    "highest_fencing_token": highest,
+                },
+            )
+            reject = self._reserve_rejected if command.kind == "reserve" else self._release_rejected
+            return reject(
+                command,
+                "stale_fencing_token",
+                f"fencing token is older than the accepted token {highest}",
+            )
         stored = connection.execute(
             select(catalog_saga_outcomes).where(
                 catalog_saga_outcomes.c.transaction_id == command.envelope.transaction_id,

@@ -266,6 +266,10 @@ components:
         points:
           type: integer
           minimum: 1
+        fencing_token:
+          type: integer
+          minimum: 0
+          default: 0
     ParticipantResponse:
       type: object
       additionalProperties: false

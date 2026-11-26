@@ -71,3 +71,8 @@ class ParticipantConflict(WalletError):
     status = 409
     title = "Participant transaction conflict"
     problem_type = "urn:ledgermesh:wallet:participant-conflict"
+
+
+class StaleFencingToken(ParticipantConflict):
+    title = "Stale Coordinator fencing token"
+    problem_type = "urn:ledgermesh:wallet:stale-fencing-token"
