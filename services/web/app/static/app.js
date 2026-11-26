@@ -1,17 +1,12 @@
 // LedgerMesh Rewards (LM-011). Talks only to this app's /api.
 // Every value from the API is written with textContent, never as HTML.
-"use strict";
+import { nextPoll, outcome } from "./polling.js";
 
-// Final states. Anything else is shown as "in progress", so a new state added
-// to the Coordinator later needs no change here.
-const SUCCESS = new Set(["COMMITTED", "COMPLETED"]);
-const FAILURE = new Set(["ABORTED", "FAILED", "COMPENSATED"]);
 const MODES = { two_phase_commit: "Two-Phase Commit", saga: "Saga" };
-const POLL_MS = 1000;
-const POLL_LIMIT = 180; // stop polling after about three minutes
 
 const $ = (id) => document.getElementById(id);
 let pollTimer = null;
+let tracking = null; // { transactionId, startedAt }; replaced when a new redemption starts
 
 async function api(path, options = {}) {
   let response;
@@ -132,10 +127,7 @@ async function redeem(reward, quantity, button) {
 function renderStatus(redemption) {
   const status = $("status");
   status.textContent = redemption.status.replaceAll("_", " ");
-  status.className = "status";
-  if (SUCCESS.has(redemption.status)) status.classList.add("success");
-  else if (FAILURE.has(redemption.status)) status.classList.add("failure");
-  else status.classList.add("pending");
+  status.className = `status ${outcome(redemption.status)}`;
   $("mode-label").textContent = MODES[redemption.coordination_mode] || redemption.coordination_mode;
   $("transaction").textContent = redemption.transaction_id;
 }
@@ -158,29 +150,54 @@ function renderTimeline(timeline) {
   }
 }
 
+function showNotice(message) {
+  $("notice").textContent = message || "";
+  $("notice").hidden = !message;
+}
+
+// Polls until the redemption reaches a final state; it never silently stops.
+// After a few minutes it slows down and says it is still processing.
+async function poll(current) {
+  if (tracking !== current) return; // a newer redemption replaced this one
+  let status = null;
+  let failed = false;
+  try {
+    const { redemption, timeline } = await api(`/api/redemptions/${current.transactionId}`);
+    if (tracking !== current) return;
+    status = redemption.status;
+    renderStatus(redemption);
+    renderTimeline(timeline);
+    clearError();
+  } catch (error) {
+    failed = true;
+    showError(`${error.message} Still trying.`);
+  }
+  const next = nextPoll({ status, elapsedMs: Date.now() - current.startedAt, failed });
+  if (next.action === "stop") {
+    showNotice(null);
+    $("check-now").hidden = true;
+    loadWallet();
+    loadRewards();
+    return;
+  }
+  showNotice(next.notice);
+  $("check-now").hidden = false;
+  pollTimer = setTimeout(() => poll(current), next.delayMs);
+}
+
 function track(transactionId) {
   clearTimeout(pollTimer);
+  tracking = { transactionId, startedAt: Date.now() };
   $("progress").hidden = false;
-  let polls = 0;
-  const poll = async () => {
-    polls += 1;
-    try {
-      const { redemption, timeline } = await api(`/api/redemptions/${transactionId}`);
-      renderStatus(redemption);
-      renderTimeline(timeline);
-      const finished = SUCCESS.has(redemption.status) || FAILURE.has(redemption.status);
-      if (finished) {
-        loadWallet();
-        loadRewards();
-        return;
-      }
-    } catch (error) {
-      showError(error.message);
-    }
-    if (polls < POLL_LIMIT) pollTimer = setTimeout(poll, POLL_MS);
-  };
-  poll();
+  showNotice(null);
+  poll(tracking);
 }
+
+$("check-now").addEventListener("click", () => {
+  if (!tracking) return;
+  clearTimeout(pollTimer);
+  poll(tracking);
+});
 
 $("user").addEventListener("change", () => {
   clearError();

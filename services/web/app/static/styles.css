@@ -69,6 +69,14 @@ button:disabled { opacity: 0.6; cursor: progress; }
 .status.failure { background: #fdecea; color: var(--failure); }
 .status.pending { background: #fff4dc; color: var(--pending); }
 
+.notice {
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #fff4dc;
+  color: var(--pending);
+}
+button.secondary { background: #fff; color: var(--accent); border: 1px solid var(--accent); }
+
 .timeline { padding-left: 20px; }
 .timeline li { margin: 6px 0; }
 .timeline time { color: var(--muted); font-variant-numeric: tabular-nums; }
