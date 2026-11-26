@@ -24,7 +24,7 @@ from services.coordinator.app.two_phase_commit import (
 )
 from services.wallet.app.db.schema import wallet_operations, wallets
 from services.wallet.app.participant import PostgresWalletParticipantRepository
-from tests.integration.invariants import check_2pc_invariants
+from tests.integration.invariants import check_project_invariants
 
 pytestmark = [pytest.mark.database, pytest.mark.integration]
 
@@ -150,7 +150,7 @@ def harness(service_databases) -> Harness:
 
 
 def assert_zero_violations(harness: Harness, lm017_report, scenario: str) -> None:
-    report = check_2pc_invariants(harness.engines)
+    report = check_project_invariants(harness.engines)
     lm017_report["scenarios"].append(scenario)
     lm017_report["invariant_violations"].append(
         {"scenario": scenario, "count": report.count, "details": list(report.violations)}
