@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LedgerMesh Rewards</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>LedgerMesh Rewards</h1>
+      <p class="subtitle">Redeem a reward with Two-Phase Commit or a Saga, and watch it happen.</p>
+    </header>
+
+    <main>
+      <div id="error" class="error" role="alert" hidden></div>
+
+      <section aria-labelledby="account-heading">
+        <h2 id="account-heading">Account</h2>
+        <div class="row">
+          <label for="user">User</label>
+          <select id="user">
+            <option value="user-alice">user-alice</option>
+            <option value="user-bob">user-bob</option>
+            <option value="user-carol">user-carol</option>
+            <option value="user-dave">user-dave</option>
+          </select>
+          <p class="balance">Balance: <strong id="balance">…</strong> points</p>
+        </div>
+      </section>
+
+      <section aria-labelledby="mode-heading">
+        <h2 id="mode-heading">Coordination mode</h2>
+        <fieldset class="modes">
+          <legend class="visually-hidden">Coordination mode</legend>
+          <label>
+            <input type="radio" name="mode" value="two_phase_commit" checked />
+            Two-Phase Commit (2PC)
+          </label>
+          <label>
+            <input type="radio" name="mode" value="saga" />
+            Saga
+          </label>
+        </fieldset>
+        <p class="hint">
+          2PC is driven by the Coordinator. A Saga needs the Saga workers running
+          (<code>make run-coordinator-saga</code>, <code>run-wallet-saga</code>, <code>run-catalog-saga</code>).
+        </p>
+      </section>
+
+      <section aria-labelledby="rewards-heading">
+        <h2 id="rewards-heading">Available rewards</h2>
+        <table>
+          <thead>
+            <tr><th>Reward</th><th>Points</th><th>In stock</th><th>Quantity</th><th></th></tr>
+          </thead>
+          <tbody id="rewards"></tbody>
+        </table>
+      </section>
+
+      <section id="progress" aria-labelledby="progress-heading" hidden>
+        <h2 id="progress-heading">Redemption</h2>
+        <p>
+          <span id="status" class="status">…</span>
+          <span id="mode-label" class="muted"></span>
+        </p>
+        <p class="muted">Transaction <code id="transaction"></code></p>
+        <h3>Timeline</h3>
+        <ol id="timeline" class="timeline"></ol>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
