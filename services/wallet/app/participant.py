@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -22,6 +23,8 @@ from services.wallet.app.db.schema import (
 )
 from services.wallet.app.errors import ParticipantConflict, ParticipantTransactionNotFound
 from services.wallet.app.repository import MAX_VERSION_ATTEMPTS
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -261,6 +264,15 @@ class PostgresWalletParticipantRepository:
                 .values(state=state, updated_at=datetime.now(UTC))
                 .returning(*participant_transactions.c)
             ).one()
+        logger.info(
+            "2PC participant is %s",
+            state,
+            extra={
+                "transaction_id": transaction_id,
+                "correlation_id": row.correlation_id,
+                "state": state,
+            },
+        )
         return self._record(row)
 
     def _prepared_exists(self, transaction_id: UUID) -> bool:

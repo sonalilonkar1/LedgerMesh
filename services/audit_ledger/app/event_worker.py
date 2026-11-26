@@ -18,6 +18,7 @@ from ledgermesh_messaging import (
     InboxConsumer,
     PermanentError,
     RetryPolicy,
+    configure_logging,
     create_consumer,
     create_producer,
     create_retry_consumer,
@@ -41,6 +42,11 @@ class AuditEventHandler:
             raise PermanentError(f"unsupported audit event {envelope.event_type}")
         await session.run_sync(
             lambda sync: self.repository.append(envelope, connection=sync.connection())
+        )
+        # The event's ids are already bound by InboxConsumer (LM-032).
+        logger.info(
+            "audit event recorded",
+            extra={"state": envelope.payload.get("to_status")},
         )
         return []
 
@@ -102,7 +108,7 @@ async def run(stop: asyncio.Event) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging("audit-ledger")
 
     async def serve() -> None:
         stop = asyncio.Event()
