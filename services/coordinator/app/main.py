@@ -5,9 +5,14 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from services.coordinator.app.errors import CoordinatorError
+from services.coordinator.app.leadership import (
+    EtcdLeadership,
+    leadership_enabled,
+    leadership_metrics,
+)
 from services.coordinator.app.models import (
     CreateRedemptionRequest,
     InDoubtTransactionView,
@@ -31,6 +36,10 @@ SERVICE_NAME = "coordinator"
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     worker: RecoveryWorker | None = None
+    leadership: EtcdLeadership | None = None
+    if leadership_enabled():
+        leadership = get_coordinator_leadership()
+        leadership.start()
     if recovery_enabled():
         interval = float(os.environ.get("COORDINATOR_RECOVERY_INTERVAL_SECONDS", "5"))
         worker = RecoveryWorker(get_two_phase_commit_recovery(), interval)
@@ -40,6 +49,8 @@ async def lifespan(_app: FastAPI):
     finally:
         if worker:
             worker.stop()
+        if leadership:
+            leadership.stop()
 
 
 app = FastAPI(title="LedgerMesh Redemption Coordinator", version="0.1.0", lifespan=lifespan)
@@ -51,6 +62,26 @@ def get_coordinator_service() -> CoordinatorService:
 
 
 CoordinatorServiceDependency = Annotated[CoordinatorService, Depends(get_coordinator_service)]
+
+
+@lru_cache
+def get_coordinator_leadership() -> EtcdLeadership:
+    return EtcdLeadership()
+
+
+CoordinatorLeadershipDependency = Annotated[EtcdLeadership, Depends(get_coordinator_leadership)]
+
+
+def require_leadership(leadership: CoordinatorLeadershipDependency) -> None:
+    if leadership_enabled() and not leadership.is_leader:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Coordinator is not the active leader; retry the request.",
+            headers={"Retry-After": "2"},
+        )
+
+
+LeadershipGuard = Annotated[None, Depends(require_leadership)]
 
 
 @lru_cache
@@ -105,6 +136,12 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "service": SERVICE_NAME}
 
 
+@app.get("/metrics", include_in_schema=False)
+async def metrics() -> Response:
+    payload, content_type = leadership_metrics()
+    return Response(content=payload, media_type=content_type)
+
+
 @app.post(
     "/v1/redemptions",
     response_model=RedemptionResponse,
@@ -116,6 +153,7 @@ def create_redemption(
     request: CreateRedemptionRequest,
     idempotency_key: IdempotencyKey,
     service: CoordinatorServiceDependency,
+    _leader: LeadershipGuard,
 ) -> RedemptionResponse:
     return service.create(idempotency_key, request)
 

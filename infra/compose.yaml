@@ -45,6 +45,79 @@ services:
       start_period: 20s
     networks: [backend]
 
+  # Three independent etcd members; quorum is retained if one member fails.
+  etcd-1:
+    image: quay.io/coreos/etcd:v3.5.17
+    restart: unless-stopped
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd-1
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-1:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-1:2380
+      - --initial-cluster=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=ledgermesh-local-etcd
+    ports: ["${ETCD_PORT_1:-23791}:2379"]
+    volumes: [etcd_1_data:/etcd-data]
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks: [backend]
+
+  etcd-2:
+    image: quay.io/coreos/etcd:v3.5.17
+    restart: unless-stopped
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd-2
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-2:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-2:2380
+      - --initial-cluster=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=ledgermesh-local-etcd
+    ports: ["${ETCD_PORT_2:-23792}:2379"]
+    volumes: [etcd_2_data:/etcd-data]
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks: [backend]
+
+  etcd-3:
+    image: quay.io/coreos/etcd:v3.5.17
+    restart: unless-stopped
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd-3
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-3:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-3:2380
+      - --initial-cluster=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      - --initial-cluster-state=new
+      - --initial-cluster-token=ledgermesh-local-etcd
+    ports: ["${ETCD_PORT_3:-23793}:2379"]
+    volumes: [etcd_3_data:/etcd-data]
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks: [backend]
+
   coordinator-db:
     image: postgres:17.11-alpine
     restart: unless-stopped
@@ -129,12 +202,64 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
       COORDINATOR_RECOVERY_ENABLED: "true"
       COORDINATOR_RECOVERY_INTERVAL_SECONDS: "5"
+      COORDINATOR_LEADERSHIP_ENABLED: "true"
+      COORDINATOR_LEADER_TTL_SECONDS: "9"
+      COORDINATOR_LEADER_RENEW_INTERVAL_SECONDS: "2"
+      ETCD_REQUEST_TIMEOUT_SECONDS: "1"
+      ETCD_ENDPOINTS: http://etcd-1:2379,http://etcd-2:2379,http://etcd-3:2379
       WALLET_URL: http://wallet:8001
       CATALOG_URL: http://catalog:8002
     depends_on:
       coordinator-db:
         condition: service_healthy
       kafka:
+        condition: service_healthy
+      etcd-1:
+        condition: service_healthy
+      etcd-2:
+        condition: service_healthy
+      etcd-3:
+        condition: service_healthy
+    healthcheck:
+      <<: *service-healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+    networks: [backend]
+
+  # Optional second instance for demonstrating that only the lease holder
+  # accepts writes. Start with: docker compose --profile leadership-demo up.
+  coordinator-follower:
+    profiles: [leadership-demo]
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.service
+    command: ["sh", "-c", "alembic -c services/coordinator/alembic.ini upgrade head && exec python -m uvicorn services.coordinator.app.main:app --host 0.0.0.0 --port 8000"]
+    init: true
+    ports:
+      - "${COORDINATOR_FOLLOWER_PORT:-8004}:8000"
+    environment:
+      SERVICE_NAME: coordinator
+      LEDGERMESH_ENV: local
+      DATABASE_URL: postgresql+psycopg://coordinator:${POSTGRES_PASSWORD:-ledgermesh_dev}@coordinator-db:5432/coordinator
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      COORDINATOR_RECOVERY_ENABLED: "true"
+      COORDINATOR_RECOVERY_INTERVAL_SECONDS: "5"
+      COORDINATOR_LEADERSHIP_ENABLED: "true"
+      COORDINATOR_LEADER_TTL_SECONDS: "9"
+      COORDINATOR_LEADER_RENEW_INTERVAL_SECONDS: "2"
+      ETCD_REQUEST_TIMEOUT_SECONDS: "1"
+      ETCD_ENDPOINTS: http://etcd-1:2379,http://etcd-2:2379,http://etcd-3:2379
+      WALLET_URL: http://wallet:8001
+      CATALOG_URL: http://catalog:8002
+    depends_on:
+      coordinator-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      etcd-1:
+        condition: service_healthy
+      etcd-2:
+        condition: service_healthy
+      etcd-3:
         condition: service_healthy
     healthcheck:
       <<: *service-healthcheck
@@ -217,4 +342,7 @@ volumes:
   wallet_db_data:
   catalog_db_data:
   audit_ledger_db_data:
+  etcd_1_data:
+  etcd_2_data:
+  etcd_3_data:
 

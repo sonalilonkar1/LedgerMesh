@@ -175,6 +175,14 @@ WALLET_PORT=18001 make infra-smoke
 
 After changing `max_prepared_transactions` or database initialization settings, use `make infra-reset` so PostgreSQL starts with fresh local volumes.
 
+## Coordinator leadership (LM-038)
+
+Compose includes three etcd members with separate persistent volumes. Verify
+quorum and the three-member membership with `make etcd-smoke`. The Coordinator
+uses a renewable lease and verifies ownership with a linearizable etcd read
+before accepting each new redemption. See [`docs/leadership.md`](../docs/leadership.md)
+for failure testing, metrics, configuration, and the local-only security boundary.
+
 ## Two-machine verification
 
 Each tester should record the following in the LM-003 pull request:
