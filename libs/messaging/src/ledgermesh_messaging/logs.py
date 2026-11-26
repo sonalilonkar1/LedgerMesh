@@ -129,12 +129,20 @@ _NOT_SENSITIVE = frozenset({"fencing_token"})
 
 
 def _redact(key: str, value: Any) -> Any:
+    """Sanitize one field, recursing through mappings, lists, tuples and sets.
+
+    A secret-like key hides its whole value. Items of a sequence inherit the
+    sequence's key, so ``{"tokens": ["a", "b"]}`` is redacted as a whole and
+    ``{"headers": [{"authorization": "..."}]}`` is redacted inside each item.
+    """
     if key not in _NOT_SENSITIVE and _SENSITIVE_KEY.search(key):
         return REDACTED
     if isinstance(value, str):
         return mask_credentials(value)
     if isinstance(value, Mapping):
         return {str(k): _redact(str(k), v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_redact(key, item) for item in value]
     return _clean(value)
 
 
