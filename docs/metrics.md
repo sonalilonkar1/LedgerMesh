@@ -35,7 +35,7 @@ All names and labels are declared once, in `ledgermesh_messaging/metrics.py`.
 | `ledgermesh_dead_letters_total` | `consumer`, `reason` | `invalid_envelope`, `permanent_error`, `retries_exhausted` |
 | `ledgermesh_duplicates_rejected_total` | `consumer` | redeliveries the inbox recognised and did not apply again |
 | `ledgermesh_message_handling_seconds` | `consumer` | time per message-handling attempt |
-| `ledgermesh_http_request_duration_seconds` | `service`, `method`, `route`, `status` | HTTP latency; `route` is the route template, so ids don't explode the label set |
+| `ledgermesh_http_request_duration_seconds` | `service`, `method`, `route`, `status` | HTTP latency; `route` is the matched route template, or `unmatched` for any path with no route (404s, probes), so arbitrary URLs never become label values |
 | `ledgermesh_invariant_violations` | `invariant` | `INV-01`…`INV-06`, `prepared_leak`; 0 when clean |
 | `ledgermesh_invariant_check_up` | | 1 if the last invariant check ran |
 
