@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "Marks services/web JavaScript as ES modules so node --test can import app/static/polling.js (LM-011). No dependencies, no build step."
+}
