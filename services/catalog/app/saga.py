@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,6 +26,8 @@ from services.catalog.app.errors import (
     RewardNotFound,
 )
 from services.catalog.app.repository import PostgresCatalogRepository
+
+logger = logging.getLogger(__name__)
 
 RESERVE_INVENTORY = "catalog.reserve_inventory"
 RELEASE_INVENTORY = "catalog.release_inventory"
@@ -113,6 +116,16 @@ class CatalogSagaHandler:
     ) -> list[OutgoingMessage]:
         command = parse_command(envelope)
         reply = await session.run_sync(lambda sync: self.apply(sync.connection(), command))
+        # The command's ids are already bound by InboxConsumer (LM-032).
+        logger.info(
+            "%s answered with %s",
+            envelope.event_type,
+            reply.event_type,
+            extra={
+                "state": reply.payload.get("outcome") or reply.payload.get("reason"),
+                "result_event_id": reply.event_id,
+            },
+        )
         return [CATALOG_RESULTS.message(reply)]
 
     def apply(self, connection: Connection, command: CatalogCommand) -> EventEnvelope:

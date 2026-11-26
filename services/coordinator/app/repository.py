@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,6 +24,41 @@ from services.coordinator.app.errors import (
     RedemptionNotFound,
 )
 from services.coordinator.app.models import CreateRedemptionRequest
+
+logger = logging.getLogger(__name__)
+
+
+def log_transition(
+    *,
+    transaction_id: UUID,
+    correlation_id: UUID,
+    coordination_mode: str,
+    from_status: str | None,
+    to_status: str,
+    workflow_step: int,
+    reason: str | None,
+) -> None:
+    """One structured line per Coordinator state change (LM-032).
+
+    Shared by the 2PC repository and the Saga machine, so every transition of
+    every redemption is logged with the same fields: ``state`` is the new
+    status and ``from_state`` the previous one.
+    """
+    logger.info(
+        "redemption %s -> %s (%s)",
+        from_status or "-",
+        to_status,
+        reason or "",
+        extra={
+            "transaction_id": transaction_id,
+            "correlation_id": correlation_id,
+            "workflow_step": workflow_step,
+            "state": to_status,
+            "from_state": from_status,
+            "coordination_mode": coordination_mode,
+        },
+    )
+
 
 TRANSITIONS: dict[str, frozenset[str]] = {
     "two_phase_commit": frozenset(
@@ -193,6 +229,15 @@ class PostgresCoordinatorRepository:
             )
         )
         record_transition(mode=request.coordination_mode, from_state=None, to_state="REQUESTED")
+        log_transition(
+            transaction_id=transaction_id,
+            correlation_id=correlation_id,
+            coordination_mode=request.coordination_mode,
+            from_status=None,
+            to_status="REQUESTED",
+            workflow_step=0,
+            reason="redemption created",
+        )
         return self._redemption(row)
 
     def get(self, transaction_id: UUID) -> RedemptionRecord:
@@ -372,6 +417,15 @@ class PostgresCoordinatorRepository:
             from_state=current.status,
             to_state=to_status,
             created_at=current.created_at,
+        )
+        log_transition(
+            transaction_id=transaction_id,
+            correlation_id=current.correlation_id,
+            coordination_mode=current.coordination_mode,
+            from_status=current.status,
+            to_status=to_status,
+            workflow_step=next_step,
+            reason=reason,
         )
         return self._redemption(updated)
 

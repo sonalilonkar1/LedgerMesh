@@ -6,7 +6,12 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
-from ledgermesh_messaging import MetricsMiddleware, render_metrics
+from ledgermesh_messaging import (
+    CorrelationMiddleware,
+    MetricsMiddleware,
+    configure_logging,
+    render_metrics,
+)
 
 from services.coordinator.app.errors import CoordinatorError
 from services.coordinator.app.models import (
@@ -27,6 +32,7 @@ from services.coordinator.app.service import CoordinatorService
 from services.coordinator.app.two_phase_commit import TwoPhaseCommitWorkflow, default_workflow
 
 SERVICE_NAME = "coordinator"
+configure_logging(SERVICE_NAME)  # LM-032: JSON logs with shared field names
 
 
 @asynccontextmanager
@@ -45,6 +51,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="LedgerMesh Redemption Coordinator", version="0.1.0", lifespan=lifespan)
 app.add_middleware(MetricsMiddleware, service=SERVICE_NAME)
+app.add_middleware(CorrelationMiddleware)
 
 
 @app.get("/metrics", include_in_schema=False)

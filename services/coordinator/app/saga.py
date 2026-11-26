@@ -29,6 +29,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from services.coordinator.app.db.schema import redemption_transitions, redemptions
+from services.coordinator.app.repository import log_transition
 
 logger = logging.getLogger(__name__)
 
@@ -525,6 +526,15 @@ class CoordinatorSagaMachine:
             from_state=row.status,
             to_state=to_status,
             created_at=row.created_at,
+        )
+        log_transition(
+            transaction_id=row.transaction_id,
+            correlation_id=row.correlation_id,
+            coordination_mode=row.coordination_mode,
+            from_status=row.status,
+            to_status=to_status,
+            workflow_step=updated.workflow_step,
+            reason=reason,
         )
         return updated
 

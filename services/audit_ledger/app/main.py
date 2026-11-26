@@ -4,7 +4,12 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
-from ledgermesh_messaging import MetricsMiddleware, render_metrics
+from ledgermesh_messaging import (
+    CorrelationMiddleware,
+    MetricsMiddleware,
+    configure_logging,
+    render_metrics,
+)
 
 from services.audit_ledger.app.errors import AuditLedgerError
 from services.audit_ledger.app.models import (
@@ -17,9 +22,11 @@ from services.audit_ledger.app.repository import PostgresAuditRepository, get_en
 from services.audit_ledger.app.service import AuditLedgerService
 
 SERVICE_NAME = "audit-ledger"
+configure_logging(SERVICE_NAME)  # LM-032: JSON logs with shared field names
 
 app = FastAPI(title="LedgerMesh Audit Ledger Service", version="0.1.0")
 app.add_middleware(MetricsMiddleware, service=SERVICE_NAME)
+app.add_middleware(CorrelationMiddleware)
 
 
 @app.get("/metrics", include_in_schema=False)
