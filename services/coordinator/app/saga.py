@@ -20,6 +20,7 @@ from ledgermesh_messaging import (
     OutgoingMessage,
     PermanentError,
     enqueue,
+    metrics_on_commit,
     record_transition,
 )
 from ledgermesh_messaging.schema import outbox
@@ -561,12 +562,14 @@ class SagaStarter:
         self._retry_after: dict[UUID, float] = {}
 
     async def _fail_permanently(self, transaction_id: UUID, reason: str) -> bool:
-        async with self.sessions() as session, session.begin():
-            messages = await session.run_sync(
-                lambda sync: self.machine.fail_start(sync.connection(), transaction_id, reason)
-            )
-            for message in messages:
-                await enqueue(session, message)
+        # Transition metrics publish only after session.begin() commits (LM-034).
+        with metrics_on_commit():
+            async with self.sessions() as session, session.begin():
+                messages = await session.run_sync(
+                    lambda sync: self.machine.fail_start(sync.connection(), transaction_id, reason)
+                )
+                for message in messages:
+                    await enqueue(session, message)
         self._failures.pop(transaction_id, None)
         self._retry_after.pop(transaction_id, None)
         return bool(messages)
@@ -607,14 +610,15 @@ class SagaStarter:
                 continue
             try:
                 quote = await self.quote_client.get_quote(reward_id)
-                async with self.sessions() as session, session.begin():
-                    messages = await session.run_sync(
-                        lambda sync, transaction_id=transaction_id, quote=quote: self.machine.start(
-                            sync.connection(), transaction_id, quote
+                with metrics_on_commit():
+                    async with self.sessions() as session, session.begin():
+                        messages = await session.run_sync(
+                            lambda sync, transaction_id=transaction_id, quote=quote: (
+                                self.machine.start(sync.connection(), transaction_id, quote)
+                            )
                         )
-                    )
-                    for message in messages:
-                        await enqueue(session, message)
+                        for message in messages:
+                            await enqueue(session, message)
                 started += bool(messages)
                 self._failures.pop(transaction_id, None)
                 self._retry_after.pop(transaction_id, None)
