@@ -25,6 +25,7 @@ class FakeParticipantRepository:
         quantity,
         expected_reward_version,
         expected_point_cost,
+        fencing_token,
     ):
         request = (
             correlation_id,
@@ -32,6 +33,7 @@ class FakeParticipantRepository:
             quantity,
             expected_reward_version,
             expected_point_cost,
+            fencing_token,
         )
         if transaction_id in self.records:
             if transaction_id in self.requests and self.requests[transaction_id] != request:
@@ -82,6 +84,7 @@ def payload(*, correlation_id=None, quantity=1, version=0, cost=100):
         "quantity": quantity,
         "expected_reward_version": version,
         "expected_point_cost": cost,
+        "fencing_token": 0,
     }
 
 

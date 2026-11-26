@@ -71,3 +71,8 @@ class ParticipantConflict(CatalogError):
     status = 409
     title = "Participant transaction conflict"
     problem_type = "urn:ledgermesh:catalog:participant-conflict"
+
+
+class StaleFencingToken(ParticipantConflict):
+    title = "Stale Coordinator fencing token"
+    problem_type = "urn:ledgermesh:catalog:stale-fencing-token"

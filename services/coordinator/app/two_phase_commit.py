@@ -60,6 +60,7 @@ class HttpWalletParticipant:
                 "correlation_id": str(record.correlation_id),
                 "user_id": record.user_id,
                 "points": record.total_points,
+                "fencing_token": record.fencing_token,
             },
         )
         return ParticipantVote(_participant_state(response))
@@ -91,6 +92,7 @@ class HttpCatalogParticipant:
                 "quantity": record.quantity,
                 "expected_reward_version": record.reward_version,
                 "expected_point_cost": record.point_cost,
+                "fencing_token": record.fencing_token,
             },
         )
         return ParticipantVote(_participant_state(response))

@@ -33,6 +33,8 @@ EXPECTED_TABLES = {
         "wallets",
         "wallet_operations",
         "participant_transactions",
+        "participant_fencing_state",
+        "fencing_rejections",
         "deduction_rejections",
         "inbox",
         "outbox",
@@ -41,11 +43,13 @@ EXPECTED_TABLES = {
         "rewards",
         "reservations",
         "participant_transactions",
+        "participant_fencing_state",
+        "fencing_rejections",
         "catalog_saga_outcomes",
         "inbox",
         "outbox",
     },
-    "audit_ledger": {"audit_events", "inbox", "aggregate_versions"},
+    "audit_ledger": {"audit_events", "aggregate_versions", "inbox"},
 }
 
 
@@ -99,7 +103,15 @@ def test_downgrade_removes_everything_and_upgrade_runs_again(service, database_u
 
 def test_services_do_not_share_tables_except_the_messaging_ones():
     # No service owns another service's business tables (ADR-001 section 2).
-    shared = {"inbox", "outbox", "participant_transactions"}
+    # These identically named tables live in each service's own database; the
+    # common names do not imply cross-service ownership or shared storage.
+    shared = {
+        "inbox",
+        "outbox",
+        "participant_transactions",
+        "participant_fencing_state",
+        "fencing_rejections",
+    }
     business = {service: names - shared for service, names in EXPECTED_TABLES.items()}
     for service, owned in business.items():
         for other, other_owned in business.items():

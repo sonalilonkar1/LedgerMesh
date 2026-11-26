@@ -18,9 +18,14 @@ class FakeParticipantRepository:
         self.requests: dict[UUID, tuple[UUID, str, int]] = {}
 
     def prepare(
-        self, transaction_id: UUID, correlation_id: UUID, user_id: str, points: int
+        self,
+        transaction_id: UUID,
+        correlation_id: UUID,
+        user_id: str,
+        points: int,
+        fencing_token: int,
     ) -> ParticipantRecord:
-        request = (correlation_id, user_id, points)
+        request = (correlation_id, user_id, points, fencing_token)
         if transaction_id in self.records:
             if transaction_id in self.requests and self.requests[transaction_id] != request:
                 raise ParticipantConflict("Different prepare request.", transaction_id)
@@ -68,6 +73,7 @@ def payload(*, correlation_id: UUID | None = None, user_id: str = "user-1", poin
         "correlation_id": str(correlation_id or uuid4()),
         "user_id": user_id,
         "points": points,
+        "fencing_token": 0,
     }
 
 

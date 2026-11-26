@@ -14,6 +14,7 @@ class FakeEtcdState:
         self.value: bytes | None = None
         self.lease_id: int | None = None
         self.next_lease_id = 1
+        self.revision = 0
         self.fail_refresh = False
         self.unavailable = False
 
@@ -57,13 +58,18 @@ class FakeEtcdClient:
                 return False
             self.state.value = value.encode()
             self.state.lease_id = lease.id
+            self.state.revision += 1
             return True
 
-    def get(self, key: str) -> list[bytes]:
+    def get(self, key: str, metadata: bool = False):
         if self.state.unavailable:
             raise ConnectionError("quorum unavailable")
         with self.state.lock:
-            return [] if self.state.value is None else [self.state.value]
+            if self.state.value is None:
+                return []
+            if metadata:
+                return [(self.state.value, {"create_revision": str(self.state.revision)})]
+            return [self.state.value]
 
 
 def client_factory_for(state: FakeEtcdState):
@@ -102,9 +108,34 @@ def test_only_one_coordinator_acquires_the_leadership_lease(state: FakeEtcdState
     try:
         assert wait_for(lambda: first.is_leader or second.is_leader)
         assert first.is_leader != second.is_leader
+        winner = first if first.is_leader else second
+        assert winner.fencing_token == 1
+        loser = second if winner is first else first
+        assert loser.fencing_token is None
     finally:
         first.stop()
         second.stop()
+
+
+def test_each_leadership_term_gets_a_larger_fencing_token(state: FakeEtcdState) -> None:
+    first = new_manager(state, "coordinator-a")
+    first.start()
+    assert wait_for(lambda: first.is_leader)
+    first_token = first.fencing_token
+    first.stop()
+    # Model lease expiry/revocation; the fake client does not implement the
+    # etcd3gw lease revoke endpoint used by EtcdLeadership._release().
+    with state.lock:
+        state.value = None
+        state.lease_id = None
+
+    replacement = new_manager(state, "coordinator-b")
+    replacement.start()
+    try:
+        assert wait_for(lambda: replacement.is_leader)
+        assert replacement.fencing_token > first_token
+    finally:
+        replacement.stop()
 
 
 def test_failed_lease_renewal_immediately_steps_down(state: FakeEtcdState) -> None:
@@ -117,6 +148,7 @@ def test_failed_lease_renewal_immediately_steps_down(state: FakeEtcdState) -> No
     manager._renew()
 
     assert not manager.is_leader
+    assert manager.fencing_token is None
     assert manager._lease_id is None
     assert not manager.quorum_available
     manager.stop()

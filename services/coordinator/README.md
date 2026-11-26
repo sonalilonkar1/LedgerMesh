@@ -182,6 +182,9 @@ make infra-up
 uv run pytest tests/db/test_two_phase_commit_workflow.py -q
 ```
 
+Coordinator leadership terms and participant fencing are described in
+[`docs/fencing.md`](../../docs/fencing.md).
+
 ## 2PC crash recovery (LM-016)
 
 The Coordinator runs a bounded recovery scan immediately after startup and at

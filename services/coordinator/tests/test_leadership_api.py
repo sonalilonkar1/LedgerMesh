@@ -10,6 +10,7 @@ from services.coordinator.tests.test_core_api import (
 
 class FakeLeadership:
     is_leader = False
+    fencing_token = None
 
 
 def test_nonleader_cannot_create_a_redemption(monkeypatch) -> None:
@@ -35,6 +36,7 @@ def test_leader_can_create_a_redemption(monkeypatch) -> None:
     repository = FakeCoordinatorRepository()
     leadership = FakeLeadership()
     leadership.is_leader = True
+    leadership.fencing_token = 17
     app.dependency_overrides[get_coordinator_service] = lambda: CoordinatorService(repository)
     app.dependency_overrides[get_coordinator_leadership] = lambda: leadership
     monkeypatch.setenv("COORDINATOR_LEADERSHIP_ENABLED", "true")
@@ -47,5 +49,6 @@ def test_leader_can_create_a_redemption(monkeypatch) -> None:
         )
         assert response.status_code == 202
         assert len(repository.redemptions) == 1
+        assert repository.fencing_tokens == [17]
     finally:
         app.dependency_overrides.clear()

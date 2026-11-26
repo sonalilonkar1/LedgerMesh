@@ -17,7 +17,11 @@ class WalletParticipantService:
     def prepare(self, transaction_id: UUID, request: WalletPrepareRequest) -> ParticipantResponse:
         return self._response(
             self.repository.prepare(
-                transaction_id, request.correlation_id, request.user_id, request.points
+                transaction_id,
+                request.correlation_id,
+                request.user_id,
+                request.points,
+                request.fencing_token,
             )
         )
 

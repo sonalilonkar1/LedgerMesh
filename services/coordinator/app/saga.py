@@ -143,11 +143,7 @@ class CoordinatorSagaMachine:
             row, None, "REQUESTED", "redemption created", causation_id=None
         )
         started_audit = _audit_event(
-            updated,
-            "REQUESTED",
-            "DEDUCTING_POINTS",
-            "wallet deduction requested",
-            command.event_id,
+            updated, "REQUESTED", "DEDUCTING_POINTS", "wallet deduction requested", None
         )
         return [requested_audit, started_audit, WALLET_COMMANDS.message(command)]
 
@@ -434,6 +430,10 @@ class CoordinatorSagaMachine:
         expected_id = row.user_id if expected_aggregate == "wallet" else row.reward_id
         if envelope.aggregate_type != expected_aggregate or envelope.aggregate_id != expected_id:
             raise InvalidSagaResult("result targets the wrong aggregate")
+        # Older/local fixtures may omit the nullable wire field; that is the
+        # pre-fencing term (0). It must still fail against any newer term.
+        if (envelope.fencing_token or 0) != (row.fencing_token or 0):
+            raise InvalidSagaResult("result fencing_token does not match the redemption term")
 
     @staticmethod
     def _validate_current_command(connection: Connection, row, envelope: EventEnvelope) -> None:
@@ -457,15 +457,10 @@ class CoordinatorSagaMachine:
         if row.status != "REQUESTED":
             return []
         updated = self._transition(connection, row, "FAILED", reason, command_id=None)
-        requested = _audit_event(row, None, "REQUESTED", "redemption created", causation_id=None)
-        failed = _audit_event(
-            updated,
-            "REQUESTED",
-            "FAILED",
-            reason,
-            causation_id=requested.envelope.event_id,
-        )
-        return [requested, failed]
+        return [
+            _audit_event(row, None, "REQUESTED", "redemption created", causation_id=None),
+            _audit_event(updated, "REQUESTED", "FAILED", reason, causation_id=None),
+        ]
 
     @staticmethod
     def _locked(connection: Connection, transaction_id: UUID):

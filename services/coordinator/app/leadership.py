@@ -103,6 +103,9 @@ class EtcdLeadership:
         self._quorum = threading.Event()
         self._lock = threading.RLock()
         self._lease_id: int | None = None
+        # etcd's create_revision is cluster-wide and strictly increases each
+        # time the leased leader key is recreated, making it a fencing token.
+        self._fencing_token: int | None = None
         self._thread: threading.Thread | None = None
 
     def _make_client(self, endpoint: str, client_factory: Callable) -> object:
@@ -141,6 +144,11 @@ class EtcdLeadership:
     def quorum_available(self) -> bool:
         return self._quorum.is_set()
 
+    @property
+    def fencing_token(self) -> int | None:
+        with self._lock:
+            return self._fencing_token if self._leader.is_set() else None
+
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
@@ -176,9 +184,22 @@ class EtcdLeadership:
                 lease = client.lease(ttl=self.ttl_seconds)
                 self._set_quorum(True)
                 if client.create(self.key, self.identity, lease=lease):
+                    values = client.get(self.key, metadata=True)
+                    matching = [
+                        metadata for value, metadata in values if value == self.identity.encode()
+                    ]
+                    if not matching:
+                        raise RuntimeError("leadership key disappeared after lease acquisition")
+                    token = int(matching[0]["create_revision"])
+                    if token <= 0:
+                        raise RuntimeError("etcd returned an invalid leadership revision")
                     with self._lock:
                         self._lease_id = lease.id
+                        self._fencing_token = token
                     self._set_leader(True, "lease acquired")
+                    logger.info(
+                        "coordinator fencing token acquired", extra={"fencing_token": token}
+                    )
                     return
                 lease.revoke()
                 return
@@ -211,6 +232,7 @@ class EtcdLeadership:
         self._set_quorum(False)
         with self._lock:
             self._lease_id = None
+            self._fencing_token = None
         self._set_leader(False, "lease renewal failed; stepping down")
 
     def _release(self) -> None:
@@ -231,6 +253,8 @@ class EtcdLeadership:
             self._leader.set()
         else:
             self._leader.clear()
+            with self._lock:
+                self._fencing_token = None
         LEADER.set(int(value))
         if value != was_leader:
             logger.info("coordinator leadership changed", extra={"leader": value, "reason": reason})

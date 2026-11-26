@@ -153,7 +153,7 @@ Example:
 transaction_id="11111111-1111-4111-8111-111111111111"
 curl -X POST "http://localhost:8001/v1/transactions/$transaction_id/prepare" \
   -H 'Content-Type: application/json' \
-  -d '{"correlation_id":"22222222-2222-4222-8222-222222222222","user_id":"user-alice","points":100}'
+  -d '{"correlation_id":"22222222-2222-4222-8222-222222222222","user_id":"user-alice","points":100,"fencing_token":0}'
 
 curl -X POST "http://localhost:8001/v1/transactions/$transaction_id/commit"
 curl "http://localhost:8001/v1/transactions/$transaction_id"
@@ -169,3 +169,7 @@ make db-prepared-list
 
 The last command must show no unresolved transactions after the test suite.
 Kafka Saga consumption is implemented separately by LM-020.
+
+The Wallet persists the highest Coordinator fencing token seen across Saga
+commands and 2PC prepares. Older tokens are rejected and durably recorded in
+`fencing_rejections`; see [`docs/fencing.md`](../../docs/fencing.md).
