@@ -1,4 +1,4 @@
-.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean images-build images-check
+.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean images-build images-check metrics-invariants metrics-open
 
 COMPOSE_FILE ?= infra/compose.yaml
 COMPOSE := docker compose -f $(COMPOSE_FILE)
@@ -75,6 +75,15 @@ infra-down:
 
 infra-reset:
 	$(COMPOSE) down --volumes --remove-orphans
+
+# Metrics (LM-034). Prometheus and Grafana start with infra-up. The invariant
+# exporter runs on the host and checks the four Compose databases.
+metrics-invariants:
+	uv run python -m infra.scripts.invariant_exporter
+
+metrics-open:
+	@echo "Grafana:    http://localhost:$${GRAFANA_PORT:-3000}/d/ledgermesh-comparison"
+	@echo "Prometheus: http://localhost:$${PROMETHEUS_PORT:-9090}/targets"
 
 # Database migrations (LM-005). They target the Compose databases on their host
 # ports; pass SERVICES="wallet catalog" to limit them. Rolling back deletes data,
