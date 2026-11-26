@@ -68,9 +68,11 @@ _SENSITIVE_KEY = re.compile(
 _URL_CREDENTIALS = re.compile(r"(\b[a-z][a-z0-9+.-]*://[^\s:/@]+:)[^\s@/]+(@)", re.IGNORECASE)
 
 # Attributes every LogRecord has; anything else on a record came from ``extra=``.
-_RECORD_ATTRIBUTES = frozenset(
-    logging.LogRecord("", 0, "", 0, "", None, None).__dict__
-) | {"message", "asctime", "taskName"}
+_RECORD_ATTRIBUTES = frozenset(logging.LogRecord("", 0, "", 0, "", None, None).__dict__) | {
+    "message",
+    "asctime",
+    "taskName",
+}
 
 _context: ContextVar[Mapping[str, Any]] = ContextVar("ledgermesh_log_context", default={})
 
@@ -103,7 +105,11 @@ def log_context(**fields: Any) -> Iterator[None]:
 
 def envelope_fields(envelope: Any) -> dict[str, Any]:
     """The correlation fields of an ``EventEnvelope`` (or its JSON dict)."""
-    get = envelope.get if isinstance(envelope, Mapping) else lambda name: getattr(envelope, name, None)
+    get = (
+        envelope.get
+        if isinstance(envelope, Mapping)
+        else lambda name: getattr(envelope, name, None)
+    )
     return {
         "transaction_id": _clean(get("transaction_id")),
         "event_id": _clean(get("event_id")),
@@ -206,9 +212,7 @@ def fault(fault_id: str, **fields: Any) -> Iterator[None]:
         yield
 
 
-def log_fault_injected(
-    logger: logging.Logger, fault_id: str, point: str, **fields: Any
-) -> None:
+def log_fault_injected(logger: logging.Logger, fault_id: str, point: str, **fields: Any) -> None:
     """Record that a fault was injected, so its effects can be found by ``fault_id``."""
     logger.warning("fault injected at %s", point, extra={"fault_id": fault_id, **fields})
 

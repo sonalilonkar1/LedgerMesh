@@ -54,7 +54,12 @@ class FakeProducer:
 
 def record(envelope):
     return SimpleNamespace(
-        topic="wallet.commands", partition=0, offset=0, key=b"k", value=envelope.to_bytes(), headers=[]
+        topic="wallet.commands",
+        partition=0,
+        offset=0,
+        key=b"k",
+        value=envelope.to_bytes(),
+        headers=[],
     )
 
 

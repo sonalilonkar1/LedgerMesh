@@ -122,7 +122,9 @@ def test_one_saga_redemption_can_be_followed_across_services(service_databases, 
 
     # Coordinator: apply the Wallet's result.
     with log_context(service="coordinator"):
-        consume(urls["coordinator"], "coordinator-saga", CoordinatorSagaResultHandler(machine), reply)
+        consume(
+            urls["coordinator"], "coordinator-saga", CoordinatorSagaResultHandler(machine), reply
+        )
 
     # Every line has the shared field names.
     for line in captured:
