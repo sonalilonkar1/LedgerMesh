@@ -1,12 +1,10 @@
 // LedgerMesh Rewards (LM-011). Talks only to this app's /api.
 // Every value from the API is written with textContent, never as HTML.
-import { nextPoll, outcome } from "./polling.js";
+import { createPoller, outcome } from "./polling.js";
 
 const MODES = { two_phase_commit: "Two-Phase Commit", saga: "Saga" };
 
 const $ = (id) => document.getElementById(id);
-let pollTimer = null;
-let tracking = null; // { transactionId, startedAt }; replaced when a new redemption starts
 
 async function api(path, options = {}) {
   let response;
@@ -155,49 +153,39 @@ function showNotice(message) {
   $("notice").hidden = !message;
 }
 
-// Polls until the redemption reaches a final state; it never silently stops.
-// After a few minutes it slows down and says it is still processing.
-async function poll(current) {
-  if (tracking !== current) return; // a newer redemption replaced this one
-  let status = null;
-  let failed = false;
-  try {
-    const { redemption, timeline } = await api(`/api/redemptions/${current.transactionId}`);
-    if (tracking !== current) return;
-    status = redemption.status;
+// Follows the redemption until it reaches a final state; it never silently
+// stops. After a few minutes it slows down and says it is still processing.
+// One loop only: "Check now" is disabled while a check is running.
+const poller = createPoller({
+  fetchStatus: (transactionId) => api(`/api/redemptions/${transactionId}`),
+  onResult: ({ redemption, timeline }) => {
     renderStatus(redemption);
     renderTimeline(timeline);
     clearError();
-  } catch (error) {
-    failed = true;
-    showError(`${error.message} Still trying.`);
-  }
-  const next = nextPoll({ status, elapsedMs: Date.now() - current.startedAt, failed });
-  if (next.action === "stop") {
+  },
+  onError: (error) => showError(`${error.message} Still trying.`),
+  onContinue: (decision) => {
+    showNotice(decision.notice);
+    $("check-now").hidden = false;
+  },
+  onFinish: () => {
     showNotice(null);
     $("check-now").hidden = true;
     loadWallet();
     loadRewards();
-    return;
-  }
-  showNotice(next.notice);
-  $("check-now").hidden = false;
-  pollTimer = setTimeout(() => poll(current), next.delayMs);
-}
+  },
+  onBusy: (busy) => {
+    $("check-now").disabled = busy;
+  },
+});
 
 function track(transactionId) {
-  clearTimeout(pollTimer);
-  tracking = { transactionId, startedAt: Date.now() };
   $("progress").hidden = false;
   showNotice(null);
-  poll(tracking);
+  poller.track(transactionId);
 }
 
-$("check-now").addEventListener("click", () => {
-  if (!tracking) return;
-  clearTimeout(pollTimer);
-  poll(tracking);
-});
+$("check-now").addEventListener("click", () => poller.checkNow());
 
 $("user").addEventListener("change", () => {
   clearError();

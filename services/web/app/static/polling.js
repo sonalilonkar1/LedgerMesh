@@ -49,3 +49,90 @@ export function nextPoll({ status, elapsedMs, failed = false }) {
   }
   return { action: "continue", delayMs: FAST_MS, notice: null };
 }
+
+/**
+ * One polling loop for the redemption on screen.
+ *
+ * At most one status request is in flight, and at most one timer is pending,
+ * so "Check now" during a request can't start a second loop. Starting a new
+ * redemption replaces the old one: its late response is ignored and it
+ * schedules nothing.
+ *
+ * @param {object} hooks
+ *   fetchStatus(transactionId) -> Promise<{redemption, timeline}>;
+ *   onResult(body), onError(error), onContinue(decision), onFinish() update the page;
+ *   onBusy(busy) is told when a request starts and ends (to disable "Check now").
+ *   setTimer, clearTimer and now default to the browser's and can be faked in tests.
+ */
+export function createPoller({
+  fetchStatus,
+  onResult = () => {},
+  onError = () => {},
+  onContinue = () => {},
+  onFinish = () => {},
+  onBusy = () => {},
+  setTimer = (fn, ms) => setTimeout(fn, ms),
+  clearTimer = (id) => clearTimeout(id),
+  now = () => Date.now(),
+}) {
+  let current = null; // { transactionId, startedAt, inFlight }
+  let timer = null;
+
+  function cancelTimer() {
+    if (timer !== null) clearTimer(timer);
+    timer = null;
+  }
+
+  async function run(target) {
+    if (target !== current || target.inFlight) return;
+    cancelTimer();
+    target.inFlight = true;
+    onBusy(true);
+    let status = null;
+    let failed = false;
+    try {
+      const body = await fetchStatus(target.transactionId);
+      if (target !== current) return;
+      status = body.redemption.status;
+      onResult(body);
+    } catch (error) {
+      if (target !== current) return;
+      failed = true;
+      onError(error);
+    } finally {
+      target.inFlight = false;
+      if (target === current) onBusy(false);
+    }
+    const decision = nextPoll({ status, elapsedMs: now() - target.startedAt, failed });
+    if (decision.action === "stop") {
+      current = null;
+      onFinish();
+      return;
+    }
+    onContinue(decision);
+    timer = setTimer(() => run(target), decision.delayMs);
+  }
+
+  return {
+    /** Follow a new redemption, replacing any one being followed. */
+    track(transactionId) {
+      cancelTimer();
+      current = { transactionId, startedAt: now(), inFlight: false };
+      onBusy(false);
+      return run(current);
+    },
+    /** Check immediately; ignored while a check is already running. */
+    checkNow() {
+      if (!current || current.inFlight) return Promise.resolve(false);
+      return run(current).then(() => true);
+    },
+    /** Whether a status request is running right now. */
+    get busy() {
+      return Boolean(current && current.inFlight);
+    },
+    /** Whether a check is scheduled (for tests). */
+    get scheduled() {
+      return timer !== null;
+    },
+  };
+}
