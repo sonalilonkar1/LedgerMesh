@@ -3,7 +3,8 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from ledgermesh_messaging import MetricsMiddleware, render_metrics
 
 from services.catalog.app.errors import CatalogError
 from services.catalog.app.models import (
@@ -25,6 +26,14 @@ from services.catalog.app.service import CatalogService
 SERVICE_NAME = "catalog"
 
 app = FastAPI(title="LedgerMesh Rewards Catalog Service", version="0.1.0")
+app.add_middleware(MetricsMiddleware, service=SERVICE_NAME)
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics() -> Response:
+    """Prometheus scrape endpoint (LM-034)."""
+    body, content_type = render_metrics()
+    return Response(body, media_type=content_type)
 
 
 @lru_cache

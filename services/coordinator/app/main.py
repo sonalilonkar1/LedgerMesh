@@ -5,7 +5,8 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from ledgermesh_messaging import MetricsMiddleware, render_metrics
 
 from services.coordinator.app.errors import CoordinatorError
 from services.coordinator.app.models import (
@@ -43,6 +44,14 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="LedgerMesh Redemption Coordinator", version="0.1.0", lifespan=lifespan)
+app.add_middleware(MetricsMiddleware, service=SERVICE_NAME)
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics() -> Response:
+    """Prometheus scrape endpoint (LM-034)."""
+    body, content_type = render_metrics()
+    return Response(body, media_type=content_type)
 
 
 @lru_cache
