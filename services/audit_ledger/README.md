@@ -29,6 +29,22 @@ provide exactly-once audit storage over at-least-once delivery.
 The repository also accepts a caller-owned SQLAlchemy `Connection`, allowing a
 Kafka consumer to commit its inbox record and audit append atomically.
 
+## Event ordering (LM-030)
+
+The `redemption.events` consumer applies Saga `coordinator.transitioned`
+messages through `in_version_order`. The per-aggregate cursor is stored in the
+Audit Ledger database, in the same transaction as the inbox claim and append.
+A future version is retried without being appended; after its predecessor is
+recorded, the retry can apply. Older versions are recorded as ignored inbox
+deliveries and cannot add or reverse ledger history. A future event that
+exhausts retry-topic redeliveries is sent to `redemption.events.dlq` with the
+expected version in its error header.
+
+Saga's initial `REQUESTED` transition is version zero and has no cause. Later
+transition events carry a causation ID. 2PC currently emits a single terminal
+outcome rather than every intermediate transition, so its standalone outcome
+is appended without a contiguous-version check.
+
 ## Local use
 
 ```bash

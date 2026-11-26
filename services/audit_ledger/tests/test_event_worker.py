@@ -13,7 +13,11 @@ from ledgermesh_messaging import (
     dead_letter_topic,
 )
 
-from services.audit_ledger.app.event_worker import CONSUMER_GROUP, AuditEventHandler
+from services.audit_ledger.app.event_worker import (
+    CONSUMER_GROUP,
+    AuditEventHandler,
+    ordered_audit_handler,
+)
 
 
 class RecordingRepository:
@@ -52,6 +56,19 @@ def test_transition_event_is_appended():
     repository = RecordingRepository()
     assert asyncio.run(AuditEventHandler(repository)(FakeSession(), envelope())) == []
     assert len(repository.events) == 1
+
+
+def test_2pc_terminal_outcome_is_appended_without_waiting_for_unemitted_transitions():
+    repository = RecordingRepository()
+    outcome = envelope("redemption.committed").model_copy(
+        update={
+            "aggregate_version": 2,
+            "payload": {"coordination_mode": "two_phase_commit", "status": "COMMITTED"},
+        }
+    )
+
+    assert asyncio.run(ordered_audit_handler(repository)(FakeSession(), outcome)) == []
+    assert repository.events == [outcome]
 
 
 def test_unrelated_event_is_rejected():
