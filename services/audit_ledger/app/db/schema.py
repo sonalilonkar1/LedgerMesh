@@ -9,7 +9,7 @@ bug in the service. Each ``event_id`` is recorded once, which makes appends
 idempotent under at-least-once delivery.
 """
 
-from ledgermesh_messaging.schema import inbox
+from ledgermesh_messaging.schema import aggregate_versions, inbox
 from sqlalchemy import (
     BigInteger,
     Column,
@@ -49,3 +49,4 @@ audit_events = Table(
 Index("ix_audit_events_transaction_id", audit_events.c.transaction_id)
 
 inbox.to_metadata(metadata)
+aggregate_versions.to_metadata(metadata)
