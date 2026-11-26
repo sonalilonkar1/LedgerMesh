@@ -20,6 +20,7 @@ from ledgermesh_messaging import (
     OutgoingMessage,
     PermanentError,
     enqueue,
+    record_transition,
 )
 from ledgermesh_messaging.schema import outbox
 from sqlalchemy import Connection, select, update
@@ -508,6 +509,12 @@ class CoordinatorSagaMachine:
                 workflow_step=updated.workflow_step,
                 reason=reason,
             )
+        )
+        record_transition(
+            mode=row.coordination_mode,
+            from_state=row.status,
+            to_state=to_status,
+            created_at=row.created_at,
         )
         return updated
 

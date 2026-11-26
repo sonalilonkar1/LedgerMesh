@@ -11,7 +11,7 @@ from functools import lru_cache
 from typing import Protocol
 from uuid import UUID, uuid4
 
-from ledgermesh_messaging import EventEnvelope
+from ledgermesh_messaging import EventEnvelope, record_transition
 from ledgermesh_messaging.schema import outbox
 from sqlalchemy import Connection, Engine, create_engine, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -191,6 +191,7 @@ class PostgresCoordinatorRepository:
                 reason="redemption created",
             )
         )
+        record_transition(mode=request.coordination_mode, from_state=None, to_state="REQUESTED")
         return self._redemption(row)
 
     def get(self, transaction_id: UUID) -> RedemptionRecord:
@@ -360,6 +361,12 @@ class PostgresCoordinatorRepository:
                 workflow_step=next_step,
                 reason=reason,
             )
+        )
+        record_transition(
+            mode=current.coordination_mode,
+            from_state=current.status,
+            to_state=to_status,
+            created_at=current.created_at,
         )
         return self._redemption(updated)
 
