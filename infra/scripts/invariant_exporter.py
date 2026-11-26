@@ -9,8 +9,8 @@ four service databases and serves the result as
 published, as 0 when clean, so the dashboard shows "no violations" rather than
 "no data".
 
-It reuses the checker from the 2PC integration tests (LM-017), so the rules
-live in one place; the invariant checker issue (LM-031) extends that checker.
+It reuses the project invariant checker from the integration tests (LM-017,
+extended to every coordination mode by LM-031), so the rules live in one place.
 """
 
 from __future__ import annotations
@@ -42,6 +42,12 @@ CHECK_UP = Gauge(
 )
 
 
+# Checks that only make sense once traffic has stopped. INV-07 ("redemption
+# still non-terminal") is true of every in-flight redemption on a live system,
+# so it is a post-test check, not a live correctness signal.
+POST_TEST_ONLY = frozenset({"INV-07"})
+
+
 def classify(violations: Iterable[str]) -> dict[str, int]:
     """Count violation messages per invariant, with every known invariant present."""
     counts = dict.fromkeys(KNOWN_INVARIANTS, 0)
@@ -50,6 +56,8 @@ def classify(violations: Iterable[str]) -> dict[str, int]:
             key = "prepared_leak"
         else:
             key = violation.split(":", 1)[0].strip()
+        if key in POST_TEST_ONLY:
+            continue
         counts[key] = counts.get(key, 0) + 1
     return counts
 
@@ -63,9 +71,9 @@ def engines_from_env() -> dict[str, Engine]:
 
 
 def check_once(engines: dict[str, Engine]) -> dict[str, int]:
-    from tests.integration.invariants import check_2pc_invariants
+    from tests.integration.invariants import check_project_invariants
 
-    counts = classify(check_2pc_invariants(engines).violations)
+    counts = classify(check_project_invariants(engines).violations)
     record_invariant_violations(counts)
     return counts
 
