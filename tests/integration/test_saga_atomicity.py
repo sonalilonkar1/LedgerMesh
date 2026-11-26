@@ -6,7 +6,8 @@ import asyncio
 from uuid import UUID, uuid4
 
 import pytest
-from ledgermesh_messaging import EventEnvelope, outbox, process_once
+from ledgermesh_messaging import EventEnvelope, process_once
+from ledgermesh_messaging.schema import inbox, outbox
 from sqlalchemy import Engine, func, insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -39,7 +40,7 @@ class FakeQuote:
 def _event(engine: Engine, topic: str, transaction_id: UUID) -> EventEnvelope:
     with engine.connect() as connection:
         rows = connection.execute(
-            select(outbox.c.envelope).where(outbox.c.topic == topic)
+            select(outbox.c.envelope).where(outbox.c.topic == topic).order_by(outbox.c.id)
         ).scalars()
         for document in reversed(list(rows)):
             envelope = EventEnvelope.model_validate(document, context={"wire": True})
@@ -265,6 +266,79 @@ def test_saga_happy_path_completes_and_audits_all_transitions(
         item.envelope["payload"].get("to_status") == "COMPLETED"
         for item in audit.list_by_transaction(created.transaction_id)
     )
+    _assert_saga_invariants(databases, created.transaction_id)
+
+
+def test_saga_restart_resumes_queued_command_without_double_deduction(saga_databases):
+    databases = saga_databases
+    created = _create(databases)
+    assert _start(databases.urls["coordinator"], created.transaction_id) == 1
+
+    # A replacement Coordinator starter sees durable DEDUCTING_POINTS state,
+    # so it does not create another command. The original command remains in
+    # the outbox and is delivered by the replacement publisher/consumer path.
+    command = _event(databases.engines["coordinator"], "wallet.commands", created.transaction_id)
+    assert _start(databases.urls["coordinator"], created.transaction_id) == 0
+
+    first_delivery = _run_wallet(databases, command)
+    redelivery = _run_wallet(databases, command)
+    assert not first_delivery.duplicate
+    assert redelivery.duplicate
+
+    with databases.engines["wallet"].connect() as connection:
+        assert (
+            connection.scalar(
+                select(wallets.c.available_points).where(wallets.c.user_id == "saga-user")
+            )
+            == 900
+        )
+        assert (
+            connection.scalar(
+                select(func.count())
+                .select_from(wallet_operations)
+                .where(
+                    wallet_operations.c.transaction_id == created.transaction_id,
+                    wallet_operations.c.operation == "deduct",
+                    wallet_operations.c.status == "applied",
+                )
+            )
+            == 1
+        )
+        assert (
+            connection.scalar(
+                select(func.count())
+                .select_from(inbox)
+                .where(
+                    inbox.c.consumer == "wallet-saga",
+                    inbox.c.event_id == command.event_id,
+                )
+            )
+            == 1
+        )
+
+    _coordinator_result(
+        databases,
+        _event(databases.engines["wallet"], "wallet.results", created.transaction_id),
+    )
+    _run_catalog(
+        databases,
+        _event(databases.engines["coordinator"], "catalog.commands", created.transaction_id),
+    )
+    _coordinator_result(
+        databases,
+        _event(databases.engines["catalog"], "catalog.results", created.transaction_id),
+    )
+    _deliver_audit(databases, created.transaction_id)
+
+    with databases.engines["coordinator"].connect() as connection:
+        assert (
+            connection.scalar(
+                select(redemptions.c.status).where(
+                    redemptions.c.transaction_id == created.transaction_id
+                )
+            )
+            == "COMPLETED"
+        )
     _assert_saga_invariants(databases, created.transaction_id)
 
 
