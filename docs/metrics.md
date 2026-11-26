@@ -41,6 +41,8 @@ All names and labels are declared once, in `ledgermesh_messaging/metrics.py`.
 
 `mode` is the redemption's `coordination_mode`: `two_phase_commit` or `saga`.
 
+**Only committed state is counted.** Transition, outcome, duration and compensation metrics are collected while their database transaction is open, and published only after it commits (`metrics_on_commit` in `ledgermesh_messaging.metrics`). A transaction that rolls back publishes nothing, and its retry is counted once, so the dashboard agrees with the durable `redemption_transitions` history. `InboxConsumer`, the Saga starter and the Coordinator repository's own transactions all use it. Code that passes its own connection to the repository should wrap its transaction the same way.
+
 ## The dashboard
 
 | Row | Panels |
