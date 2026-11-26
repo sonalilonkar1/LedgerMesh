@@ -30,3 +30,6 @@ def test_the_page_loads_the_polling_module_and_offers_check_now():
     assert 'id="notice"' in page
     assert 'from "./polling.js"' in script
     assert "POLL_LIMIT" not in script
+    # One polling loop: the page goes through createPoller, not its own timers.
+    assert "createPoller" in script
+    assert "setTimeout" not in script
