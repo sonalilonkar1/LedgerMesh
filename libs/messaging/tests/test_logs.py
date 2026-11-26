@@ -190,6 +190,49 @@ def test_nested_mappings_are_redacted(capture):
     assert lines()[0]["request"] == {"Authorization": REDACTED, "path": "/v1"}
 
 
+@pytest.mark.parametrize("container", [list, tuple])
+def test_secrets_inside_lists_and_tuples_are_redacted(capture, container):
+    logger, lines = capture
+
+    logger.info(
+        "outgoing",
+        extra={"headers": container([{"authorization": "Bearer secret"}, {"accept": "json"}])},
+    )
+
+    [line] = lines()
+    assert line["headers"] == [{"authorization": REDACTED}, {"accept": "json"}]
+    assert "Bearer secret" not in json.dumps(line)
+
+
+def test_secrets_are_redacted_at_any_depth(capture):
+    logger, lines = capture
+    url = "postgresql://wallet:s3cret@db/wallet"
+
+    logger.info(
+        "deep",
+        extra={
+            "calls": [
+                {"request": {"headers": ({"Cookie": "session=abc"},)}},
+                [{"api_key": "k-123"}, url],
+            ]
+        },
+    )
+
+    text = json.dumps(lines()[0])
+    assert "session=abc" not in text
+    assert "k-123" not in text
+    assert "s3cret" not in text
+    assert "wallet:***@db" in text
+
+
+def test_a_list_under_a_secret_like_key_is_redacted_whole(capture):
+    logger, lines = capture
+
+    logger.info("rotated", extra={"tokens": ["old-token", "new-token"]})
+
+    assert lines()[0]["tokens"] == REDACTED
+
+
 # --- Failure injection logs include the injected fault identifier ----------
 
 
