@@ -1,4 +1,4 @@
-.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean images-build images-check staging-images-local staging-local-env staging-local-up staging-local-verify staging-local-logs staging-local-down staging-local-reset staging-provision-dry-run
+.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean images-build images-check staging-images-local staging-local-env staging-local-up staging-local-verify staging-local-logs staging-local-down staging-local-reset staging-provision-dry-run staging-local-deploy staging-local-promote staging-local-rollback staging-local-status
 
 COMPOSE_FILE ?= infra/compose.yaml
 COMPOSE := docker compose -f $(COMPOSE_FILE)
@@ -177,6 +177,30 @@ staging-local-down:
 # Destructive, local only: removes the local staging data directory.
 staging-local-reset: staging-local-down
 	rm -rf $(STAGING_DATA_DIR)
+
+# Release-managed local deploys (LM-049): the same infra/staging/deploy.sh the
+# VM runs, with images already tagged on this machine (staging-images-local)
+# and release records under $(STAGING_DATA_DIR)/releases.
+#   make staging-local-deploy [SHA=<40-hex>]   deploy and promote
+#   make staging-local-rollback TARGET=previous|last-known-good|<sha>
+STAGING_SHA ?= $(IMAGE_REVISION)
+STAGING_TARGET ?= previous
+STAGING_DEPLOY = bash infra/staging/deploy.sh --env-file $(STAGING_ENV_FILE) \
+	--secrets-source file:$(STAGING_LOCAL_SOURCE) --image-source local \
+	--data-dir $(STAGING_DATA_DIR) --project-name $(STAGING_PROJECT) \
+	--current-link $(CURDIR)/artifacts/staging/current
+
+staging-local-deploy:
+	$(STAGING_DEPLOY) deploy $(STAGING_SHA) --actor local
+
+staging-local-promote:
+	$(STAGING_DEPLOY) promote $(STAGING_SHA) --actor local
+
+staging-local-rollback:
+	$(STAGING_DEPLOY) rollback $(STAGING_TARGET) --actor local
+
+staging-local-status:
+	$(STAGING_DEPLOY) status
 
 # Prints every gcloud command `provision.sh up` would run, with placeholder
 # billing account and emails; runs nothing.
