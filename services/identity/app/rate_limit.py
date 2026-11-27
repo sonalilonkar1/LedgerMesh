@@ -4,14 +4,16 @@ Counters live in the identity database, so limits hold across restarts and
 across any number of service replicas. Each attempt is one atomic upsert that
 returns the new count; an attempt is allowed while the count is within the
 limit. Attempts over the limit are still counted, so hammering stays blocked
-until the window ends.
+until the window ends. Only the first denied attempt in a window is marked
+``first_denial``, so the caller audits one ``rate_limited`` event per key and
+window instead of one per request.
 
 Keys are SHA-256 digests of ``scope:value`` (a normalized email or a client
 IP), so the table holds no plaintext address.
 
 Trade-offs (docs/authentication.md): a fixed window allows up to twice the
-limit across a window boundary, and a per-email limit lets someone delay that
-address's sign-in until the window ends.
+limit across a window boundary, and anyone can keep an address's per-email
+limit exhausted, window after window, for as long as they keep sending.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ VERIFY_IP = "verify_ip"
 class RateLimitDecision:
     allowed: bool
     retry_after: int
+    first_denial: bool = False
 
 
 def key_hash(scope: str, value: str) -> str:
@@ -56,4 +59,9 @@ class RateLimiter:
             scope=scope, key_hash=key_hash(scope, value), window_start=start, now=now
         )
         remaining = self.window_seconds - int((now - start).total_seconds())
-        return RateLimitDecision(allowed=count <= self.limits[scope], retry_after=max(1, remaining))
+        limit = self.limits[scope]
+        return RateLimitDecision(
+            allowed=count <= limit,
+            retry_after=max(1, remaining),
+            first_denial=count == limit + 1,
+        )

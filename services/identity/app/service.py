@@ -230,14 +230,17 @@ class IdentityService:
         decision = self.limiter.hit(scope, value, now)
         if decision.allowed:
             return
-        self.repository.record_event(
-            NewAuthEvent(
-                "rate_limited",
-                occurred_at=now,
-                reason=scope,
-                email_masked=email_masked,
-                client_ip=client_ip,
+        # auth_events is append-only, so audit only the first denial per key
+        # and window; otherwise every over-limit request would add a row.
+        if decision.first_denial:
+            self.repository.record_event(
+                NewAuthEvent(
+                    "rate_limited",
+                    occurred_at=now,
+                    reason=scope,
+                    email_masked=email_masked,
+                    client_ip=client_ip,
+                )
             )
-        )
         logger.warning("rate limited", extra={"scope": scope})
         raise RateLimited(decision.retry_after)

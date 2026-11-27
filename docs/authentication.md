@@ -110,7 +110,7 @@ The client IP is `request.client.host`. Behind a proxy, uvicorn only trusts `X-F
 
 ## Audit and logging
 
-`auth_events` is append-only (a trigger rejects `UPDATE`, `DELETE` and `TRUNCATE`, as for `audit_events`). It records `login_requested`, `login_succeeded`, `login_failed` (reason `unknown`, `expired`, `used` or `revoked`), `logout` and `rate_limited` (reason = scope), with user id, session row id and client IP. It never holds a token, a session id cookie value or a full address: `email_masked` (`a***@example.com`) is filled only for a per-email rate limit, where no user id is used. `user_id` has no foreign key so the trail stays intact.
+`auth_events` is append-only (a trigger rejects `UPDATE`, `DELETE` and `TRUNCATE`, as for `audit_events`). It records `login_requested`, `login_succeeded`, `login_failed` (reason `unknown`, `expired`, `used` or `revoked`), `logout` and `rate_limited` (reason = scope; written once per key and window, on the first denied request, so hammering cannot grow the append-only table), with user id, session row id and client IP. It never holds a token, a session id cookie value or a full address: `email_masked` (`a***@example.com`) is filled only for a per-email rate limit, where no user id is used. `user_id` has no foreign key so the trail stays intact.
 
 Application logs follow [docs/logging.md](logging.md) and carry `user_id` and `session_id` (the row id) only. The shared formatter redacts fields named like `token` or `cookie`, but it does not recognise email addresses, so the service never passes an address, token or cookie value to a logger, and an SMTP failure is logged by exception type only. `test_logging_redaction.py` runs a full flow and checks the captured JSON.
 

@@ -404,6 +404,23 @@ def test_rate_limit_window_rolls_over_and_old_counters_are_removed(service, cloc
     assert scalar(identity_db, select(func.min(rate_limit_counters.c.window_start))) > START
 
 
+def test_over_limit_hits_add_one_rate_limited_event_per_window(service, identity_db):
+    for _ in range(5):
+        service.request_login("alice@example.com", IP)
+
+    for _ in range(100):
+        with pytest.raises(RateLimited):
+            service.request_login("alice@example.com", IP)
+
+    with identity_db.connect() as connection:
+        reasons = connection.execute(
+            select(auth_events.c.reason).where(auth_events.c.event_type == "rate_limited")
+        ).scalars()
+        # One row per scope that tripped (per email at the 6th, per IP at the
+        # 21st request), not one per denied request.
+        assert sorted(reasons) == ["login_email", "login_ip"]
+
+
 def test_verify_attempts_are_limited_per_ip(service):
     for _ in range(30):
         with pytest.raises(InvalidOrExpiredLink):

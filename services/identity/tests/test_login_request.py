@@ -121,6 +121,22 @@ def test_sixth_request_for_one_address_is_rate_limited():
     assert harness.request_login("bob@example.com").status_code == 202
 
 
+def test_repeated_denials_add_one_audit_event_per_window():
+    # auth_events is append-only: hammering must not grow it without bound.
+    harness = make_harness()
+    for _ in range(5):
+        harness.request_login("alice@example.com")
+
+    statuses = {harness.request_login("alice@example.com").status_code for _ in range(10)}
+
+    assert statuses == {429}
+    assert harness.repository.event_types().count("rate_limited") == 1
+    harness.clock.advance(900)
+    for _ in range(7):
+        harness.request_login("alice@example.com")
+    assert harness.repository.event_types().count("rate_limited") == 2
+
+
 def test_unknown_and_known_addresses_are_limited_identically():
     harness = make_harness()
     harness.sign_in("known@example.com")
