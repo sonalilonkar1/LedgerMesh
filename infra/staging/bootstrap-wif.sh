@@ -38,7 +38,8 @@ DEPLOY_SA_NAME="ledgermesh-deployer"
 VM_SA_NAME="ledgermesh-staging-vm"
 ATTRIBUTE_MAPPING="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_id=assertion.repository_id,attribute.ref=assertion.ref"
 ATTRIBUTE_CONDITION="assertion.repository=='$REPOSITORY' && assertion.repository_id=='$REPOSITORY_ID' && assertion.ref=='$BRANCH_REF'"
-SSH_CONDITION="expression=destination.port == 22,title=ledgermesh-staging-ssh-only,description=IAP TCP forwarding to SSH only"
+SSH_CONDITION_TITLE="ledgermesh-staging-ssh-only"
+SSH_CONDITION="expression=destination.port == 22,title=$SSH_CONDITION_TITLE,description=IAP TCP forwarding to SSH only"
 APIS=(iam.googleapis.com iamcredentials.googleapis.com sts.googleapis.com
   iap.googleapis.com compute.googleapis.com oslogin.googleapis.com)
 DRY_RUN_PROJECT_NUMBER="123456789012"
@@ -49,7 +50,7 @@ die() {
 }
 
 usage() {
-  sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 COMMAND="up"
@@ -102,6 +103,11 @@ run_iam() {
   done
 }
 
+# gcloud's "does not exist" answers (see provision.sh). Any other lookup
+# failure stops the script instead of reading as "absent".
+NOT_FOUND_RE='NOT_FOUND|[Ww]as not found|[Nn]ot found'
+DENIED_RE='PERMISSION_DENIED|[Pp]ermission'
+
 DRY_RUN_ASSUME_PRESENT=0
 exists() {
   if [[ "$DRY_RUN" == 1 ]]; then
@@ -109,7 +115,39 @@ exists() {
     [[ "$DRY_RUN_ASSUME_PRESENT" == 1 ]]
     return
   fi
-  "$@" >/dev/null 2>&1
+  local err status=0
+  err="$("$@" 2>&1 >/dev/null)" || status=$?
+  [[ "$status" == 0 ]] && return 0
+  if [[ "$err" =~ $NOT_FOUND_RE && ! "$err" =~ $DENIED_RE ]]; then
+    return 1
+  fi
+  die "lookup failed (not a 'not found'), stopping: $(quote "$@"): $err"
+}
+
+# Does the project IAM policy bind <member> to <role> with the condition
+# titled <title> ("" = unconditional)? gcloud fails when asked to remove a
+# binding that is not there, so teardown checks first. A dry run assumes present.
+has_project_binding() {
+  local member="$1" role="$2" title="$3" policy
+  if [[ "$DRY_RUN" == 1 ]]; then
+    echo "# check: $(quote gcloud projects get-iam-policy "$PROJECT" --flatten "bindings[].members")"
+    return 0
+  fi
+  policy="$(gcloud projects get-iam-policy "$PROJECT" --flatten "bindings[].members" \
+    --format "value(bindings.role,bindings.members,bindings.condition.title)")" \
+    || die "could not read the IAM policy of $PROJECT"
+  awk -F '\t' -v r="$role" -v m="$member" -v t="$title" \
+    '$1 == r && $2 == m && $3 == t { found = 1 } END { exit !found }' <<<"$policy"
+}
+
+# remove_project_binding <member> <role> <condition title or ""> <--condition value>
+remove_project_binding() {
+  if has_project_binding "$1" "$2" "$3"; then
+    run "${G[@]}" projects remove-iam-policy-binding "$PROJECT" \
+      --member "$1" --role "$2" --condition "$4"
+  else
+    echo "bootstrap-wif: no $2 binding for $1; nothing to remove" >&2
+  fi
 }
 
 project_number() {
@@ -187,11 +225,9 @@ teardown() {
   [[ "$CONFIRM" == "$PROJECT" ]] || die "teardown removes deploy access; pass --confirm $PROJECT"
   DRY_RUN_ASSUME_PRESENT=1
   if exists "${G[@]}" iam service-accounts describe "$DEPLOY_SA"; then
-    run "${G[@]}" projects remove-iam-policy-binding "$PROJECT" \
-      --member "serviceAccount:$DEPLOY_SA" --role roles/iap.tunnelResourceAccessor \
-      --condition "$SSH_CONDITION"
-    run "${G[@]}" projects remove-iam-policy-binding "$PROJECT" \
-      --member "serviceAccount:$DEPLOY_SA" --role roles/compute.viewer --condition None
+    remove_project_binding "serviceAccount:$DEPLOY_SA" roles/iap.tunnelResourceAccessor \
+      "$SSH_CONDITION_TITLE" "$SSH_CONDITION"
+    remove_project_binding "serviceAccount:$DEPLOY_SA" roles/compute.viewer "" None
     run "${G[@]}" iam service-accounts delete "$DEPLOY_SA"
   fi
   if exists "${G[@]}" iam workload-identity-pools providers describe "$PROVIDER" \

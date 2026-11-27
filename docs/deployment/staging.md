@@ -76,7 +76,7 @@ Caddy (`infra/staging/Caddyfile`) forwards only these routes. Everything else, i
 
 ## 3. Provision
 
-`infra/staging/provision.sh` creates everything with `gcloud`. It is idempotent: each resource is looked up and created only if missing, so re-running it is safe and also refreshes the VM's startup script and metadata.
+`infra/staging/provision.sh` creates everything with `gcloud`. It is idempotent: each resource is looked up and created only if missing, so re-running it is safe and also refreshes the VM's startup script and metadata. Only a `NOT_FOUND` / "was not found" answer counts as missing: any other lookup error (permission denied, API disabled, network) stops the script, so a re-run never adds a second password version or a duplicate budget because a list call failed.
 
 **Who runs it:** a project Owner (or someone with Compute Admin, Security Admin, Secret Manager Admin, Service Account Admin and Billing Account Costs Manager on the billing account). Billing must be enabled on the project.
 
@@ -359,7 +359,7 @@ bash infra/staging/provision.sh teardown --confirm deven-cloud-lab \
 bash infra/staging/bootstrap-wif.sh teardown --confirm deven-cloud-lab
 ```
 
-This deletes the VM, the data disk **and all its data**, the snapshots, the snapshot schedule, the IP, firewall rules, subnet, VPC, secrets, the VM service account, the admins' project-level bindings and the budget. Take a snapshot or `pg_dump` first if anything should be kept. Deleted Workload Identity pools stay soft-deleted for 30 days. Then remove `STAGING_URL` from the GitHub environment and update this page.
+Teardown is safe to re-run: what is already gone, including an IAM binding someone removed by hand, is skipped. Any lookup error other than "not found" stops it with an error instead of reporting success while resources are still billed. It deletes the VM, the data disk **and all its data**, the snapshots, the snapshot schedule, the IP, firewall rules, subnet, VPC, secrets, the VM service account, the admins' project-level bindings and the budget. Take a snapshot or `pg_dump` first if anything should be kept. Deleted Workload Identity pools stay soft-deleted for 30 days. Then remove `STAGING_URL` from the GitHub environment and update this page.
 
 ## 14. Local validation
 

@@ -70,7 +70,8 @@ APIS=(compute.googleapis.com iap.googleapis.com secretmanager.googleapis.com
   iam.googleapis.com)
 # Documentation range (RFC 5737), shown only by dry runs instead of the real IP.
 DRY_RUN_IP="203.0.113.10"
-SSH_CONDITION="expression=destination.port == 22,title=ledgermesh-staging-ssh-only,description=IAP TCP forwarding to SSH only"
+SSH_CONDITION_TITLE="ledgermesh-staging-ssh-only"
+SSH_CONDITION="expression=destination.port == 22,title=$SSH_CONDITION_TITLE,description=IAP TCP forwarding to SSH only"
 
 die() {
   echo "provision: $*" >&2
@@ -150,9 +151,16 @@ run_iam() {
   done
 }
 
-# Is a resource present? A dry run prints the lookup and assumes absent for
-# up and present for teardown. A lookup error reads as absent; the following
-# create then fails loudly, so nothing is skipped silently.
+# gcloud's "does not exist" answers: NOT_FOUND from the newer APIs, "was not
+# found" from Compute. Anything else (permission denied, API disabled,
+# network) is an error, never "absent".
+NOT_FOUND_RE='NOT_FOUND|[Ww]as not found|[Nn]ot found'
+DENIED_RE='PERMISSION_DENIED|[Pp]ermission'
+
+# Is a resource present? 0 = present, 1 = absent (gcloud said not found).
+# Any other lookup failure stops the script, so neither `up` nor `teardown`
+# ever mistakes an error for "absent" and skips a resource silently.
+# A dry run prints the lookup and assumes absent for up and present for teardown.
 DRY_RUN_ASSUME_PRESENT=0
 exists() {
   if [[ "$DRY_RUN" == 1 ]]; then
@@ -160,10 +168,18 @@ exists() {
     [[ "$DRY_RUN_ASSUME_PRESENT" == 1 ]]
     return
   fi
-  "$@" >/dev/null 2>&1
+  local err status=0
+  err="$("$@" 2>&1 >/dev/null)" || status=$?
+  [[ "$status" == 0 ]] && return 0
+  if [[ "$err" =~ $NOT_FOUND_RE && ! "$err" =~ $DENIED_RE ]]; then
+    return 1
+  fi
+  die "lookup failed (not a 'not found'), stopping: $(quote "$@"): $err"
 }
 
-# A read-only query whose output is needed (never changes anything).
+# A read-only query whose output is needed (never changes anything). Callers
+# assign it to a variable with `|| die`: a failure inside `[[ ]]`, `if` or a
+# `for` word list would not stop the script.
 query() {
   local placeholder="$1"
   shift
@@ -173,6 +189,30 @@ query() {
     return 0
   fi
   "$@"
+}
+
+# Does the project IAM policy bind <member> to <role> (with the condition
+# titled <title>, or unconditionally when <title> is empty)? Removing a
+# binding that is not there is an error in gcloud, so teardown checks first.
+# A dry run assumes present.
+has_project_binding() {
+  local member="$1" role="$2" title="$3" policy
+  policy="$(query "$role"$'\t'"$member"$'\t'"$title" gcloud projects get-iam-policy "$PROJECT" \
+    --flatten "bindings[].members" \
+    --format "value(bindings.role,bindings.members,bindings.condition.title)")" \
+    || die "could not read the IAM policy of $PROJECT"
+  awk -F '\t' -v r="$role" -v m="$member" -v t="$title" \
+    '$1 == r && $2 == m && $3 == t { found = 1 } END { exit !found }' <<<"$policy"
+}
+
+# remove_project_binding <member> <role> <condition title or ""> <--condition value>
+remove_project_binding() {
+  if has_project_binding "$1" "$2" "$3"; then
+    run "${G[@]}" projects remove-iam-policy-binding "$PROJECT" \
+      --member "$1" --role "$2" --condition "$4"
+  else
+    log "no $2 binding for $1${3:+ (condition $3)}; nothing to remove"
+  fi
 }
 
 G=(gcloud --project "$PROJECT" --quiet)
@@ -238,14 +278,18 @@ up() {
     --member "serviceAccount:$VM_SA" --role roles/logging.logWriter --condition None
 
   log "6/10 database password secrets (generated here, never printed)"
-  local suffix name
+  local suffix name versions
   for suffix in "${SECRET_SUFFIXES[@]}"; do
     name="$SECRET_PREFIX-$suffix"
     if ! exists "${G[@]}" secrets describe "$name"; then
       run "${G[@]}" secrets create "$name" --replication-policy automatic \
         --labels app=ledgermesh,env=staging
     fi
-    if [[ -z "$(query "" "${G[@]}" secrets versions list "$name" --filter "state=ENABLED" --format "value(name)" --limit 1)" ]]; then
+    # Only a successful, empty answer means "no version": on a failed list a
+    # new random version would replace the password PostgreSQL still uses.
+    versions="$(query "" "${G[@]}" secrets versions list "$name" --filter "state=ENABLED" \
+      --format "value(name)" --limit 1)" || die "could not list the versions of secret $name"
+    if [[ -z "$versions" ]]; then
       # Hex, so the value is safe inside DATABASE_URL; no trailing newline.
       echo "+ openssl rand -hex 32 | tr -d '\\n' | $(quote "${G[@]}" secrets versions add "$name" --data-file -)"
       if [[ "$DRY_RUN" == 0 ]]; then
@@ -266,10 +310,14 @@ up() {
     run "${G[@]}" compute disks create "$DATA_DISK" --zone "$ZONE" --type pd-balanced \
       --size "${DATA_DISK_SIZE}GB" --resource-policies "$SNAPSHOT_SCHEDULE" \
       --labels app=ledgermesh,env=staging
-  elif ! query "" "${G[@]}" compute disks describe "$DATA_DISK" --zone "$ZONE" \
-    --format "value(resourcePolicies)" | grep -q "/$SNAPSHOT_SCHEDULE"; then
-    run "${G[@]}" compute disks add-resource-policies "$DATA_DISK" --zone "$ZONE" \
-      --resource-policies "$SNAPSHOT_SCHEDULE"
+  else
+    local policies
+    policies="$(query "" "${G[@]}" compute disks describe "$DATA_DISK" --zone "$ZONE" \
+      --format "value(resourcePolicies)")" || die "could not read the resource policies of $DATA_DISK"
+    if [[ "$policies" != *"/$SNAPSHOT_SCHEDULE"* ]]; then
+      run "${G[@]}" compute disks add-resource-policies "$DATA_DISK" --zone "$ZONE" \
+        --resource-policies "$SNAPSHOT_SCHEDULE"
+    fi
   fi
 
   log "8/10 VM"
@@ -308,8 +356,11 @@ up() {
   done
 
   log "10/10 billing budget (alerts only; it does not cap spending)"
-  if [[ -z "$(query "" "${G[@]}" billing budgets list --billing-account "$BILLING_ACCOUNT" \
-    --filter "displayName=$BUDGET_NAME" --format "value(name)")" ]]; then
+  local budgets
+  budgets="$(query "" "${G[@]}" billing budgets list --billing-account "$BILLING_ACCOUNT" \
+    --filter "displayName=$BUDGET_NAME" --format "value(name)")" \
+    || die "could not list the budgets of billing account $BILLING_ACCOUNT"
+  if [[ -z "$budgets" ]]; then
     run "${G[@]}" billing budgets create --billing-account "$BILLING_ACCOUNT" \
       --display-name "$BUDGET_NAME" --budget-amount "${BUDGET_AMOUNT}USD" \
       --threshold-rule percent=0.5 --threshold-rule percent=0.9 --threshold-rule percent=1.0 \
@@ -357,9 +408,11 @@ teardown() {
   if exists "${G[@]}" compute disks describe "$DATA_DISK" --zone "$ZONE"; then
     run "${G[@]}" compute disks delete "$DATA_DISK" --zone "$ZONE"
   fi
-  local snapshot
-  for snapshot in $(query "ledgermesh-data-snapshot-example" "${G[@]}" compute snapshots list \
-    --filter "sourceDisk~/disks/$DATA_DISK\$" --format "value(name)"); do
+  local snapshot snapshots
+  snapshots="$(query "ledgermesh-data-snapshot-example" "${G[@]}" compute snapshots list \
+    --filter "sourceDisk~/disks/$DATA_DISK\$" --format "value(name)")" \
+    || die "could not list the snapshots of $DATA_DISK"
+  for snapshot in $snapshots; do
     run "${G[@]}" compute snapshots delete "$snapshot"
   done
   if exists "${G[@]}" compute resource-policies describe "$SNAPSHOT_SCHEDULE" --region "$REGION"; then
@@ -387,21 +440,22 @@ teardown() {
     fi
   done
   local member
+  # Bindings already removed by hand (or listed twice) are skipped, so a
+  # re-run after a partial teardown finishes.
   for member in ${ADMIN_MEMBERS[@]+"${ADMIN_MEMBERS[@]}"}; do
-    run "${G[@]}" projects remove-iam-policy-binding "$PROJECT" \
-      --member "$member" --role roles/iap.tunnelResourceAccessor --condition "$SSH_CONDITION"
-    run "${G[@]}" projects remove-iam-policy-binding "$PROJECT" \
-      --member "$member" --role roles/compute.viewer --condition None
+    remove_project_binding "$member" roles/iap.tunnelResourceAccessor "$SSH_CONDITION_TITLE" "$SSH_CONDITION"
+    remove_project_binding "$member" roles/compute.viewer "" None
   done
   if exists "${G[@]}" iam service-accounts describe "$VM_SA"; then
-    run "${G[@]}" projects remove-iam-policy-binding "$PROJECT" \
-      --member "serviceAccount:$VM_SA" --role roles/logging.logWriter --condition None
+    remove_project_binding "serviceAccount:$VM_SA" roles/logging.logWriter "" None
     run "${G[@]}" iam service-accounts delete "$VM_SA"
   fi
   if [[ -n "$BILLING_ACCOUNT" ]]; then
-    local budget
-    for budget in $(query "billingAccounts/000000-000000-000000/budgets/example" "${G[@]}" billing budgets list \
-      --billing-account "$BILLING_ACCOUNT" --filter "displayName=$BUDGET_NAME" --format "value(name)"); do
+    local budget budgets
+    budgets="$(query "billingAccounts/000000-000000-000000/budgets/example" "${G[@]}" billing budgets list \
+      --billing-account "$BILLING_ACCOUNT" --filter "displayName=$BUDGET_NAME" --format "value(name)")" \
+      || die "could not list the budgets of billing account $BILLING_ACCOUNT"
+    for budget in $budgets; do
       run "${G[@]}" billing budgets delete "$budget"
     done
   else

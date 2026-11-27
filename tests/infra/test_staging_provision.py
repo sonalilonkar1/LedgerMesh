@@ -28,16 +28,32 @@ UP_ARGS = [
     "user:admin@example.com",
 ]
 
-# Logs every call. FAKE_PRESENT=1 answers every lookup as an existing resource.
+# Logs every call.
+#   FAKE_PRESENT=1       every lookup finds an existing resource
+#   FAKE_PRESENT=absent  every describe answers NOT_FOUND; lists are empty
+#   otherwise            any call fails (dry runs must not call gcloud)
+#   FAKE_FAIL=<words>    a call containing <words> fails with PERMISSION_DENIED
+#   FAKE_POLICY          get-iam-policy output (role<TAB>member<TAB>condition title)
 FAKE_GCLOUD = f"""#!{sys.executable}
 import json, os, sys
 
 args = sys.argv[1:]
 with open(os.environ["FAKE_LOG"], "a") as log:
     log.write(json.dumps(args) + "\\n")
+joined = " ".join(args)
+if os.environ.get("FAKE_FAIL") and os.environ["FAKE_FAIL"] in joined:
+    sys.stderr.write("ERROR: (gcloud) PERMISSION_DENIED: Permission denied.\\n")
+    sys.exit(1)
+if "get-iam-policy" in args:
+    print(os.environ.get("FAKE_POLICY", ""))
+    sys.exit(0)
+if os.environ.get("FAKE_PRESENT") == "absent":
+    if "describe" in args:
+        sys.stderr.write("ERROR: (gcloud) NOT_FOUND: Requested entity was not found.\\n")
+        sys.exit(1)
+    sys.exit(0)
 if os.environ.get("FAKE_PRESENT") != "1":
     sys.exit(99)
-joined = " ".join(args)
 if "addresses describe" in joined and "value(address)" in joined:
     print("34.105.1.2")
 elif "disks describe" in joined and "value(resourcePolicies)" in joined:
@@ -57,12 +73,15 @@ def gcloud(tmp_path: Path):
     install(bin_dir / "openssl", f"#!{sys.executable}\nimport sys\nsys.exit(98)\n")
     log = tmp_path / "gcloud.log"
 
-    def run(script: str, *args: str, present: bool = False):
+    def run(script: str, *args: str, present: bool | str = False, **fake: str):
+        if log.exists():
+            log.unlink()
         env = {
             **os.environ,
             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
             "FAKE_LOG": str(log),
-            "FAKE_PRESENT": "1" if present else "0",
+            "FAKE_PRESENT": present if isinstance(present, str) else ("1" if present else "0"),
+            **fake,
         }
         env.pop("LEDGERMESH_GCP_PROJECT", None)
         result = subprocess.run(
@@ -291,6 +310,90 @@ def test_teardown_dry_run_deletes_everything_up_created(gcloud):
     assert "bootstrap-wif.sh teardown" in result.stdout
 
 
+TEARDOWN = ["teardown", "--confirm", "deven-cloud-lab", "--billing-account", "000000-000000-000000"]
+ADMIN = "user:admin@example.com"
+VM_SA = "serviceAccount:ledgermesh-staging-vm@deven-cloud-lab.iam.gserviceaccount.com"
+
+
+def test_up_never_adds_a_password_when_the_version_list_fails(gcloud):
+    result, calls = gcloud(
+        "provision.sh", "up", *UP_ARGS, present=True, FAKE_FAIL="secrets versions list"
+    )
+
+    assert result.returncode != 0
+    assert "could not list the versions" in result.stderr
+    assert not [call for call in calls if "versions" in call and "add" in call]
+
+
+def test_up_never_creates_a_second_budget_when_the_budget_list_fails(gcloud):
+    result, calls = gcloud(
+        "provision.sh", "up", *UP_ARGS, present=True, FAKE_FAIL="billing budgets list"
+    )
+
+    assert result.returncode != 0
+    assert not [call for call in calls if "budgets" in call and "create" in call]
+
+
+@pytest.mark.parametrize(
+    "failing",
+    ["compute disks describe", "compute snapshots list", "get-iam-policy"],
+)
+def test_teardown_stops_on_a_lookup_error_instead_of_reporting_success(gcloud, failing):
+    result, _ = gcloud(
+        "provision.sh",
+        *TEARDOWN,
+        "--admin-member",
+        ADMIN,
+        present=True,
+        FAKE_FAIL=failing,
+        FAKE_POLICY="",
+    )
+
+    assert result.returncode != 0
+    assert "Teardown finished" not in result.stdout
+
+
+def test_teardown_of_absent_resources_finishes_without_deleting(gcloud):
+    result, calls = gcloud("provision.sh", *TEARDOWN, "--admin-member", ADMIN, present="absent")
+
+    assert result.returncode == 0, result.stderr
+    assert "Teardown finished" in result.stdout
+    assert not [call for call in calls if "delete" in call or "remove-iam-policy-binding" in call]
+
+
+def test_teardown_removes_only_the_bindings_that_exist(gcloud):
+    policy = "\n".join(
+        [
+            f"roles/compute.viewer\t{ADMIN}\t",
+            f"roles/logging.logWriter\t{VM_SA}\t",
+            "roles/iap.tunnelResourceAccessor\tuser:other@example.com\tledgermesh-staging-ssh-only",
+        ]
+    )
+    result, calls = gcloud(
+        "provision.sh",
+        *TEARDOWN,
+        "--admin-member",
+        ADMIN,
+        "--admin-member",
+        ADMIN,
+        present=True,
+        FAKE_POLICY=policy,
+    )
+
+    assert result.returncode == 0, result.stderr
+    removed = [
+        (flag(call, "--member")[0], flag(call, "--role")[0])
+        for call in calls
+        if "remove-iam-policy-binding" in call
+    ]
+    # The admin's IAP binding is already gone; the admin is listed twice.
+    assert sorted(set(removed)) == [
+        (VM_SA, "roles/logging.logWriter"),
+        (ADMIN, "roles/compute.viewer"),
+    ]
+    assert "Teardown finished" in result.stdout
+
+
 @pytest.mark.parametrize("command", ["stop", "start", "status"])
 def test_lifecycle_commands_dry_run(gcloud, command):
     result, calls = gcloud("provision.sh", command, "--dry-run")
@@ -362,3 +465,33 @@ def test_wif_teardown_requires_confirmation(gcloud):
     assert result.returncode == 0, result.stderr
     assert calls == []
     assert find(commands(result.stdout), "workload-identity-pools", "delete")
+
+
+def test_wif_teardown_skips_bindings_that_are_already_gone(gcloud):
+    deployer = "serviceAccount:ledgermesh-deployer@deven-cloud-lab.iam.gserviceaccount.com"
+    result, calls = gcloud(
+        "bootstrap-wif.sh",
+        "teardown",
+        "--confirm",
+        "deven-cloud-lab",
+        present=True,
+        FAKE_POLICY=f"roles/compute.viewer\t{deployer}\t",
+    )
+
+    assert result.returncode == 0, result.stderr
+    removed = [flag(call, "--role")[0] for call in calls if "remove-iam-policy-binding" in call]
+    assert removed == ["roles/compute.viewer"]
+
+
+def test_wif_teardown_stops_on_a_lookup_error(gcloud):
+    result, calls = gcloud(
+        "bootstrap-wif.sh",
+        "teardown",
+        "--confirm",
+        "deven-cloud-lab",
+        present=True,
+        FAKE_FAIL="service-accounts describe",
+    )
+
+    assert result.returncode != 0
+    assert not [call for call in calls if "delete" in call]
