@@ -1,0 +1,119 @@
+# Single-node KRaft broker, as in compose.yaml:16-44 (LM-041).
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-headless
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/component: broker
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: kafka
+  ports:
+    - name: internal
+      port: 19092
+---
+# Applications use kafka:19092, the INTERNAL advertised listener.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/component: broker
+spec:
+  selector:
+    app.kubernetes.io/name: kafka
+  ports:
+    - name: internal
+      port: 19092
+      targetPort: internal
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/component: broker
+spec:
+  serviceName: kafka-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kafka
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kafka
+        app.kubernetes.io/component: broker
+    spec:
+      # Required: a Service named "kafka" would otherwise inject KAFKA_PORT and
+      # friends, which the apache/kafka image turns into broker settings.
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        # appuser in apache/kafka:4.4.0 (checked with `id`; see README).
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: kafka
+          image: apache/kafka:4.4.0
+          envFrom:
+            - configMapRef:
+                name: kafka-config
+          ports:
+            - name: internal
+              containerPort: 19092
+            - name: external
+              containerPort: 29092
+            - name: controller
+              containerPort: 29093
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          # TCP checks only: the compose check (kafka-topics.sh --list,
+          # compose.yaml:41) starts a JVM each time and costs too much memory.
+          startupProbe:
+            tcpSocket:
+              port: internal
+            periodSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            tcpSocket:
+              port: internal
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: internal
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 250m
+              memory: 768Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+          volumeMounts:
+            # The volume is mounted one level up so KAFKA_LOG_DIRS
+            # (/var/lib/kafka/data) is a clean subdirectory, never a
+            # filesystem root that may contain lost+found.
+            - name: data
+              mountPath: /var/lib/kafka
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 2Gi

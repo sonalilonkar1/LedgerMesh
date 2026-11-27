@@ -1,0 +1,58 @@
+# Creates the 15 LedgerMesh topics (topics.py:98-125) with the project's own
+# bootstrap command (libs/messaging/pyproject.toml:14, README.md:66-76). Kafka
+# has auto-create disabled (compose.yaml:39), so this must run before any
+# worker subscribes. ensure_topics is idempotent and tolerates a concurrent
+# bootstrap (topics.py:166-171); workers re-run it as an init container too.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-topics
+  labels:
+    app.kubernetes.io/name: kafka-topics
+    app.kubernetes.io/component: topic-bootstrap
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kafka-topics
+        app.kubernetes.io/component: topic-bootstrap
+    spec:
+      restartPolicy: Never
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: topics
+          image: ledgermesh-coordinator
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - >-
+              for i in $(seq 1 60); do
+              ledgermesh-topics --bootstrap-servers kafka:19092 --replication-factor 1 && exit 0;
+              sleep 5; done; exit 1
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 96Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
