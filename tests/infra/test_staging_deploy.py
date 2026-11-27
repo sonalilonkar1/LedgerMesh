@@ -415,6 +415,29 @@ def test_no_promote_leaves_the_previous_release_last_known_good(host):
     assert host.release(B)["status"] == "promoted"
 
 
+def test_deploy_refuses_a_bundle_from_another_commit(host):
+    host.publish(A)
+    host.publish(B)
+    assert host.deploy(A).returncode == 0
+    (host.bundle / ".bundle-revision").write_text(C + "\n")
+
+    wrong = host.deploy(B)
+
+    assert wrong.returncode == 1
+    assert f"infra/staging at {C}, not {B}" in wrong.stderr
+    assert not (host.data / "releases" / B).exists()
+
+    # An installed release bundle (/opt/ledgermesh/staging) can redeploy its
+    # own commit, but never another one.
+    (host.bundle / ".bundle-revision").unlink()
+    host.bundle = host.data / "releases" / A / "bundle"
+    assert host.deploy(A).returncode == 0
+    refused = host.deploy(B)
+    assert refused.returncode == 1
+    assert "another release's bundle" in refused.stderr
+    assert host.running_revisions() == {A}
+
+
 # ---- nothing changes when the images are wrong -------------------------------------
 
 

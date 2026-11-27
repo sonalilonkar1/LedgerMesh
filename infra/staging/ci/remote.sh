@@ -107,10 +107,16 @@ NONCE="$(date -u +%Y%m%d%H%M%S)-$$"
 REMOTE_BUNDLE="ledgermesh-bundle-$NONCE.tgz"
 
 upload_bundle() {
-  # upload_bundle <git revision>: infra/staging as committed at that revision.
-  local revision="$1"
-  git -C "$ROOT" archive --format=tar.gz -o "$WORK/bundle.tgz" "$revision:infra/staging" \
-    || die "could not archive infra/staging at $revision"
+  # upload_bundle <git revision>: infra/staging as committed at that revision,
+  # plus .bundle-revision naming that commit (deploy.sh checks it).
+  local revision commit
+  revision="$1"
+  commit="$(git -C "$ROOT" rev-parse --verify "$revision^{commit}")" || die "unknown revision $revision"
+  mkdir -p "$WORK/bundle"
+  git -C "$ROOT" archive --format=tar "$commit:infra/staging" | tar -xf - -C "$WORK/bundle" \
+    || die "could not archive infra/staging at $commit"
+  echo "$commit" >"$WORK/bundle/.bundle-revision"
+  COPYFILE_DISABLE=1 tar -czf "$WORK/bundle.tgz" -C "$WORK/bundle" . || die "could not pack the bundle"
   BUNDLE_SUM="$(cd "$WORK" && { sha256sum bundle.tgz 2>/dev/null || shasum -a 256 bundle.tgz; } | awk '{ print $1 }')"
   [[ "$BUNDLE_SUM" =~ ^[0-9a-f]{64}$ ]] || die "could not checksum the bundle"
   gcloud compute scp "${GCLOUD_SSH_FLAGS[@]}" "$WORK/bundle.tgz" "$VM:$REMOTE_BUNDLE"

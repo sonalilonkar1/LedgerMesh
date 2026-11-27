@@ -243,7 +243,11 @@ args = sys.argv[1:]
 assert args[0] == "bash" and args[1].endswith("/deploy.sh"), args
 bundle = os.path.dirname(args[1])
 with open(os.environ["FAKE_SUDO_LOG"], "a") as log:
-    log.write(json.dumps({{"args": args[2:], "files": sorted(os.listdir(bundle))}}) + "\\n")
+    log.write(json.dumps({{
+        "args": args[2:],
+        "files": sorted(os.listdir(bundle)),
+        "revision": open(os.path.join(bundle, ".bundle-revision")).read().strip(),
+    }}) + "\\n")
 if args[2] == "logs":
     with tarfile.open(args[3], "w:gz") as out:
         out.add(args[1], arcname="deploy.sh")
@@ -351,6 +355,7 @@ def test_remote_deploy_uploads_that_commits_bundle_over_iap(remote):
     # The bundle is infra/staging as committed, unpacked on the "VM".
     assert {"deploy.sh", "stack.sh", "compose.yaml", "Caddyfile"} <= set(ran["files"])
     assert ".env.local" not in ran["files"]
+    assert ran["revision"] == HEAD
     # Nothing is left in the VM user's home.
     assert list(remote.home.iterdir()) == []
 

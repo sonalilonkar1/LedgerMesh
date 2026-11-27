@@ -680,14 +680,16 @@ rollback_to() {
   local target="$1" failed="${2:-}"
   log "restoring $target (no migrations, no topic bootstrap)"
   history_add event=rollback_started "sha=$target" "from=${failed:-none}" "actor=$ACTOR"
+  # Called as a condition, where `set -e` does not apply: every step checks.
   if apply_release "$target" rollback; then
-    set_pointer current "$target"
-    update_link "$target"
-    set_pointer last-known-good "$target"
-    record_set "$target" "last_restored_at=$(utc)"
-    history_add event=rolled_back "sha=$target" "from=${failed:-none}" "actor=$ACTOR"
+    set_pointer current "$target" || return 1
+    update_link "$target" || return 1
+    set_pointer last-known-good "$target" || return 1
+    record_set "$target" "last_restored_at=$(utc)" || return 1
+    history_add event=rolled_back "sha=$target" "from=${failed:-none}" "actor=$ACTOR" || return 1
     if [[ -n "$failed" && -f "$(release_json "$failed")" ]]; then
-      record_set "$failed" status=failed_rolled_back "rolled_back_to=$target" "finished_at=$(utc)"
+      record_set "$failed" status=failed_rolled_back "rolled_back_to=$target" "finished_at=$(utc)" \
+        || return 1
     fi
     log "restored $target"
     return 0
@@ -703,6 +705,17 @@ rollback_to() {
 cmd_deploy() {
   local sha="${1:-}" rel previous current attempt started tmp_images tmp_fields phase url
   [[ "$sha" =~ $SHA_RE ]] || die "deploy needs a full 40-character lowercase commit SHA"
+  # This directory becomes the release's bundle, so it must be infra/staging
+  # at <sha>: remote.sh marks its upload with .bundle-revision, and an older
+  # release's installed bundle (/opt/ledgermesh/staging) must not be reused.
+  if [[ -f "$SCRIPT_DIR/.bundle-revision" && "$(cat "$SCRIPT_DIR/.bundle-revision")" != "$sha" ]]; then
+    die "this bundle is infra/staging at $(cat "$SCRIPT_DIR/.bundle-revision"), not $sha; use ci/remote.sh deploy $sha"
+  fi
+  case "$SCRIPT_DIR/" in
+    "$(cd -P "$DATA_DIR" 2>/dev/null && pwd)/releases/$sha/bundle/") ;;
+    "$(cd -P "$DATA_DIR" 2>/dev/null && pwd)/releases/"*)
+      die "this is another release's bundle; deploy $sha with ci/remote.sh deploy $sha (it uploads infra/staging at $sha)" ;;
+  esac
   acquire_lock
   start_log "$sha"
   started="$(utc)"
