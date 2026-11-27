@@ -9,7 +9,7 @@
 # one redemption and the Audit Ledger recorded the terminal event (outbox ->
 # Kafka -> audit consumer).
 #
-# Uses only kubectl, curl, python3 and uv. Every wait is bounded.
+# Uses only kubectl, curl, python3, base64 and uv. Every wait is bounded.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -38,11 +38,20 @@ SMOKE_TIMEOUT_SECONDS="${SMOKE_TIMEOUT_SECONDS:-90}"
 kc() { kubectl --context "$KCTX" -n "$NS" "$@"; }
 json() { python3 -c "import json, sys; d = json.load(sys.stdin); print($1)"; }
 
+if [[ ! -f "$KUBECONFIG" ]]; then
+  echo "kubeconfig $KUBECONFIG not found: run make k8s-up first, or" >&2
+  echo "  kind export kubeconfig --name $CLUSTER --kubeconfig $KUBECONFIG" >&2
+  exit 1
+fi
+
+WORKDIR="$(mktemp -d)"
+SEED_ERR="$WORKDIR/seed.err"
 PIDS=()
 cleanup() {
   for pid in "${PIDS[@]:-}"; do
     [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
   done
+  rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
 
@@ -74,8 +83,12 @@ for entry in "coordinator-db coordinator" "wallet-db wallet" "catalog-db catalog
 done
 
 echo "== Port-forwards"
+# kubectl runs directly in the background (not through the kc function), so
+# $! is kubectl's own PID and cleanup really stops the forward. Output goes to
+# a log so a forward that cannot bind its port is visible.
 forward() {
-  kc port-forward "$1" "$2" >/dev/null 2>&1 &
+  kubectl --context "$KCTX" -n "$NS" port-forward "$1" "$2" \
+    >"$WORKDIR/pf-${2%%:*}.log" 2>&1 &
   PIDS+=("$!")
 }
 forward svc/coordinator "$COORDINATOR_PORT:8000"
@@ -84,8 +97,11 @@ forward svc/catalog "$CATALOG_PORT:8002"
 forward svc/audit-ledger "$AUDIT_PORT:8003"
 DB_PIDS=()
 forward_databases() {
+  # Stop the old forwards and wait until they have released their ports.
   for pid in "${DB_PIDS[@]:-}"; do
-    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+    [[ -n "$pid" ]] || continue
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
   done
   DB_PIDS=()
   forward svc/wallet-db "$WALLET_DB_PORT:5432"
@@ -115,17 +131,29 @@ check_health wallet "$WALLET_PORT"
 check_health catalog "$CATALOG_PORT"
 check_health audit-ledger "$AUDIT_PORT"
 
+# $1 local port, $2 PID of the kubectl port-forward that should own it. The
+# forward must still be running once the port answers; otherwise something
+# else (an earlier forward, a local PostgreSQL) holds the port.
 wait_for_port() {
   for _ in $(seq 1 30); do
+    if ! kill -0 "$2" 2>/dev/null; then
+      echo "port-forward to localhost:$1 exited:" >&2
+      cat "$WORKDIR/pf-$1.log" >&2 || true
+      return 1
+    fi
     python3 -c "import socket, sys; socket.create_connection(('127.0.0.1', int(sys.argv[1])), 1)" "$1" \
-      2>/dev/null && return 0
+      2>/dev/null && kill -0 "$2" 2>/dev/null && return 0
     sleep 1
   done
   echo "port-forward on localhost:$1 did not open" >&2
+  cat "$WORKDIR/pf-$1.log" >&2 || true
   return 1
 }
-wait_for_port "$WALLET_DB_PORT"
-wait_for_port "$CATALOG_DB_PORT"
+wait_for_databases() {
+  wait_for_port "$WALLET_DB_PORT" "${DB_PIDS[0]}"
+  wait_for_port "$CATALOG_DB_PORT" "${DB_PIDS[1]}"
+}
+wait_for_databases
 
 echo "== Seed (LM-006, insert-only, safe to repeat)"
 PW="$(kc get secret -l app.kubernetes.io/component=db-credentials \
@@ -143,19 +171,18 @@ seed() {
 # connections; re-open the forwards and retry (seeding is insert-only).
 seeded=0
 for attempt in 1 2 3; do
-  if seed 2>"${TMPDIR:-/tmp}/lm041-seed.err"; then
+  if seed 2>"$SEED_ERR"; then
     seeded=1
     break
   fi
   echo "seed attempt $attempt failed; re-opening database port-forwards" >&2
-  tail -n 1 "${TMPDIR:-/tmp}/lm041-seed.err" >&2
+  tail -n 1 "$SEED_ERR" >&2
   forward_databases
-  wait_for_port "$WALLET_DB_PORT"
-  wait_for_port "$CATALOG_DB_PORT"
+  wait_for_databases
   sleep 3
 done
 if [[ "$seeded" != 1 ]]; then
-  cat "${TMPDIR:-/tmp}/lm041-seed.err" >&2
+  cat "$SEED_ERR" >&2
   exit 1
 fi
 
