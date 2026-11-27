@@ -67,3 +67,13 @@ server must have `max_prepared_transactions` greater than zero.
 Database-backed component tests live under `tests/db`. The LM-021 suite in
 `tests/db/test_catalog_saga.py` covers transactional Catalog commands, durable
 results, early-release tombstones, malformed messages, and restart redelivery.
+
+## Hosted staging checks (LM-048)
+
+`tests/infra/test_staging_*.py` run offline in `make check`. They read
+`infra/staging/compose.yaml` and the Caddyfile (replaying the gateway's routes
+against allowed and forbidden paths), run `provision.sh` and `bootstrap-wif.sh`
+with `--dry-run` and a fake `gcloud`, run `render-env.sh` and `stack.sh` with
+fake `gcloud`, `curl` and `docker`, and scan the staging files for committed
+credentials. The live checks are `infra/staging/stack.sh verify all` against a
+running stack; see `docs/deployment/staging.md`.

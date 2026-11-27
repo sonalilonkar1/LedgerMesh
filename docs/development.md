@@ -39,6 +39,8 @@ make infra-down
 
 For ports, credentials, volume behavior, configuration overrides, and troubleshooting, see [the infrastructure guide](../infra/README.md).
 
+The hosted staging stack can also run locally with `make staging-images-local staging-local-up`; see [the staging runbook](deployment/staging.md#14-local-validation).
+
 Each service applies its database migrations when its container starts. For schemas, safety constraints, `make db-upgrade` / `db-reset` and the migration tests, see [the database guide](database.md).
 
 The Wallet Service's balance, deduction, and refund endpoints are documented in
