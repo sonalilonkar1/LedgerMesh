@@ -17,7 +17,7 @@ infra/k8s/
     apis.yaml           4 API Deployments + Services
     workers.yaml        3 Saga workers + audit consumer Deployments
   overlays/kind/        local images (:local), generated Secret, LEDGERMESH_ENV=local
-  overlays/ghcr/        published GHCR images by commit SHA (render only on arm64)
+  overlays/ghcr/        published GHCR images by commit SHA (amd64 images: render-only on arm64)
   kind-up.sh  smoke.sh  kind-down.sh
 ```
 
@@ -258,7 +258,10 @@ Remove them with `docker image rm` if you need the space.
 ## Verified on kind
 
 The following was checked on kind v0.33.0 with node image `kindest/node:v1.35.0`,
-on an arm64 Mac with Docker limited to 7.6 GiB:
+on an arm64 Mac with Docker limited to 7.6 GiB. Deploy, smoke, the readiness and
+liveness test and a repeat smoke were re-run on a fresh cluster by following only
+this README; the Kafka/PostgreSQL pod-deletion and port-conflict checks come from
+earlier development runs.
 
 - **Deploy.** `make k8s-up` brings every pod to Ready with 0 restarts in about
   2 minutes, including the image build. The kind node then uses about 2.1 GiB.
@@ -267,7 +270,7 @@ on an arm64 Mac with Docker limited to 7.6 GiB:
   `redemption.committed` and the Saga transition events.
 - **Server-side validation.** `kubectl apply -k overlays/kind --dry-run=server`
   accepts all 32 objects.
-- **Readiness and liveness.** The Coordinator's uvicorn process was frozen with
+- **Readiness and liveness (Coordinator API).** Its uvicorn process was frozen with
   `SIGSTOP`, sent from the node.
   - About 20 s later, readiness failed and the pod left the Service endpoints.
   - About 60 s later, liveness restarted the container. It became Ready again
@@ -294,7 +297,10 @@ fault test.
 - **Single node, single replica everywhere.** There is no Kafka replication or
   PostgreSQL high availability, and a node loss loses availability until the
   pods are rescheduled. The data survives on the PVCs while the cluster exists.
-- **Readiness is process-level only** (see Probes).
+- **Readiness is process-level only** (see Probes). Only the Coordinator API's
+  readiness and liveness were exercised by fault; the Kafka TCP and PostgreSQL
+  `pg_isready` probes were not observed failing. The workers have no liveness
+  probe, so a worker stuck on a database connection is not restarted.
 - **Kafka storage.**
   - The PVC is mounted at `/var/lib/kafka/data`, as in Compose. The
     `apache/kafka` image declares that path as a `VOLUME`, so mounting the PVC
@@ -305,19 +311,16 @@ fault test.
     classes backed by ext4 block volumes (the usual cloud defaults) create
     `lost+found` at the volume root. PostgreSQL uses a `PGDATA` subdirectory
     for the same reason.
-  - A cluster deployed before this change keeps its old topics at the volume
-    root; the broker formats the new subdirectory and starts empty. Re-create
-    the Kafka PVC (or the kind cluster) after upgrading.
 - **Known issue: one audit event was lost after a broker restart.** This was
-  seen once, during fault testing, and is not caused by the manifests.
+  seen once, during fault testing, and was not reproduced.
   - Right after the Kafka pod was deleted, the Coordinator's first send of a
     2PC terminal event failed with `OutOfOrderSequenceNumber`.
   - The next attempt marked the outbox row as published.
   - The event was never in `redemption.events`, so the Audit Ledger never
     recorded it. The business outcome (`COMMITTED`) was correct.
-  - This is in the outbox publisher and Kafka client
-    (`libs/messaging/.../publisher.py`), not in the deployment. It is reported
-    for follow-up. The normal smoke runs do not hit it.
+  - The cause is believed to be in the outbox publisher or the Kafka client
+    rather than the manifests, but this is not yet proven. It needs a follow-up
+    investigation. The normal smoke runs do not hit it.
 - **No Ingress or NetworkPolicy.** Services are ClusterIP only and are reached
   with port-forward.
 - **The smoke test assumes it is the only writer** to `user-alice` and
