@@ -13,6 +13,9 @@
 #   status [--expect <sha>]
 #   logs <local-out.tgz> [--sha <sha>]
 #       Writes the redacted log bundle on the VM and copies it here.
+#   fixtures <run_id>
+#       Create the hosted smoke suite's rows for one run (LM-050) in the
+#       running release; run_id is 6-40 lowercase letters and digits.
 #
 # Every command except deploy uploads the deploy tooling (infra/staging) of
 # the checked-out commit (HEAD), which is main in the workflows. The upload is
@@ -37,7 +40,7 @@ die() {
 }
 
 usage() {
-  sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 ARGS=()
@@ -150,6 +153,12 @@ case "$COMMAND" in
     check_args
     upload_bundle HEAD
     run_remote "$COMMAND" ${REST[@]+"${REST[@]}"}
+    ;;
+  fixtures)
+    [[ ${#REST[@]} -eq 1 && "${REST[0]}" =~ ^[a-z0-9]{6,40}$ ]] \
+      || die "fixtures needs exactly one run id of 6-40 lowercase letters and digits"
+    upload_bundle HEAD
+    run_remote fixtures "${REST[0]}"
     ;;
   logs)
     out="${REST[0]:-}"

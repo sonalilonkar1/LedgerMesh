@@ -45,6 +45,11 @@
 #       history, and the deploy logs and failure bundles of <sha> (default the
 #       current release). Every database password is redacted and the result
 #       is checked before it is written.
+#   fixtures <run_id>
+#       Create the hosted smoke suite's rows for one run (LM-050) with the
+#       running release's own bundle: its stack.sh runs its fixtures.py in the
+#       wallet and catalog containers, each with its own credentials, and only
+#       inserts smoke-<run_id>-* rows. The smoke workflow calls this.
 #
 # Options
 #   --env-file <path>        Rendered env file (default /etc/ledgermesh/staging.env).
@@ -140,7 +145,7 @@ die_code() {
 }
 
 usage() {
-  sed -n '2,79p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,84p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 utc() {
@@ -1008,6 +1013,20 @@ cmd_logs() {
   echo "deploy: wrote $out (passwords redacted and checked)" >&2
 }
 
+cmd_fixtures() {
+  local run_id="${1:-}" current
+  [[ "$run_id" =~ ^[a-z0-9]{6,40}$ ]] || die "fixtures needs a run id of 6-40 lowercase letters and digits"
+  # Not during a deploy or rollback: the containers may be changing.
+  acquire_lock
+  current="$(read_pointer current)"
+  [[ -n "$current" ]] || die "nothing is deployed here; there is no stack to create fixtures in"
+  [[ -f "$RELEASES/$current/bundle/fixtures.py" ]] \
+    || die "release $current has no fixtures.py (it predates LM-050); deploy a newer release"
+  stack_args
+  load_images "$current"
+  bash "$RELEASES/$current/bundle/stack.sh" "${STACK_ARGS[@]}" fixtures "$run_id"
+}
+
 case "$COMMAND" in
   deploy) cmd_deploy "${ARGS[1]:-}" ;;
   promote) cmd_promote "${ARGS[1]:-}" ;;
@@ -1015,6 +1034,7 @@ case "$COMMAND" in
   resolve) resolve_target "${ARGS[1]:-}" ;;
   status) cmd_status ;;
   logs) cmd_logs "${ARGS[1]:-}" ;;
+  fixtures) cmd_fixtures "${ARGS[1]:-}" ;;
   __apply)
     [[ "${ARGS[1]:-}" =~ $SHA_RE ]] || die "__apply needs a SHA"
     case "${ARGS[2]:-}" in deploy | rollback) ;; *) die "__apply mode must be deploy or rollback" ;; esac

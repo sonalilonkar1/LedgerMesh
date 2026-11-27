@@ -1,4 +1,4 @@
-.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean images-build images-check staging-images-local staging-local-env staging-local-up staging-local-verify staging-local-logs staging-local-down staging-local-reset staging-provision-dry-run staging-local-deploy staging-local-promote staging-local-rollback staging-local-status
+.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean images-build images-check staging-images-local staging-local-env staging-local-up staging-local-verify staging-local-logs staging-local-down staging-local-reset staging-provision-dry-run staging-local-deploy staging-local-promote staging-local-rollback staging-local-status staging-local-fixtures
 
 COMPOSE_FILE ?= infra/compose.yaml
 COMPOSE := docker compose -f $(COMPOSE_FILE)
@@ -8,12 +8,12 @@ install:
 	uv sync --python 3.12
 
 format:
-	uv run ruff format services libs/contracts infra/scripts tests
-	uv run ruff check --fix services libs/contracts infra/scripts tests
+	uv run ruff format services libs/contracts infra/scripts infra/staging tests
+	uv run ruff check --fix services libs/contracts infra/scripts infra/staging tests
 
 lint:
-	uv run ruff format --check services libs/contracts infra/scripts tests
-	uv run ruff check services libs/contracts infra/scripts tests
+	uv run ruff format --check services libs/contracts infra/scripts infra/staging tests
+	uv run ruff check services libs/contracts infra/scripts infra/staging tests
 
 test:
 	uv run pytest services libs/contracts/tests tests -q
@@ -202,9 +202,7 @@ staging-local-rollback:
 staging-local-status:
 	$(STAGING_DEPLOY) status
 
-# Prints every gcloud command `provision.sh up` would run, with placeholder
-# billing account and emails; runs nothing.
-staging-provision-dry-run:
-	bash infra/staging/provision.sh up --dry-run \
-	  --billing-account 000000-000000-000000 \
-	  --acme-email ops@example.com --admin-member user:admin@example.com
+# Per-run fixtures for the hosted smoke suite (LM-050): smoke-<RUN_ID>-* wallets
+# and rewards in the running local stack.
+staging-local-fixtures:
+	$(STAGING_STACK) fixtures $(RUN_ID)
