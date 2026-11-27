@@ -19,10 +19,12 @@ from ledgermesh_messaging import (
     PermanentError,
     RetryPolicy,
     configure_logging,
+    configure_tracing,
     create_consumer,
     create_producer,
     create_retry_consumer,
     in_version_order,
+    trace_engine,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -79,7 +81,7 @@ def bootstrap_servers() -> str:
 
 async def run(stop: asyncio.Event) -> None:
     policy = RetryPolicy.from_env()  # fails fast on an invalid LM_RETRY_* value
-    engine = create_async_engine(database_url(), pool_pre_ping=True)
+    engine = trace_engine(create_async_engine(database_url(), pool_pre_ping=True))
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     consumer = create_consumer(bootstrap_servers(), CONSUMER_GROUP, REDEMPTION_EVENTS.name)
     retry_consumer = create_retry_consumer(bootstrap_servers(), REDEMPTION_EVENTS)
@@ -109,6 +111,7 @@ async def run(stop: asyncio.Event) -> None:
 
 def main() -> None:
     configure_logging("audit-ledger")
+    configure_tracing("audit-ledger")
 
     async def serve() -> None:
         stop = asyncio.Event()

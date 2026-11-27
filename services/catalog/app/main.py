@@ -4,7 +4,12 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
-from ledgermesh_messaging import CorrelationMiddleware, configure_logging
+from ledgermesh_messaging import (
+    CorrelationMiddleware,
+    configure_logging,
+    configure_tracing,
+    instrument_fastapi,
+)
 
 from services.catalog.app.errors import CatalogError
 from services.catalog.app.models import (
@@ -25,8 +30,10 @@ from services.catalog.app.service import CatalogService
 
 SERVICE_NAME = "catalog"
 configure_logging(SERVICE_NAME)  # LM-032: JSON logs with shared field names
+configure_tracing(SERVICE_NAME)  # LM-033: OpenTelemetry traces (OTLP to Jaeger)
 
 app = FastAPI(title="LedgerMesh Rewards Catalog Service", version="0.1.0")
+instrument_fastapi(app)
 app.add_middleware(CorrelationMiddleware)
 
 

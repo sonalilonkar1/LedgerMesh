@@ -29,6 +29,7 @@ from functools import lru_cache
 from typing import Protocol
 from uuid import UUID
 
+from ledgermesh_messaging import trace_engine
 from psycopg.errors import UniqueViolation
 from sqlalchemy import Connection, Engine, create_engine, insert, select, update
 from sqlalchemy.exc import IntegrityError
@@ -134,7 +135,7 @@ def database_url() -> str:
 
 @lru_cache
 def get_engine(url: str | None = None) -> Engine:
-    return create_engine(url or database_url(), pool_pre_ping=True)
+    return trace_engine(create_engine(url or database_url(), pool_pre_ping=True))
 
 
 class PostgresCatalogRepository:
