@@ -11,7 +11,7 @@ from typing import Protocol
 from uuid import UUID
 
 import httpx
-from ledgermesh_messaging import CORRELATION_HEADER, log_context
+from ledgermesh_messaging import CORRELATION_HEADER, log_context, trace_engine
 from ledgermesh_messaging.logs import current_context
 from sqlalchemy import Engine, create_engine
 
@@ -262,12 +262,14 @@ def _dedicated_lock_engine(repository_engine: Engine) -> Engine:
     if url is None:
         # Lightweight fake repositories in unit tests provide their own engine.
         return repository_engine
-    return create_engine(
-        url,
-        pool_pre_ping=True,
-        pool_size=int(os.environ.get("COORDINATOR_LOCK_POOL_SIZE", "5")),
-        max_overflow=int(os.environ.get("COORDINATOR_LOCK_MAX_OVERFLOW", "10")),
-        pool_timeout=float(os.environ.get("COORDINATOR_LOCK_POOL_TIMEOUT_SECONDS", "30")),
+    return trace_engine(
+        create_engine(
+            url,
+            pool_pre_ping=True,
+            pool_size=int(os.environ.get("COORDINATOR_LOCK_POOL_SIZE", "5")),
+            max_overflow=int(os.environ.get("COORDINATOR_LOCK_MAX_OVERFLOW", "10")),
+            pool_timeout=float(os.environ.get("COORDINATOR_LOCK_POOL_TIMEOUT_SECONDS", "30")),
+        )
     )
 
 

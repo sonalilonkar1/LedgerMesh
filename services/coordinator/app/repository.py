@@ -12,7 +12,12 @@ from functools import lru_cache
 from typing import Protocol
 from uuid import UUID, uuid4
 
-from ledgermesh_messaging import EventEnvelope
+from ledgermesh_messaging import (
+    EventEnvelope,
+    current_trace_context,
+    record_transition_on_span,
+    trace_engine,
+)
 from ledgermesh_messaging.schema import outbox
 from sqlalchemy import Connection, Engine, create_engine, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -38,12 +43,22 @@ def log_transition(
     workflow_step: int,
     reason: str | None,
 ) -> None:
-    """One structured line per Coordinator state change (LM-032).
+    """One structured line and one span event per Coordinator state change.
 
     Shared by the 2PC repository and the Saga machine, so every transition of
     every redemption is logged with the same fields: ``state`` is the new
-    status and ``from_state`` the previous one.
+    status and ``from_state`` the previous one. The current span (LM-033)
+    gets the mode and state as attributes and a ``redemption.transition``
+    event, and ``ledgermesh.compensation`` once compensation starts.
     """
+    record_transition_on_span(
+        coordination_mode=coordination_mode,
+        from_status=from_status,
+        to_status=to_status,
+        workflow_step=workflow_step,
+        reason=reason,
+        transaction_id=transaction_id,
+    )
     logger.info(
         "redemption %s -> %s (%s)",
         from_status or "-",
@@ -117,6 +132,8 @@ class WorkflowRecord(RedemptionRecord):
     reward_version: int | None = None
     total_points: int | None = None
     workflow_step: int = 0
+    # W3C trace context the redemption was created in (LM-033), if traced.
+    trace_context: dict[str, str] | None = None
 
 
 RECOVERABLE_2PC_STATES = (
@@ -161,7 +178,7 @@ def database_url() -> str:
 
 @lru_cache
 def get_engine(url: str | None = None) -> Engine:
-    return create_engine(url or database_url(), pool_pre_ping=True)
+    return trace_engine(create_engine(url or database_url(), pool_pre_ping=True))
 
 
 def request_hash(request: CreateRedemptionRequest) -> str:
@@ -203,6 +220,7 @@ class PostgresCoordinatorRepository:
                 quantity=request.quantity,
                 coordination_mode=request.coordination_mode,
                 status="REQUESTED",
+                trace_context=current_trace_context(),
             )
             .on_conflict_do_nothing(index_elements=[redemptions.c.idempotency_key])
             .returning(*redemptions.c)
@@ -466,6 +484,7 @@ class PostgresCoordinatorRepository:
             reward_version=row.reward_version,
             total_points=row.total_points,
             workflow_step=row.workflow_step,
+            trace_context=getattr(row, "trace_context", None),
         )
 
     def _workflow_row(self, connection: Connection, transaction_id: UUID) -> WorkflowRecord:

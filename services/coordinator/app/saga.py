@@ -22,6 +22,7 @@ from ledgermesh_messaging import (
     enqueue,
 )
 from ledgermesh_messaging.schema import outbox
+from ledgermesh_messaging.tracing import tracer, use_trace_context
 from sqlalchemy import Connection, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -594,7 +595,11 @@ class SagaStarter:
         async with self.sessions() as session:
             rows = (
                 await session.execute(
-                    select(redemptions.c.transaction_id, redemptions.c.reward_id)
+                    select(
+                        redemptions.c.transaction_id,
+                        redemptions.c.reward_id,
+                        redemptions.c.trace_context,
+                    )
                     .where(
                         redemptions.c.coordination_mode == "saga",
                         redemptions.c.status == "REQUESTED",
@@ -605,42 +610,55 @@ class SagaStarter:
             ).all()
 
         started = 0
-        for transaction_id, reward_id in rows:
+        for transaction_id, reward_id, trace_context in rows:
             if time.monotonic() < self._retry_after.get(transaction_id, 0):
                 continue
-            try:
-                quote = await self.quote_client.get_quote(reward_id)
-                async with self.sessions() as session, session.begin():
-                    messages = await session.run_sync(
-                        lambda sync, transaction_id=transaction_id, quote=quote: self.machine.start(
-                            sync.connection(), transaction_id, quote
-                        )
-                    )
-                    for message in messages:
-                        await enqueue(session, message)
-                started += bool(messages)
-                self._failures.pop(transaction_id, None)
-                self._retry_after.pop(transaction_id, None)
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 404:
-                    await self._fail_or_back_off(transaction_id, "Catalog reward was not found")
-                    logger.warning(
-                        "failed Saga %s because its reward was not found", transaction_id
-                    )
-                else:
-                    self._back_off(transaction_id)
-                    logger.exception(
-                        "Catalog temporarily rejected quote for Saga %s", transaction_id
-                    )
-            except (InvalidSagaResult, TypeError, ValueError) as exc:
-                await self._fail_or_back_off(
-                    transaction_id, f"Catalog returned an invalid reward quote: {exc}"
-                )
-                logger.warning("failed Saga %s because its quote was invalid", transaction_id)
-            except (httpx.HTTPError, OSError, SQLAlchemyError):
-                self._back_off(transaction_id)
-                logger.exception("could not start Saga %s; retry is backed off", transaction_id)
+            # Continue the trace the redemption was requested in (LM-033), so
+            # the API call, the quote and every Saga step are one trace.
+            with (
+                use_trace_context(trace_context),
+                tracer().start_as_current_span(
+                    "saga start",
+                    attributes={
+                        "ledgermesh.transaction_id": str(transaction_id),
+                        "ledgermesh.mode": "saga",
+                    },
+                ),
+            ):
+                started += await self._start_one(transaction_id, reward_id)
         return started
+
+    async def _start_one(self, transaction_id: UUID, reward_id: str) -> int:
+        """Quote one REQUESTED Saga and enqueue its first command; 1 if started."""
+        try:
+            quote = await self.quote_client.get_quote(reward_id)
+            async with self.sessions() as session, session.begin():
+                messages = await session.run_sync(
+                    lambda sync, transaction_id=transaction_id, quote=quote: self.machine.start(
+                        sync.connection(), transaction_id, quote
+                    )
+                )
+                for message in messages:
+                    await enqueue(session, message)
+            self._failures.pop(transaction_id, None)
+            self._retry_after.pop(transaction_id, None)
+            return int(bool(messages))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                await self._fail_or_back_off(transaction_id, "Catalog reward was not found")
+                logger.warning("failed Saga %s because its reward was not found", transaction_id)
+            else:
+                self._back_off(transaction_id)
+                logger.exception("Catalog temporarily rejected quote for Saga %s", transaction_id)
+        except (InvalidSagaResult, TypeError, ValueError) as exc:
+            await self._fail_or_back_off(
+                transaction_id, f"Catalog returned an invalid reward quote: {exc}"
+            )
+            logger.warning("failed Saga %s because its quote was invalid", transaction_id)
+        except (httpx.HTTPError, OSError, SQLAlchemyError):
+            self._back_off(transaction_id)
+            logger.exception("could not start Saga %s; retry is backed off", transaction_id)
+        return 0
 
     async def run(self, stop: asyncio.Event) -> None:
         while not stop.is_set():

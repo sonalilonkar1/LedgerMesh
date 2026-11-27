@@ -30,7 +30,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 TWO_PHASE_COMMIT_STATES = (
     "REQUESTED",
@@ -80,6 +80,9 @@ redemptions = Table(
     # event_id of the command sent for the current step (LM-026 causation check).
     Column("current_command_id", UUID(as_uuid=True)),
     Column("fencing_token", BigInteger),
+    # W3C trace context of the creating request, so the Saga worker continues
+    # the same trace (LM-033). None when the request was not traced.
+    Column("trace_context", JSONB),
     Column("version", BigInteger, nullable=False, server_default=text("0")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
