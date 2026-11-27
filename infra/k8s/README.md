@@ -246,6 +246,7 @@ Remove them with `docker image rm` if you need the space.
 | Kafka health check | `kafka-topics.sh --list` | TCP 19092 (the Compose check is documented above for manual use) |
 | Host ports | 8000-8003, 54321-54324 | none; `kubectl port-forward` (the smoke test uses 18000-18003) |
 | Password | `${POSTGRES_PASSWORD:-ledgermesh_dev}` | generated Secret, no default |
+| Kafka log dir | `/var/lib/kafka/data` (volume root) | `/var/lib/kafka/data/logs` (subdirectory of the PVC) |
 | Kafka heap | image default | 512 MiB in the kind overlay |
 
 ## Verified on kind
@@ -284,14 +285,18 @@ fault test.
   pods are rescheduled. The data survives on the PVCs while the cluster exists.
 - **Readiness is process-level only** (see Probes).
 - **Kafka storage.**
-  - The PVC is mounted exactly at `KAFKA_LOG_DIRS` (`/var/lib/kafka/data`), as
-    in Compose. The `apache/kafka` image declares that path as a `VOLUME`, so
-    mounting the PVC anywhere else silently loses every topic when the pod
-    restarts.
-  - Kafka 4.4 refuses to start if that directory holds anything that is not a
-    partition directory. On storage classes that create `lost+found` (ext4
-    block volumes), point `KAFKA_LOG_DIRS` at a subdirectory. kind's
-    `local-path` storage does not create `lost+found`.
+  - The PVC is mounted at `/var/lib/kafka/data`, as in Compose. The
+    `apache/kafka` image declares that path as a `VOLUME`, so mounting the PVC
+    anywhere else silently loses every topic when the pod restarts.
+  - `KAFKA_LOG_DIRS` is the subdirectory `/var/lib/kafka/data/logs`, unlike
+    Compose, which uses the volume root. Kafka 4.4 refuses to start if its log
+    directory holds anything that is not a partition directory, and storage
+    classes backed by ext4 block volumes (the usual cloud defaults) create
+    `lost+found` at the volume root. PostgreSQL uses a `PGDATA` subdirectory
+    for the same reason.
+  - A cluster deployed before this change keeps its old topics at the volume
+    root; the broker formats the new subdirectory and starts empty. Re-create
+    the Kafka PVC (or the kind cluster) after upgrading.
 - **Known issue: one audit event was lost after a broker restart.** This was
   seen once, during fault testing, and is not caused by the manifests.
   - Right after the Kafka pod was deleted, the Coordinator's first send of a

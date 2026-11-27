@@ -9,7 +9,7 @@ the kind overlay with ``kubectl kustomize`` and compare. They are skipped when
 import re
 import shutil
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -142,7 +142,7 @@ def test_base_leaves_internal_routes_disabled():
 def test_kafka_config_matches_compose(rendered):
     data = config(rendered, "kafka-config")
     compose = COMPOSE["services"]["kafka"]["environment"]
-    changed = {"KAFKA_CONTROLLER_QUORUM_VOTERS", "KAFKA_ADVERTISED_LISTENERS"}
+    changed = {"KAFKA_CONTROLLER_QUORUM_VOTERS", "KAFKA_ADVERTISED_LISTENERS", "KAFKA_LOG_DIRS"}
     for key, value in compose.items():
         if key not in changed:
             assert data[key] == str(value), key
@@ -152,10 +152,13 @@ def test_kafka_config_matches_compose(rendered):
     assert kafka["image"] == COMPOSE["services"]["kafka"]["image"]
     # The image declares VOLUME /var/lib/kafka/data: the PVC must be mounted
     # exactly there (compose.yaml mounts kafka_data there too), or the broker
-    # writes to an ephemeral volume and loses its topics on restart.
+    # writes to an ephemeral volume and loses its topics on restart. The log
+    # dir is a subdirectory inside that mount, so a lost+found at the volume
+    # root never sits in log.dirs.
     compose_mount = COMPOSE["services"]["kafka"]["volumes"][0].split(":", 1)[1]
     assert [m["mountPath"] for m in kafka["volumeMounts"]] == [compose_mount]
-    assert data["KAFKA_LOG_DIRS"] == compose_mount
+    log_dir = PurePosixPath(data["KAFKA_LOG_DIRS"])
+    assert log_dir.parent == PurePosixPath(compose_mount)
 
 
 def test_databases_match_compose(rendered):

@@ -104,10 +104,11 @@ spec:
               cpu: "1"
               memory: 1536Mi
           volumeMounts:
-            # Exactly KAFKA_LOG_DIRS, as compose.yaml:39 mounts it. The image
-            # declares VOLUME /var/lib/kafka/data; mounting the PVC anywhere
-            # else leaves the broker writing to that ephemeral volume, and a
-            # restarted pod re-formats its storage and loses every topic.
+            # At the image's VOLUME /var/lib/kafka/data, as compose.yaml:39
+            # mounts it, and KAFKA_LOG_DIRS (config.yaml) is a subdirectory of
+            # it. Mounting the PVC anywhere else leaves the broker writing to
+            # that ephemeral volume, and a restarted pod re-formats its storage
+            # and loses every topic.
             - name: data
               mountPath: /var/lib/kafka/data
   volumeClaimTemplates:

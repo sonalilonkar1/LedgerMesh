@@ -21,10 +21,14 @@ data:
   # returns 404 for the internal control routes. The kind overlay sets it to
   # "local", as compose.yaml:127 does.
 ---
-# Broker settings, copied from compose.yaml:23-37. Two differences:
+# Broker settings, copied from compose.yaml:23-37. Three differences:
 #  - KAFKA_CONTROLLER_QUORUM_VOTERS uses localhost, because the single node is
 #    its own controller and "kafka" resolves to the Service, not the pod.
 #  - EXTERNAL is advertised as localhost:29092 for `kubectl port-forward`.
+#  - KAFKA_LOG_DIRS is a subdirectory of the volume (compose.yaml:36 uses the
+#    volume root). Kafka refuses a log dir holding non-partition entries such
+#    as the lost+found that ext4 block volumes create, as PGDATA avoids it in
+#    postgres.yaml.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -46,5 +50,5 @@ data:
   KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
   # Topics come only from ledgermesh-topics (kafka-topics-job.yaml).
   KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
-  KAFKA_LOG_DIRS: /var/lib/kafka/data
+  KAFKA_LOG_DIRS: /var/lib/kafka/data/logs
   CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
