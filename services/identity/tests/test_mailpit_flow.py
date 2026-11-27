@@ -25,6 +25,16 @@ pytestmark = pytest.mark.skipif(not BASE_URL, reason="set IDENTITY_E2E_BASE_URL 
 
 JSON = {"Content-Type": "application/json"}
 LINK = re.compile(r"(https?://\S+/v1/auth/verify)#token=([A-Za-z0-9_-]+)")
+RATE_LIMITED = (
+    "rate limited by the running service: wait for Retry-After, or restart the stack with "
+    "IDENTITY_LOGIN_LIMIT_PER_EMAIL, IDENTITY_LOGIN_LIMIT_PER_IP and "
+    "IDENTITY_VERIFY_LIMIT_PER_IP raised (docs/authentication.md)"
+)
+
+
+def accepted(response: httpx.Response) -> bool:
+    assert response.status_code != 429, RATE_LIMITED
+    return response.status_code == 202
 
 
 def wait_for_email(mailpit: httpx.Client, address: str) -> str:
@@ -53,7 +63,7 @@ def test_sign_in_through_mailpit():
         requested = api.post(
             "/v1/auth/login-requests", json={"email": address.upper()}, headers=JSON
         )
-        assert requested.status_code == 202
+        assert accepted(requested)
 
         text = wait_for_email(mailpit, address)
         match = LINK.search(text)
@@ -93,10 +103,7 @@ def test_operator_from_the_allowlist_can_read_auth_events():
     ):
         before = mailpit.get("/api/v1/search", params={"query": f"to:{operator}"}).json()
         seen = {m["ID"] for m in before.get("messages", [])}
-        assert (
-            api.post("/v1/auth/login-requests", json={"email": operator}, headers=JSON).status_code
-            == 202
-        )
+        assert accepted(api.post("/v1/auth/login-requests", json={"email": operator}, headers=JSON))
         deadline = time.monotonic() + 20
         text = None
         while text is None and time.monotonic() < deadline:

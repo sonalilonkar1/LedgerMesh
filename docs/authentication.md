@@ -165,7 +165,7 @@ curl -i -X POST http://localhost:8005/v1/auth/login-requests \
 
 Open the inbox at <http://localhost:8025>, click the link, and press **Sign in to LedgerMesh**. The browser now holds `lm_session` for `localhost`; `http://localhost:8005/v1/me` shows the user. Sign in as `operator@example.com` (the Compose default for `IDENTITY_OPERATOR_EMAILS`) to see `/v1/operator/auth-events`.
 
-To run only the service on the host against the Compose database and Mailpit: `make run-identity`. The automated end-to-end check (request, read the email through Mailpit's API, verify, replay, logout) is `make identity-e2e`; repeated runs within 15 minutes can hit the per-address limit for the operator address.
+To run only the service on the host against the Compose database and Mailpit: `make run-identity`. The automated end-to-end check (request, read the email through Mailpit's API, verify, replay, logout) is `make identity-e2e`. Each run sends two login requests (one for the fixed operator address) and three verifications from your host's single Docker gateway IP, so running it more than five times in 15 minutes hits the per-address limit, and about ten times the per-IP limits; the test then fails with a rate-limit message. To iterate, restart the stack with higher limits, for example `IDENTITY_LOGIN_LIMIT_PER_EMAIL=100 IDENTITY_LOGIN_LIMIT_PER_IP=1000 IDENTITY_VERIFY_LIMIT_PER_IP=1000 make infra-up` (Compose passes these through; the service defaults stay `5`/`20`/`30`).
 
 ## Tests
 

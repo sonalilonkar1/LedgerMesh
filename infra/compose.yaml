@@ -257,6 +257,10 @@ services:
       IDENTITY_SMTP_PORT: "1025"
       IDENTITY_LOGIN_LINK_URL: http://localhost:${IDENTITY_PORT:-8005}/v1/auth/verify
       IDENTITY_OPERATOR_EMAILS: ${IDENTITY_OPERATOR_EMAILS:-operator@example.com}
+      # Same defaults as the service; raise them when re-running identity-e2e often.
+      IDENTITY_LOGIN_LIMIT_PER_EMAIL: ${IDENTITY_LOGIN_LIMIT_PER_EMAIL:-5}
+      IDENTITY_LOGIN_LIMIT_PER_IP: ${IDENTITY_LOGIN_LIMIT_PER_IP:-20}
+      IDENTITY_VERIFY_LIMIT_PER_IP: ${IDENTITY_VERIFY_LIMIT_PER_IP:-30}
     depends_on:
       identity-db:
         condition: service_healthy
