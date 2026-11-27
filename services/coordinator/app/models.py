@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
+from ledgermesh_messaging.safeguards import POSTGRES_INTEGER_MAX
 from pydantic import BaseModel, ConfigDict, Field
 
 CoordinationMode = Literal["two_phase_commit", "saga"]
@@ -31,7 +32,8 @@ class StrictModel(BaseModel):
 class CreateRedemptionRequest(StrictModel):
     user_id: str = Field(min_length=1)
     reward_id: str = Field(min_length=1)
-    quantity: int = Field(ge=1)
+    # LM-042: bounded by the INTEGER column, so an oversized value is a 422.
+    quantity: int = Field(ge=1, le=POSTGRES_INTEGER_MAX)
     coordination_mode: CoordinationMode
 
 
