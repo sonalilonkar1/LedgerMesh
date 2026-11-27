@@ -3,6 +3,9 @@
 # has auto-create disabled (compose.yaml:35), so this must run before any
 # worker subscribes. ensure_topics is idempotent and tolerates a concurrent
 # bootstrap (topics.py:170-174); workers re-run it as an init container too.
+# No ttlSecondsAfterFinished: the finished Job stays as a record of the
+# bootstrap. Its pod template is immutable, so delete it before re-applying with
+# new images (kind-up.sh does this; see README "Using the published GHCR images").
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -12,7 +15,6 @@ metadata:
     app.kubernetes.io/component: topic-bootstrap
 spec:
   backoffLimit: 2
-  ttlSecondsAfterFinished: 86400
   template:
     metadata:
       labels:

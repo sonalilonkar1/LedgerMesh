@@ -54,7 +54,12 @@ for deploy in coordinator wallet catalog audit-ledger \
   coordinator-saga wallet-saga catalog-saga audit-consumer; do
   kc rollout status "deployment/$deploy" --timeout=180s
 done
-kc wait --for=condition=complete job/kafka-topics --timeout=180s
+# The topic Job may have been deleted (for example before a re-apply); the
+# worker init containers run the same idempotent bootstrap, so only wait for the
+# Job when it exists.
+if kc get job/kafka-topics >/dev/null 2>&1; then
+  kc wait --for=condition=complete job/kafka-topics --timeout=180s
+fi
 
 echo "== Prepared-transaction support (as infra/scripts/smoke-test.sh)"
 for entry in "coordinator-db coordinator" "wallet-db wallet" "catalog-db catalog" \
