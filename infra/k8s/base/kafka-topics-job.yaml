@@ -1,8 +1,8 @@
-# Creates the 15 LedgerMesh topics (topics.py:98-125) with the project's own
+# Creates the 15 LedgerMesh topics (topics.py:99-123) with the project's own
 # bootstrap command (libs/messaging/pyproject.toml:14, README.md:66-76). Kafka
-# has auto-create disabled (compose.yaml:39), so this must run before any
+# has auto-create disabled (compose.yaml:35), so this must run before any
 # worker subscribes. ensure_topics is idempotent and tolerates a concurrent
-# bootstrap (topics.py:166-171); workers re-run it as an init container too.
+# bootstrap (topics.py:170-174); workers re-run it as an init container too.
 apiVersion: batch/v1
 kind: Job
 metadata:

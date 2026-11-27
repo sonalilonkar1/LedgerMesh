@@ -27,7 +27,7 @@ images:
   - name: ledgermesh-audit-ledger
     newTag: local
 patches:
-  # compose.yaml:123: the local Coordinator runs with LEDGERMESH_ENV=local, which
+  # compose.yaml:127: the local Coordinator runs with LEDGERMESH_ENV=local, which
   # enables the internal control routes (main.py:82-84).
   - target:
       kind: ConfigMap

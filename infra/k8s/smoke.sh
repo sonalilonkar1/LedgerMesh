@@ -199,7 +199,7 @@ run_mode() {
   fi
 
   # 2PC writes redemption.<status> with payload.status (repository.py:309-345);
-  # the Saga writes coordinator.transitioned with payload.to_status (saga.py:87-106).
+  # the Saga writes coordinator.transitioned with payload.to_status (saga.py:86-106).
   local events found="0 -"
   deadline=$((SECONDS + 60))
   while ((SECONDS < deadline)); do

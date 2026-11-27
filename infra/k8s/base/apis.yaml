@@ -1,10 +1,10 @@
-# The four FastAPI services (compose.yaml:114-206), LM-041.
+# The four FastAPI services (compose.yaml:116-209), LM-041.
 #
 # - The main container runs the image's default command, /app/start-service.sh
 #   (Dockerfile.service:62), with RUN_MIGRATIONS=false.
 # - The "migrate" init container runs the same command start-service.sh:13 runs,
 #   `alembic -c services/<svc>/alembic.ini upgrade head`, so a failed migration
-#   blocks the start (as compose.yaml:118 does) and probes never wait on it. It
+#   blocks the start (as compose.yaml:120-121 do) and probes never wait on it. It
 #   retries for up to ~2 minutes while the database starts; PostgreSQL DDL is
 #   transactional, so a retried upgrade is safe.
 # - One replica with the Recreate strategy, so two migrations never race.
@@ -94,7 +94,7 @@ spec:
         - name: coordinator
           image: ledgermesh-coordinator
           imagePullPolicy: IfNotPresent
-          # compose.yaml:122-129: the Coordinator gets the whole shared config.
+          # compose.yaml:125-133: the Coordinator gets the whole shared config.
           envFrom:
             - configMapRef:
                 name: ledgermesh-config

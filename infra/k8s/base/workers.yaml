@@ -9,8 +9,9 @@
 # (saga_worker.py:71), which is the only path that ships the 2PC terminal audit
 # event to Kafka. Each worker publishes its own service's outbox.
 #
-# - One replica, Recreate: an advisory lock keeps a second replica idle anyway
-#   (libs/messaging/README.md:32).
+# - One replica, Recreate. A second replica would only add an idle outbox
+#   publisher (advisory lock, libs/messaging/README.md:32); scaling the
+#   consumers is out of scope for LM-041.
 # - No probes: workers have no HTTP endpoint. They exit on failure and on
 #   SIGTERM (saga_worker.py:95-96) and the kubelet restarts them.
 # - Init containers: wait until the owning API is healthy (its migration has
@@ -47,7 +48,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       initContainers:
-        # Same check as the compose healthcheck (compose.yaml:134), bounded.
+        # Same check as the compose healthcheck (compose.yaml:141), bounded.
         - name: wait-api
           image: ledgermesh-coordinator
           imagePullPolicy: IfNotPresent
@@ -159,7 +160,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       initContainers:
-        # Same check as the compose healthcheck (compose.yaml:134), bounded.
+        # Same check as the compose healthcheck (compose.yaml:141), bounded.
         - name: wait-api
           image: ledgermesh-wallet
           imagePullPolicy: IfNotPresent
@@ -266,7 +267,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       initContainers:
-        # Same check as the compose healthcheck (compose.yaml:134), bounded.
+        # Same check as the compose healthcheck (compose.yaml:141), bounded.
         - name: wait-api
           image: ledgermesh-catalog
           imagePullPolicy: IfNotPresent
@@ -373,7 +374,7 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       initContainers:
-        # Same check as the compose healthcheck (compose.yaml:134), bounded.
+        # Same check as the compose healthcheck (compose.yaml:141), bounded.
         - name: wait-api
           image: ledgermesh-audit-ledger
           imagePullPolicy: IfNotPresent

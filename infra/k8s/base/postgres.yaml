@@ -1,4 +1,4 @@
-# Four isolated PostgreSQL servers, one per service, as in compose.yaml:46-112
+# Four isolated PostgreSQL servers, one per service, as in compose.yaml:46-114
 # (LM-041). Each runs with max_prepared_transactions=100 (compose.yaml:52), which
 # the 2PC participants require.
 ---
