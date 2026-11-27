@@ -17,6 +17,8 @@ on:
       - "uv.lock"
       - "Makefile"
       - ".github/workflows/ci.yml"
+      - ".github/workflows/deploy-staging.yml"
+      - ".github/workflows/rollback-staging.yml"
   # No path filter on main: every merge is tested, and the image workflow
   # publishes only after this succeeds, so a filter here would silently skip
   # publication for any image input missing from the list (LM-047).

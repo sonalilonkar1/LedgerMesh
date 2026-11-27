@@ -1,0 +1,183 @@
+name: Roll back staging
+
+# LM-049: put a release that was last-known-good before back on the staging
+# VM, from its own recorded bundle and image digests. Nothing is rebuilt and
+# no migrations run (an older image cannot migrate down from a newer schema).
+# Then run the hosted smoke suite against it. A smoke failure here is
+# reported, not rolled back again: choose another target.
+#
+# target: `previous` (the newest last-known-good release other than the one
+# running), `last-known-good`, or a full commit SHA that staging ran and
+# promoted before (see `deploy.sh status` or the release records).
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: previous, last-known-good, or a full 40-character commit SHA staging ran before
+        type: string
+        required: true
+        default: previous
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging-deploy
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Roll back
+    # The deploy tooling comes from main; the environment allows only main.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: staging
+      deployment: false
+    permissions:
+      contents: read
+      id-token: write
+      deployments: write
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      url: ${{ steps.config.outputs.url }}
+      deployment_id: ${{ steps.record.outputs.id }}
+    env:
+      TARGET: ${{ inputs.target }}
+      STAGING_URL: ${{ vars.STAGING_URL }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_ZONE: ${{ vars.GCP_ZONE }}
+      STAGING_VM_NAME: ${{ vars.STAGING_VM_NAME }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check the input and the staging environment's variables
+        id: config
+        run: |
+          set -euo pipefail
+          if [[ ! "$TARGET" =~ ^(previous|last-known-good|[0-9a-f]{40})$ ]]; then
+            echo "::error::target must be previous, last-known-good or a full 40-character lowercase commit SHA" >&2
+            exit 1
+          fi
+          for name in STAGING_URL GCP_PROJECT_ID GCP_ZONE STAGING_VM_NAME; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::The 'staging' environment has no variable $name" >&2
+              exit 1
+            fi
+          done
+          if [[ ! "$STAGING_URL" =~ ^https://[A-Za-z0-9.-]+/?$ ]]; then
+            echo "::error::STAGING_URL must be https://<host>" >&2
+            exit 1
+          fi
+          echo "url=${STAGING_URL%/}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Resolve the target to a commit
+        id: resolve
+        run: |
+          set -euo pipefail
+          sha="$(bash infra/staging/ci/remote.sh resolve "$TARGET" | tail -n 1)"
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::could not resolve '$TARGET'" >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Rolling back to $sha"
+
+      - name: Record the GitHub deployment
+        id: record
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          id="$(bash infra/staging/ci/github-deployment.sh create "$SHA" "Roll back staging to ${SHA:0:12}")"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          bash infra/staging/ci/github-deployment.sh status "$id" in_progress "Rolling back to ${SHA:0:12}"
+
+      - name: Roll back on the VM
+        id: restore
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          bash infra/staging/ci/remote.sh rollback "$SHA"
+          bash infra/staging/ci/remote.sh status --expect "$SHA"
+
+      - name: Collect secret-free logs
+        if: failure() && steps.resolve.outcome == 'success'
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: bash infra/staging/ci/remote.sh logs "staging-rollback-logs.tgz" --sha "$SHA"
+
+      - name: Keep the logs
+        if: failure() && steps.resolve.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: staging-rollback-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: staging-rollback-logs.tgz
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Mark the GitHub deployment failed
+        if: failure() && steps.record.outputs.id != ''
+        env:
+          DEPLOYMENT_ID: ${{ steps.record.outputs.id }}
+        run: |
+          bash infra/staging/ci/github-deployment.sh status "$DEPLOYMENT_ID" failure \
+            "Rollback failed; staging may be unhealthy: see the run"
+
+  smoke:
+    name: Hosted smoke
+    needs: rollback
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/hosted-smoke.yml
+    with:
+      base_url: ${{ needs.rollback.outputs.url }}
+      expected_revision: ${{ needs.rollback.outputs.sha }}
+
+  report:
+    name: Report
+    needs: [rollback, smoke]
+    if: always() && needs.rollback.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      deployments: write
+    env:
+      SHA: ${{ needs.rollback.outputs.sha }}
+      DEPLOYMENT_ID: ${{ needs.rollback.outputs.deployment_id }}
+      STAGING_URL: ${{ needs.rollback.outputs.url }}
+      SMOKE: ${{ needs.smoke.result }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Record the outcome
+        run: |
+          set -euo pipefail
+          if [[ "$SMOKE" == "success" ]]; then
+            bash infra/staging/ci/github-deployment.sh status "$DEPLOYMENT_ID" success \
+              "Rolled back to ${SHA:0:12}; hosted smoke passed"
+            echo "### Staging rolled back to \`$SHA\` and passed the hosted smoke tests" >> "$GITHUB_STEP_SUMMARY"
+          else
+            bash infra/staging/ci/github-deployment.sh status "$DEPLOYMENT_ID" failure \
+              "Rolled back to ${SHA:0:12}, but hosted smoke $SMOKE"
+            echo "::error::Rolled back to $SHA, but the hosted smoke suite $SMOKE. Not rolling back again; choose another target." >&2
+            exit 1
+          fi
