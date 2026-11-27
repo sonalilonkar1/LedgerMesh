@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# Compute Engine startup script for the staging VM (LM-048).
+#
+# provision.sh installs this as the instance's `startup-script` metadata, so
+# it runs as root on every boot. Every step is idempotent:
+#   1. install Docker Engine and the Compose plugin from Docker's apt
+#      repository, and the Google Cloud CLI only if it is missing;
+#   2. format the data disk only if it has no filesystem, then mount it at
+#      /var/lib/ledgermesh through an fstab UUID entry;
+#   3. make Docker wait for that mount, so containers can never start on an
+#      empty directory of the boot disk;
+#   4. create the data directories and configure json-file log rotation.
+#
+# Output goes to the serial console and the journal:
+#   sudo journalctl -u google-startup-scripts.service
+set -euo pipefail
+
+DATA_DEVICE="/dev/disk/by-id/google-ledgermesh-data"
+DATA_DIR="/var/lib/ledgermesh"
+# The apache/kafka image runs as this UID (checked with
+# `docker run --rm --entrypoint id apache/kafka:4.4.0`); stack.sh uses the same value.
+KAFKA_UID=1000
+
+log() {
+  echo "ledgermesh-startup: $*"
+}
+
+export DEBIAN_FRONTEND=noninteractive
+
+# ---- 1. packages ------------------------------------------------------------------
+
+if ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; then
+  log "installing Docker Engine and the Compose plugin"
+  apt-get update
+  apt-get install -y ca-certificates curl gnupg
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+  codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $codename stable" \
+    >/etc/apt/sources.list.d/docker.list
+  apt-get update
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+fi
+
+if ! command -v gcloud >/dev/null; then
+  log "installing the Google Cloud CLI"
+  apt-get update
+  apt-get install -y apt-transport-https ca-certificates curl gnupg
+  curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+    | gpg --dearmor --yes -o /usr/share/keyrings/cloud.google.gpg
+  echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+    >/etc/apt/sources.list.d/google-cloud-sdk.list
+  apt-get update
+  apt-get install -y google-cloud-cli
+fi
+
+# ---- 2. data disk -----------------------------------------------------------------
+
+if [[ ! -e "$DATA_DEVICE" ]]; then
+  log "data disk $DATA_DEVICE is not attached; refusing to continue"
+  exit 1
+fi
+
+if ! blkid "$DATA_DEVICE" >/dev/null 2>&1; then
+  # blkid exits 2 when the device has no recognisable filesystem: a new disk.
+  log "formatting new data disk $DATA_DEVICE"
+  mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard "$DATA_DEVICE"
+fi
+
+uuid="$(blkid -s UUID -o value "$DATA_DEVICE")"
+[[ -n "$uuid" ]] || { log "could not read the data disk UUID"; exit 1; }
+mkdir -p "$DATA_DIR"
+if ! grep -q "^UUID=$uuid " /etc/fstab; then
+  log "adding $DATA_DIR to /etc/fstab"
+  echo "UUID=$uuid $DATA_DIR ext4 discard,defaults,nofail 0 2" >>/etc/fstab
+fi
+if ! mountpoint -q "$DATA_DIR"; then
+  mount "$DATA_DIR"
+fi
+mountpoint -q "$DATA_DIR" || { log "$DATA_DIR is not mounted"; exit 1; }
+
+# ---- 3. Docker waits for the data disk ----------------------------------------------
+
+dropin_dir="/etc/systemd/system/docker.service.d"
+dropin="$dropin_dir/ledgermesh-data.conf"
+dropin_content="[Unit]
+RequiresMountsFor=$DATA_DIR"
+mkdir -p "$dropin_dir"
+if [[ ! -f "$dropin" || "$(cat "$dropin")" != "$dropin_content" ]]; then
+  echo "$dropin_content" >"$dropin"
+  systemctl daemon-reload
+fi
+
+# ---- 4. directories and Docker logging ----------------------------------------------
+
+for dir in kafka postgres/coordinator postgres/wallet postgres/catalog postgres/audit-ledger \
+  caddy/data caddy/config releases deploy-logs; do
+  mkdir -p "$DATA_DIR/$dir"
+done
+chown "$KAFKA_UID:$KAFKA_UID" "$DATA_DIR/kafka"
+chmod 0750 "$DATA_DIR"
+install -d -m 0700 /etc/ledgermesh
+
+daemon_json='{
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "10m", "max-file": "5" },
+  "live-restore": true
+}'
+if [[ ! -f /etc/docker/daemon.json || "$(cat /etc/docker/daemon.json)" != "$daemon_json" ]]; then
+  log "configuring Docker log rotation"
+  mkdir -p /etc/docker
+  echo "$daemon_json" >/etc/docker/daemon.json
+  systemctl restart docker
+fi
+systemctl enable --now docker
+
+log "ready: docker $(docker version --format '{{.Server.Version}}'), $(docker compose version --short), data on $DATA_DIR"
