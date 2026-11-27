@@ -17,7 +17,10 @@ publishes to GHCR. See [Service images (LM-047)](IMAGES.md).
 The hosted staging environment (LM-048) runs those images with its own Compose
 file, `infra/staging/compose.yaml`: no host ports except the Caddy HTTPS
 gateway, one password per database, data on a persistent disk, and the Saga
-workers and audit consumer as their own containers. See the
+workers and audit consumer as their own containers. Every published commit on
+`main` is deployed there by `.github/workflows/deploy-staging.yml` through
+`infra/staging/deploy.sh`, which keeps release records and restores the last
+known good release on failure (LM-049). See the
 [staging runbook](../docs/deployment/staging.md) and
 [ADR-002](../docs/architecture/ADR-002-hosted-staging.md).
 

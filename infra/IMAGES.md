@@ -127,4 +127,4 @@ The first publish creates the four packages under the repository owner's account
     ```
 - **Manage Actions access:** in the same package settings, make sure the LedgerMesh repository has **Write** access, so later workflow runs can push new tags.
 
-The staging host is provisioned by LM-048 ([ADR-002](../docs/architecture/ADR-002-hosted-staging.md), [staging runbook](../docs/deployment/staging.md)); it runs these images by full commit SHA and, because the packages are public, needs no registry credential. Automatic deployment from `main` is LM-049.
+The staging host is provisioned by LM-048 ([ADR-002](../docs/architecture/ADR-002-hosted-staging.md), [staging runbook](../docs/deployment/staging.md)); it runs these images by full commit SHA and, because the packages are public, needs no registry credential. `.github/workflows/deploy-staging.yml` (LM-049) deploys each commit after this workflow publishes it, pinning the images by the registry digests it looks up with `ghcr_digest.sh`.

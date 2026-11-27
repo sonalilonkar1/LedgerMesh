@@ -12,7 +12,7 @@ A redemption spans independently owned Wallet, Rewards Catalog, Coordinator, and
 - [ADR-001: Architecture Decisions and Correctness Invariants](docs/architecture/ADR-001-ledgermesh-architecture-and-correctness.md) — canonical service boundaries, state models, recovery rules, message semantics, and correctness invariants
 - [Local Development Guide](docs/development.md) — setup, service commands, and testing instructions
 - [ADR-002: Hosted Staging Environment](docs/architecture/ADR-002-hosted-staging.md) — provider, architecture, cost estimate, and alternatives for staging
-- [Hosted Staging Runbook](docs/deployment/staging.md) — provisioning, operations, recovery, and teardown of the staging environment. Staging URL: pending provisioning (recorded in the runbook once the VM exists)
+- [Hosted Staging Runbook](docs/deployment/staging.md) — provisioning, automatic deployment and rollback, operations, recovery, and teardown of the staging environment. Staging URL: pending provisioning (recorded in the runbook once the VM exists)
 - [Contributing Guide](CONTRIBUTING.md) — branch naming, commits, reviews, and pull-request expectations
 
 ## Architecture Overview
