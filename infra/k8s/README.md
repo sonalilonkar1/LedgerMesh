@@ -329,3 +329,9 @@ fault test.
 - **A redemption stays non-terminal.** The smoke test prints the transitions and
   the worker logs. Check `coordinator-saga` first: it runs the Saga starter and
   the Coordinator's outbox publisher.
+- **`kubectl apply` rejects a StatefulSet with "spec: Forbidden".** A
+  StatefulSet's `serviceName` and `volumeClaimTemplates` cannot change in place.
+  A cluster created before the databases got their `<name>-headless` governing
+  Services needs `make k8s-down && make k8s-up` (or, outside kind,
+  `kubectl -n ledgermesh delete statefulset <name> --cascade=orphan` before the
+  apply; the PVCs and data are kept).

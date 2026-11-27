@@ -1,6 +1,7 @@
 # Four isolated PostgreSQL servers, one per service, as in compose.yaml:46-114
 # (LM-041). Each runs with max_prepared_transactions=100 (compose.yaml:52), which
-# the 2PC participants require.
+# the 2PC participants require. Applications use the ClusterIP Service
+# <name>; the StatefulSet is governed by the headless <name>-headless.
 ---
 apiVersion: v1
 kind: Service
@@ -17,6 +18,23 @@ spec:
       port: 5432
       targetPort: postgres
 ---
+# Headless governing Service for the StatefulSet (coordinator-db-0.coordinator-db-headless).
+apiVersion: v1
+kind: Service
+metadata:
+  name: coordinator-db-headless
+  labels:
+    app.kubernetes.io/name: coordinator-db
+    app.kubernetes.io/component: database
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: coordinator-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -25,7 +43,7 @@ metadata:
     app.kubernetes.io/name: coordinator-db
     app.kubernetes.io/component: database
 spec:
-  serviceName: coordinator-db
+  serviceName: coordinator-db-headless
   replicas: 1
   selector:
     matchLabels:
@@ -129,6 +147,23 @@ spec:
       port: 5432
       targetPort: postgres
 ---
+# Headless governing Service for the StatefulSet (audit-ledger-db-0.audit-ledger-db-headless).
+apiVersion: v1
+kind: Service
+metadata:
+  name: audit-ledger-db-headless
+  labels:
+    app.kubernetes.io/name: audit-ledger-db
+    app.kubernetes.io/component: database
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: audit-ledger-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -137,7 +172,7 @@ metadata:
     app.kubernetes.io/name: audit-ledger-db
     app.kubernetes.io/component: database
 spec:
-  serviceName: audit-ledger-db
+  serviceName: audit-ledger-db-headless
   replicas: 1
   selector:
     matchLabels:
@@ -241,6 +276,23 @@ spec:
       port: 5432
       targetPort: postgres
 ---
+# Headless governing Service for the StatefulSet (wallet-db-0.wallet-db-headless).
+apiVersion: v1
+kind: Service
+metadata:
+  name: wallet-db-headless
+  labels:
+    app.kubernetes.io/name: wallet-db
+    app.kubernetes.io/component: database
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: wallet-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -249,7 +301,7 @@ metadata:
     app.kubernetes.io/name: wallet-db
     app.kubernetes.io/component: database
 spec:
-  serviceName: wallet-db
+  serviceName: wallet-db-headless
   replicas: 1
   selector:
     matchLabels:
@@ -353,6 +405,23 @@ spec:
       port: 5432
       targetPort: postgres
 ---
+# Headless governing Service for the StatefulSet (catalog-db-0.catalog-db-headless).
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog-db-headless
+  labels:
+    app.kubernetes.io/name: catalog-db
+    app.kubernetes.io/component: database
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: catalog-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -361,7 +430,7 @@ metadata:
     app.kubernetes.io/name: catalog-db
     app.kubernetes.io/component: database
 spec:
-  serviceName: catalog-db
+  serviceName: catalog-db-headless
   replicas: 1
   selector:
     matchLabels:

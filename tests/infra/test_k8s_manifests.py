@@ -164,7 +164,11 @@ def test_kafka_config_matches_compose(rendered):
 def test_databases_match_compose(rendered):
     for name in ("coordinator-db", "wallet-db", "catalog-db", "audit-ledger-db"):
         compose = COMPOSE["services"][name]
-        container = find(rendered, "StatefulSet", name)["spec"]["template"]["spec"]["containers"][0]
+        statefulset = find(rendered, "StatefulSet", name)
+        governing = find(rendered, "Service", statefulset["spec"]["serviceName"])
+        assert governing["spec"]["clusterIP"] == "None"
+        assert "clusterIP" not in find(rendered, "Service", name)["spec"]
+        container = statefulset["spec"]["template"]["spec"]["containers"][0]
         assert container["image"] == compose["image"]
         assert container["args"] == compose["command"]
         env = env_of(container)
