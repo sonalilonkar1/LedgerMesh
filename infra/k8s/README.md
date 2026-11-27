@@ -208,8 +208,18 @@ The `ghcr` overlay uses `ghcr.io/sonalilonkar1/ledgermesh-<name>` and leaves
 
 1. Set `newTag` in `overlays/ghcr/kustomization.yaml` to a published full commit
    SHA (see [IMAGES.md](../IMAGES.md)).
-2. Create `overlays/ghcr/.env.secrets`.
-3. Apply it with `kubectl apply -k infra/k8s/overlays/ghcr`.
+2. Create `overlays/ghcr/.env.secrets` from `overlays/ghcr/.env.secrets.example`.
+3. Delete the finished topic Job, then apply the overlay:
+
+   ```bash
+   kubectl -n ledgermesh delete job kafka-topics --ignore-not-found
+   kubectl apply -k infra/k8s/overlays/ghcr
+   ```
+
+   A Job's pod template is immutable, and a new `newTag` changes its image, so
+   without the delete every upgrade after the first is rejected for
+   `job/kafka-topics`. The bootstrap is idempotent, so re-running it is safe
+   (`kind-up.sh` does the same).
 
 The published images are **linux/amd64 only**, so they do not run on an arm64
 kind node, such as one on Apple silicon. Use the kind overlay there.
