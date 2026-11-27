@@ -20,6 +20,7 @@ Run a single service's health tests while developing:
 | Wallet | `uv run pytest services/wallet/tests -q` |
 | Catalog | `uv run pytest services/catalog/tests -q` |
 | Audit Ledger | `uv run pytest services/audit_ledger/tests -q` |
+| Identity | `uv run pytest services/identity/tests -q` |
 
 ## Run the complete local stack
 
@@ -61,6 +62,11 @@ documented in [the Coordinator service guide](../services/coordinator/README.md)
 They require the Coordinator database; use the complete local stack or set
 `COORDINATOR_DATABASE_URL` when running the service directly.
 
+Sign-in by email (LM-052) is served by the Identity Service and documented in
+[the authentication guide](authentication.md). Locally, sign-in emails go to
+Mailpit: `make mail-ui` prints the inbox URL, and `make identity-e2e` runs the
+whole flow against the running stack.
+
 ## Run one service without Compose
 
 | Service | Command | Default port |
@@ -69,6 +75,7 @@ They require the Coordinator database; use the complete local stack or set
 | Wallet | `make run-wallet` | 8001 |
 | Catalog | `make run-catalog` | 8002 |
 | Audit Ledger | `make run-ledger` | 8003 |
+| Identity | `make run-identity` | 8005 |
 
 Verify a running service:
 

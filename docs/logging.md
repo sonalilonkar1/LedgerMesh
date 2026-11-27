@@ -8,7 +8,7 @@ Every LedgerMesh process (the four HTTP services and the four Kafka workers) wri
 |---|---|
 | `timestamp` | UTC, ISO 8601, milliseconds |
 | `level` | `INFO`, `WARNING`, `ERROR`, ... |
-| `service` | `coordinator`, `wallet`, `catalog` or `audit-ledger` (API and worker alike) |
+| `service` | `coordinator`, `wallet`, `catalog`, `audit-ledger` or `identity` (API and worker alike) |
 | `logger` | Python logger name |
 | `message` | the log message |
 | `transaction_id` | the redemption this line belongs to |
@@ -80,3 +80,7 @@ Then `jq 'select(.fault_id == "<id>")'` shows the fault and its consequences in 
 | Sensitive values are excluded | `test_secret_like_fields_are_redacted`, `test_credentials_in_urls_are_masked_everywhere`, `test_nested_mappings_are_redacted` |
 | Fault ids are recorded | `test_fault_block_tags_every_log_inside_it`, `test_log_fault_injected_records_the_fault_and_where`, `test_fault_id_from_the_environment_tags_the_whole_process` |
 | One transaction can be reconstructed across services | `test_one_saga_redemption_can_be_followed_across_services` (`tests/integration/test_log_correlation.py`) |
+
+## Identity logs (LM-052)
+
+The Identity Service logs sign-in steps with `user_id` and `session_id` (the session row id, not the cookie value) only. It never passes an email address, a sign-in token or a cookie value to a logger: the formatter redacts fields named like `token` or `cookie`, but it does not recognise email addresses inside messages. Sign-in links carry the token in the URL fragment, so access logs never see it. See [authentication](authentication.md#audit-and-logging).
