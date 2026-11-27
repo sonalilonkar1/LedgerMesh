@@ -30,6 +30,10 @@ REWARD_ID="${SMOKE_REWARD_ID:-reward-coffee}"
 # a hosted deployment uses. 1: also call the internal execute-2pc route, which
 # exists only when LEDGERMESH_ENV is local or test.
 SMOKE_EXECUTE_2PC="${SMOKE_EXECUTE_2PC:-0}"
+# Seconds to wait for each redemption to reach a terminal state. Right after a
+# Kafka or PostgreSQL pod restart the workers can take ~2 minutes to reconnect,
+# so raise this when running the smoke straight after a fault test.
+SMOKE_TIMEOUT_SECONDS="${SMOKE_TIMEOUT_SECONDS:-90}"
 
 kc() { kubectl --context "$KCTX" -n "$NS" "$@"; }
 json() { python3 -c "import json, sys; d = json.load(sys.stdin); print($1)"; }
@@ -73,8 +77,18 @@ forward svc/coordinator "$COORDINATOR_PORT:8000"
 forward svc/wallet "$WALLET_PORT:8001"
 forward svc/catalog "$CATALOG_PORT:8002"
 forward svc/audit-ledger "$AUDIT_PORT:8003"
-forward svc/wallet-db "$WALLET_DB_PORT:5432"
-forward svc/catalog-db "$CATALOG_DB_PORT:5432"
+DB_PIDS=()
+forward_databases() {
+  for pid in "${DB_PIDS[@]:-}"; do
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+  done
+  DB_PIDS=()
+  forward svc/wallet-db "$WALLET_DB_PORT:5432"
+  DB_PIDS+=("$!")
+  forward svc/catalog-db "$CATALOG_DB_PORT:5432"
+  DB_PIDS+=("$!")
+}
+forward_databases
 
 check_health() {
   local expected="$1" port="$2" response="" actual=""
@@ -111,13 +125,34 @@ wait_for_port "$CATALOG_DB_PORT"
 echo "== Seed (LM-006, insert-only, safe to repeat)"
 PW="$(kc get secret -l app.kubernetes.io/component=db-credentials \
   -o jsonpath='{.items[0].data.POSTGRES_PASSWORD}' | base64 -d)"
-(
-  cd "$ROOT_DIR"
-  LEDGERMESH_ENV=local \
-    WALLET_DATABASE_URL="postgresql+psycopg://wallet:$PW@localhost:$WALLET_DB_PORT/wallet" \
-    CATALOG_DATABASE_URL="postgresql+psycopg://catalog:$PW@localhost:$CATALOG_DB_PORT/catalog" \
-    uv run --quiet python -m infra.scripts.seed seed wallet catalog
-)
+seed() {
+  (
+    cd "$ROOT_DIR"
+    LEDGERMESH_ENV=local \
+      WALLET_DATABASE_URL="postgresql+psycopg://wallet:$PW@localhost:$WALLET_DB_PORT/wallet" \
+      CATALOG_DATABASE_URL="postgresql+psycopg://catalog:$PW@localhost:$CATALOG_DB_PORT/catalog" \
+      uv run --quiet python -m infra.scripts.seed seed wallet catalog
+  )
+}
+# A port-forward opened while a database pod was restarting can refuse
+# connections; re-open the forwards and retry (seeding is insert-only).
+seeded=0
+for attempt in 1 2 3; do
+  if seed 2>"${TMPDIR:-/tmp}/lm041-seed.err"; then
+    seeded=1
+    break
+  fi
+  echo "seed attempt $attempt failed; re-opening database port-forwards" >&2
+  tail -n 1 "${TMPDIR:-/tmp}/lm041-seed.err" >&2
+  forward_databases
+  wait_for_port "$WALLET_DB_PORT"
+  wait_for_port "$CATALOG_DB_PORT"
+  sleep 3
+done
+if [[ "$seeded" != 1 ]]; then
+  cat "${TMPDIR:-/tmp}/lm041-seed.err" >&2
+  exit 1
+fi
 
 balance() {
   curl --fail --silent --show-error "http://localhost:$WALLET_PORT/v1/wallets/$USER_ID" |
@@ -169,7 +204,7 @@ run_mode() {
       "http://localhost:$COORDINATOR_PORT/internal/v1/redemptions/$id/execute-2pc" >/dev/null || true
   fi
 
-  local status="" deadline=$((SECONDS + 90))
+  local status="" deadline=$((SECONDS + SMOKE_TIMEOUT_SECONDS))
   while ((SECONDS < deadline)); do
     status="$(curl --fail --silent "http://localhost:$COORDINATOR_PORT/v1/redemptions/$id" |
       json 'd["status"]' || true)"
@@ -201,7 +236,7 @@ run_mode() {
   # 2PC writes redemption.<status> with payload.status (repository.py:309-345);
   # the Saga writes coordinator.transitioned with payload.to_status (saga.py:86-106).
   local events found="0 -"
-  deadline=$((SECONDS + 60))
+  deadline=$((SECONDS + SMOKE_TIMEOUT_SECONDS))
   while ((SECONDS < deadline)); do
     events="$(curl --fail --silent "http://localhost:$AUDIT_PORT/v1/transactions/$id/events" || echo '[]')"
     found="$(EXPECTED="$expected" python3 -c '

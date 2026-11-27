@@ -3,7 +3,8 @@
 # images, apply the kind overlay and wait for everything to be ready (LM-041).
 #
 # The kubeconfig is written to a separate file, so your default kubectl context
-# is never changed. Override with KIND_CLUSTER, KUBECONFIG or KUBE_CONTEXT.
+# is never changed. Override with KIND_CLUSTER, KUBECONFIG_LM041 or KUBE_CONTEXT,
+# and pick the node image with KIND_NODE_IMAGE (e.g. kindest/node:v1.35.0).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -17,7 +18,8 @@ kc() { kubectl --context "$KCTX" "$@"; }
 if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
   echo "Creating kind cluster $CLUSTER (kubeconfig: $KUBECONFIG)..."
   kind create cluster --name "$CLUSTER" --kubeconfig "$KUBECONFIG" \
-    --config "$OVERLAY/kind-cluster.yaml" --wait 120s
+    --config "$OVERLAY/kind-cluster.yaml" --wait 120s \
+    ${KIND_NODE_IMAGE:+--image "$KIND_NODE_IMAGE"}
 else
   kind export kubeconfig --name "$CLUSTER" --kubeconfig "$KUBECONFIG"
 fi
