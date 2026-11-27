@@ -1,4 +1,4 @@
-.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean images-build images-check
+.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer run-identity identity-e2e mail-ui infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean images-build images-check
 
 COMPOSE_FILE ?= infra/compose.yaml
 COMPOSE := docker compose -f $(COMPOSE_FILE)
@@ -57,6 +57,22 @@ run-ledger:
 run-audit-consumer:
 	AUDIT_LEDGER_DATABASE_URL=$${AUDIT_LEDGER_DATABASE_URL:-postgresql+psycopg://audit_ledger:ledgermesh_dev@localhost:54324/audit_ledger} \
 	  uv run python -m services.audit_ledger.app.event_worker
+
+# Passwordless sign-in (LM-052). Needs identity-db and mailpit from infra-up.
+run-identity:
+	LEDGERMESH_ENV=$${LEDGERMESH_ENV:-local} \
+	  IDENTITY_DATABASE_URL=$${IDENTITY_DATABASE_URL:-postgresql+psycopg://identity:ledgermesh_dev@localhost:54325/identity} \
+	  IDENTITY_SMTP_HOST=$${IDENTITY_SMTP_HOST:-localhost} \
+	  uv run uvicorn services.identity.app.main:app --reload --port 8005
+
+# End-to-end sign-in through the real service and Mailpit's API.
+identity-e2e:
+	IDENTITY_E2E_BASE_URL=$${IDENTITY_E2E_BASE_URL:-http://localhost:8005} \
+	  MAILPIT_API_URL=$${MAILPIT_API_URL:-http://localhost:8025} \
+	  uv run pytest services/identity/tests/test_mailpit_flow.py -q
+
+mail-ui:
+	@echo "Mailpit inbox: http://localhost:$${MAILPIT_UI_PORT:-8025}"
 
 infra-up:
 	$(COMPOSE) up --build -d --wait

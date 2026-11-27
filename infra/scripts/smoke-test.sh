@@ -52,6 +52,10 @@ check_health "coordinator" "${COORDINATOR_PORT:-8000}"
 check_health "wallet" "${WALLET_PORT:-8001}"
 check_health "catalog" "${CATALOG_PORT:-8002}"
 check_health "audit-ledger" "${AUDIT_LEDGER_PORT:-8003}"
+check_health "identity" "${IDENTITY_PORT:-8005}"
+
+echo "Checking Mailpit (local sign-in email)..."
+curl --fail --silent --show-error "http://localhost:${MAILPIT_UI_PORT:-8025}/readyz" >/dev/null
 
 echo "Checking Kafka broker..."
 "${COMPOSE[@]}" exec -T kafka \
@@ -62,7 +66,8 @@ for entry in \
   "coordinator-db coordinator coordinator" \
   "wallet-db wallet wallet" \
   "catalog-db catalog catalog" \
-  "audit-ledger-db audit_ledger audit_ledger"
+  "audit-ledger-db audit_ledger audit_ledger" \
+  "identity-db identity identity"
 do
   read -r service user database <<<"$entry"
   "${COMPOSE[@]}" exec -T "$service" pg_isready -U "$user" -d "$database" >/dev/null

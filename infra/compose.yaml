@@ -113,6 +113,40 @@ services:
       <<: *postgres-healthcheck
     networks: [backend]
 
+  identity-db:
+    image: postgres:17.11-alpine
+    restart: unless-stopped
+    shm_size: 128mb
+    # Identity takes no part in 2PC; the setting keeps every local server alike
+    # (infra/README.md, smoke test).
+    command: ["postgres", "-c", "max_prepared_transactions=100"]
+    ports:
+      - "${IDENTITY_DB_PORT:-54325}:5432"
+    environment:
+      POSTGRES_USER: identity
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ledgermesh_dev}
+      POSTGRES_DB: identity
+    volumes:
+      - identity_db_data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *postgres-healthcheck
+    networks: [backend]
+
+  # Local test inbox for sign-in emails (LM-052). Nothing is delivered to the
+  # internet; open http://localhost:8025 to read the messages.
+  mailpit:
+    image: axllent/mailpit:v1.33.1
+    restart: unless-stopped
+    ports:
+      - "${MAILPIT_SMTP_PORT:-1025}:1025"
+      - "${MAILPIT_UI_PORT:-8025}:8025"
+    environment:
+      MP_MAX_MESSAGES: "500"
+    healthcheck:
+      <<: *service-healthcheck
+      test: ["CMD", "/mailpit", "readyz"]
+    networks: [backend]
+
   coordinator:
     build:
       context: ..
@@ -207,6 +241,32 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=2)"]
     networks: [backend]
 
+  identity:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.service
+    command: ["sh", "-c", "alembic -c services/identity/alembic.ini upgrade head && exec python -m uvicorn services.identity.app.main:app --host 0.0.0.0 --port 8005"]
+    init: true
+    ports:
+      - "${IDENTITY_PORT:-8005}:8005"
+    environment:
+      SERVICE_NAME: identity
+      LEDGERMESH_ENV: local
+      DATABASE_URL: postgresql+psycopg://identity:${POSTGRES_PASSWORD:-ledgermesh_dev}@identity-db:5432/identity
+      IDENTITY_SMTP_HOST: mailpit
+      IDENTITY_SMTP_PORT: "1025"
+      IDENTITY_LOGIN_LINK_URL: http://localhost:${IDENTITY_PORT:-8005}/v1/auth/verify
+      IDENTITY_OPERATOR_EMAILS: ${IDENTITY_OPERATOR_EMAILS:-operator@example.com}
+    depends_on:
+      identity-db:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+    healthcheck:
+      <<: *service-healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8005/health', timeout=2)"]
+    networks: [backend]
+
 networks:
   backend:
     name: ledgermesh-backend
@@ -217,4 +277,5 @@ volumes:
   wallet_db_data:
   catalog_db_data:
   audit_ledger_db_data:
+  identity_db_data:
 
