@@ -1,6 +1,6 @@
 # Structured logs and transaction correlation (LM-032)
 
-Every LedgerMesh process (the four HTTP services and the four Kafka workers) writes **one JSON object per line** to stdout, with the **same field names** in every service. The setup lives in one place, `ledgermesh_messaging.logs`, so the names can't drift between services.
+Every LedgerMesh process (the five HTTP services and the four Kafka workers) writes **one JSON object per line** to stdout, with the **same field names** in every service. The setup lives in one place, `ledgermesh_messaging.logs`, so the names can't drift between services.
 
 ## Fields
 

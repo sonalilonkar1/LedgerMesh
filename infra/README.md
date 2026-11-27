@@ -3,8 +3,9 @@
 LM-003 provides a reproducible local stack containing:
 
 - One Apache Kafka broker in single-node KRaft mode
-- Four isolated PostgreSQL instances
-- Coordinator, Wallet, Catalog, and Audit Ledger FastAPI services
+- Five isolated PostgreSQL instances
+- Coordinator, Wallet, Catalog, Audit Ledger, and Identity FastAPI services
+- Mailpit, a local SMTP server and web inbox for sign-in emails (LM-052)
 - Health checks and dependency-aware startup ordering
 - Named volumes for broker and database data
 
@@ -22,7 +23,7 @@ From the repository root:
 make infra-up
 ```
 
-This builds the service image and runs Compose with `--wait`. Compose does not start an application service until its database and Kafka report healthy.
+This builds the service image and runs Compose with `--wait`. Compose does not start an application service until its dependencies report healthy: its database and Kafka for the four transaction services, and its database and Mailpit for Identity.
 
 Verify the complete stack:
 
@@ -202,7 +203,7 @@ Each tester should record the following in the LM-003 pull request:
 | Check | Expected result |
 |---|---|
 | `make infra-up` | Compose exits successfully and every container becomes healthy |
-| `make infra-status` | Kafka, four databases, and four services are running/healthy |
+| `make infra-status` | Kafka, five databases, five services, and Mailpit are running/healthy |
 | `make infra-smoke` | Script prints `LedgerMesh infrastructure smoke test passed.` |
 | `make infra-down` | All stack containers stop cleanly |
 

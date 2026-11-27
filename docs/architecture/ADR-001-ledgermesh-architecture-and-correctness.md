@@ -25,6 +25,7 @@ This ADR fixes the vocabulary, service boundaries, allowed communication paths, 
 | Rewards Catalog Service | Reward definitions, available inventory, inventory version, reservations, Catalog inbox/outbox | Read or update Wallet data |
 | Audit Ledger Service | Append-only transaction events, decisions, failures, compensations, and recovery actions | Act as the source of truth for balances or inventory |
 | Web Interface | User input and transaction-status display | Contain transaction coordination or business persistence logic |
+| Identity Service (added by §16, LM-052) | Users, sign-in link hashes, sessions, auth audit trail | See §16 |
 
 Each service owns its database or isolated database schema. No service may directly query or mutate another service's tables. Cross-service work occurs through versioned APIs or Kafka messages.
 
@@ -282,7 +283,7 @@ LM-001 can be closed when this ADR is merged, all checklist items are approved, 
 
 ## 16. Addendum 2026-11-27: Identity Service (LM-052)
 
-LM-052 requires authentication with validated email addresses and no stored user secrets. It adds one service to the table in section 2:
+LM-052 requires authentication with validated email addresses and no stored user secrets. It adds one service to the table in section 2 (the full row is below). Like the rest of this ADR, this section needs approval from all four team members (section 14).
 
 | Service | Owns | Must not do |
 |---|---|---|

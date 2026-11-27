@@ -21,6 +21,7 @@ LedgerMesh uses strict service ownership:
 - **Wallet Service** owns customer point balances, deductions, refunds, and Wallet idempotency records.
 - **Rewards Catalog Service** owns reward inventory, reservations, releases, and Catalog idempotency records.
 - **Audit Ledger Service** stores an append-only transaction history.
+- **Identity Service** owns users, single-use sign-in link hashes, server-side sessions and the auth audit trail (LM-052); it is outside the redemption path.
 - **Messaging Library** provides the shared Kafka envelope, publishing, inbox, and outbox infrastructure.
 
 No service directly reads or modifies another service's database.
