@@ -4,6 +4,7 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -55,3 +56,46 @@ def test_secret_scan_rejects_a_malformed_range():
 
     assert result.returncode == 2
     assert "SCAN_RANGE must be <sha>..<sha>" in result.stderr
+
+
+RUN_TARGETS = (
+    "run-coordinator",
+    "run-coordinator-saga",
+    "run-wallet",
+    "run-wallet-saga",
+    "run-catalog",
+    "run-catalog-saga",
+    "run-ledger",
+    "run-audit-consumer",
+)
+
+
+def make(*arguments: str, **environment: str) -> subprocess.CompletedProcess:
+    env = {name: value for name, value in os.environ.items() if name != "LEDGERMESH_ENV"}
+    env.update(environment)
+    return subprocess.run(
+        ["make", "--no-print-directory", *arguments],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+@pytest.mark.parametrize("target", RUN_TARGETS)
+@pytest.mark.parametrize("environment", ["staging", "production"])
+def test_make_run_targets_refuse_a_non_local_environment(target, environment):
+    """--reload and the development password stay local: the guard exits before uvicorn."""
+    result = make(target, LEDGERMESH_ENV=environment)
+
+    assert result.returncode != 0
+    assert "run-* targets are for local development" in result.stderr
+
+
+@pytest.mark.parametrize("target", RUN_TARGETS)
+def test_make_run_targets_default_to_the_local_environment(target):
+    result = make("-n", target)
+
+    assert result.returncode == 0, result.stderr
+    assert "LEDGERMESH_ENV=${LEDGERMESH_ENV:-local}" in result.stdout
