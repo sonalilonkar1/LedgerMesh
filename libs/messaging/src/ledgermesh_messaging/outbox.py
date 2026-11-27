@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .envelope import EventEnvelope
 from .schema import outbox
+from .tracing import with_trace_headers
 
 
 @dataclass(frozen=True)
@@ -24,7 +25,9 @@ async def enqueue(session: AsyncSession, message: OutgoingMessage) -> None:
     """Stage a message for publication.
 
     Must run inside the caller's open transaction so the message commits or
-    rolls back together with the business change that produced it.
+    rolls back together with the business change that produced it. The
+    current trace context is added to the headers (LM-033), so the consumer's
+    span joins the producer's trace; headers the caller set explicitly win.
     """
     await session.execute(
         insert(outbox).values(
@@ -32,6 +35,6 @@ async def enqueue(session: AsyncSession, message: OutgoingMessage) -> None:
             topic=message.topic,
             message_key=message.key,
             envelope=message.envelope.to_json(),
-            headers=dict(message.headers),
+            headers=with_trace_headers(message.headers),
         )
     )

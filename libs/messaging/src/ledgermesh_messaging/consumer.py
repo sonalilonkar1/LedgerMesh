@@ -10,13 +10,17 @@ from contextlib import suppress
 from typing import Any
 
 from aiokafka import AIOKafkaConsumer, ConsumerRecord, TopicPartition
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind, Status, StatusCode
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .envelope import EnvelopeError, EventEnvelope
 from .inbox import Handler, ProcessResult, process_once
 from .logs import envelope_fields, log_context
-from .retry import DeadLetterReason, FailureRouter, not_before
+from .retry import DeadLetterReason, FailureRouter, headers_of, not_before, retry_count
+from .tracing import ATTEMPT, envelope_attributes, trace_headers_from, tracer, use_trace_context
+from .tracing import RETRY_COUNT as RETRY_COUNT_ATTRIBUTE
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,12 @@ DeadLetterHook = Callable[[ConsumerRecord, Exception], Awaitable[None]]
 
 async def _raise(record: ConsumerRecord, exc: Exception) -> None:
     raise exc
+
+
+def _failed(span: trace.Span, exc: BaseException, outcome: str, **attributes: Any) -> None:
+    span.record_exception(exc)
+    span.set_status(Status(StatusCode.ERROR, outcome))
+    span.add_event(outcome, {name: value for name, value in attributes.items()})
 
 
 class InboxConsumer:
@@ -105,31 +115,66 @@ class InboxConsumer:
             await self._router.retry_or_dead_letter(record, exc)
 
     async def handle(self, record: ConsumerRecord) -> ProcessResult | None:
-        """Process one record without committing its offset."""
-        try:
-            envelope = EventEnvelope.from_bytes(record.value)
-        except EnvelopeError as exc:
-            await self._reject(record, exc, DeadLetterReason.INVALID_ENVELOPE)
-            return None
+        """Process one record without committing its offset.
 
-        # Every log while handling this message (handler, retries, dead
-        # letters) carries its transaction, event and correlation ids (LM-032).
-        with log_context(**envelope_fields(envelope)):
-            return await self._handle_envelope(record, envelope)
+        The record is handled in a CONSUMER span that continues the producer's
+        trace from its ``traceparent`` header (LM-033), so the handler's
+        database work and the replies it enqueues join the same trace.
+        """
+        parent = trace_headers_from(headers_of(record))
+        topic = getattr(record, "topic", None) or "kafka"
+        with (
+            use_trace_context(parent),
+            tracer().start_as_current_span(
+                f"{topic} process",
+                kind=SpanKind.CONSUMER,
+                attributes={
+                    "messaging.system": "kafka",
+                    "messaging.operation.type": "process",
+                    "messaging.destination.name": topic,
+                    "messaging.consumer.group.name": self._name,
+                    "messaging.destination.partition.id": str(getattr(record, "partition", "")),
+                    "messaging.kafka.offset": int(getattr(record, "offset", -1)),
+                    RETRY_COUNT_ATTRIBUTE: retry_count(record),
+                },
+            ) as span,
+        ):
+            try:
+                envelope = EventEnvelope.from_bytes(record.value)
+            except EnvelopeError as exc:
+                _failed(span, exc, "dead_letter", reason=str(DeadLetterReason.INVALID_ENVELOPE))
+                await self._reject(record, exc, DeadLetterReason.INVALID_ENVELOPE)
+                return None
+            span.set_attributes(envelope_attributes(envelope))
+
+            # Every log while handling this message (handler, retries, dead
+            # letters) carries its transaction, event and correlation ids (LM-032).
+            with log_context(**envelope_fields(envelope)):
+                result = await self._handle_envelope(record, envelope)
+            if result is not None:
+                span.set_attribute("ledgermesh.duplicate", result.duplicate)
+            return result
 
     async def _handle_envelope(
         self, record: ConsumerRecord, envelope: EventEnvelope
     ) -> ProcessResult | None:
+        span = trace.get_current_span()
         for attempt in range(1, self._max_attempts + 1):
+            span.set_attribute(ATTEMPT, attempt)
             try:
                 return await self._process(envelope)
             except PermanentError as exc:
+                _failed(span, exc, "dead_letter", reason=str(DeadLetterReason.PERMANENT_ERROR))
                 await self._reject(record, exc, DeadLetterReason.PERMANENT_ERROR)
                 return None
             except (TransientError, OperationalError, TimeoutError) as exc:
                 if attempt == self._max_attempts:
+                    # The router sends it to the retry topic, or the DLQ once
+                    # redeliveries run out; either way this attempt failed.
+                    _failed(span, exc, "gave_up", attempts=attempt)
                     await self._give_up(record, exc)
                     return None
+                span.add_event("retry", {ATTEMPT: attempt, "error": repr(exc)})
                 logger.warning(
                     "retrying event %s (attempt %d/%d): %r",
                     envelope.event_id,

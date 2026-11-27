@@ -60,6 +60,16 @@ from .workflow import (
     in_workflow_order,
     matching_workflow_step,
 )
+from .tracing import (
+    configure_tracing,
+    current_trace_context,
+    instrument_fastapi,
+    instrument_httpx,
+    record_transition_on_span,
+    trace_engine,
+    trace_headers,
+    use_trace_context,
+)
 
 __all__ = [
     "ALL_TOPICS",
@@ -105,10 +115,12 @@ __all__ = [
     "check_expected_step",
     "check_participant_step",
     "configure_logging",
+    "configure_tracing",
     "consumer_groups",
     "create_consumer",
     "create_producer",
     "create_retry_consumer",
+    "current_trace_context",
     "dead_letter_topic",
     "enqueue",
     "ensure_topics",
@@ -117,6 +129,8 @@ __all__ = [
     "in_version_order",
     "in_workflow_order",
     "inbox",
+    "instrument_fastapi",
+    "instrument_httpx",
     "is_root",
     "log_context",
     "log_fault_injected",
@@ -124,7 +138,11 @@ __all__ = [
     "metadata",
     "outbox",
     "process_once",
+    "record_transition_on_span",
     "require_causation",
     "retry_topic",
+    "trace_engine",
+    "trace_headers",
+    "use_trace_context",
     "workflow_steps",
 ]
