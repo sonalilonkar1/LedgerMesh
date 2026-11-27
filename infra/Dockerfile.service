@@ -57,6 +57,14 @@ COPY --from=builder --chown=root:root /app/.venv /app/.venv
 COPY --chown=root:root services ./services
 COPY --chown=root:root --chmod=0755 infra/docker/start-service.sh /app/start-service.sh
 
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends --only-upgrade \
+        libpam-modules \
+        libpam-modules-bin \
+        libpam-runtime \
+        libpam0g \
+    && rm -rf /var/lib/apt/lists/*
+
 USER 10001:10001
 EXPOSE ${PORT}
 
