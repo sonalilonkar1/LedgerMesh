@@ -45,6 +45,19 @@ services:
       start_period: 20s
     networks: [backend]
 
+  # Trace store and UI (LM-033). Services send OTLP over HTTP to jaeger:4318
+  # on the private network; only the UI is published. Traces are in memory,
+  # so they reset when the container restarts.
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    restart: unless-stopped
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+      MEMORY_MAX_TRACES: "50000"
+    networks: [backend]
+
   coordinator-db:
     image: postgres:17.11-alpine
     restart: unless-stopped
@@ -124,6 +137,7 @@ services:
       - "${COORDINATOR_PORT:-8000}:8000"
     environment:
       SERVICE_NAME: coordinator
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       LEDGERMESH_ENV: local
       DATABASE_URL: postgresql+psycopg://coordinator:${POSTGRES_PASSWORD:-ledgermesh_dev}@coordinator-db:5432/coordinator
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
@@ -151,6 +165,7 @@ services:
       - "${WALLET_PORT:-8001}:8001"
     environment:
       SERVICE_NAME: wallet
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       DATABASE_URL: postgresql+psycopg://wallet:${POSTGRES_PASSWORD:-ledgermesh_dev}@wallet-db:5432/wallet
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
     depends_on:
@@ -173,6 +188,7 @@ services:
       - "${CATALOG_PORT:-8002}:8002"
     environment:
       SERVICE_NAME: catalog
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       DATABASE_URL: postgresql+psycopg://catalog:${POSTGRES_PASSWORD:-ledgermesh_dev}@catalog-db:5432/catalog
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
     depends_on:
@@ -195,6 +211,7 @@ services:
       - "${AUDIT_LEDGER_PORT:-8003}:8003"
     environment:
       SERVICE_NAME: audit-ledger
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       DATABASE_URL: postgresql+psycopg://audit_ledger:${POSTGRES_PASSWORD:-ledgermesh_dev}@audit-ledger-db:5432/audit_ledger
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
     depends_on:
