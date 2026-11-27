@@ -36,19 +36,31 @@ WORKERS = {
 
 
 @pytest.fixture(scope="module")
-def rendered(tmp_path_factory) -> list[dict]:
+def k8s_copy(tmp_path_factory) -> Path:
+    """A copy of infra/k8s whose overlays hold their committed example secrets."""
     if shutil.which("kubectl") is None:
         pytest.skip("kubectl is not installed")
     copy = tmp_path_factory.mktemp("k8s") / "k8s"
     shutil.copytree(K8S, copy, ignore=shutil.ignore_patterns(".env.secrets"))
-    (copy / "overlays" / "kind" / ".env.secrets").write_text("POSTGRES_PASSWORD=0123abcd\n")
+    for overlay in ("kind", "ghcr"):
+        directory = copy / "overlays" / overlay
+        shutil.copy(directory / ".env.secrets.example", directory / ".env.secrets")
+    return copy
+
+
+def render(k8s_copy: Path, overlay: str) -> list[dict]:
     result = subprocess.run(
-        ["kubectl", "kustomize", str(copy / "overlays" / "kind")],
+        ["kubectl", "kustomize", str(k8s_copy / "overlays" / overlay)],
         capture_output=True,
         text=True,
         check=True,
     )
     return [doc for doc in yaml.safe_load_all(result.stdout) if doc]
+
+
+@pytest.fixture(scope="module")
+def rendered(k8s_copy) -> list[dict]:
+    return render(k8s_copy, "kind")
 
 
 def find(docs: list[dict], kind: str, name: str) -> dict:
@@ -215,3 +227,20 @@ def test_no_secret_values_are_committed(rendered):
         ["git", "ls-files", "infra/k8s"], cwd=ROOT, capture_output=True, text=True, check=False
     ).stdout.split()
     assert not [path for path in tracked if path.endswith(".env.secrets")]
+
+
+def test_ghcr_overlay_uses_published_images_without_internal_routes(k8s_copy):
+    docs = render(k8s_copy, "ghcr")
+    images = {
+        container["image"]
+        for _, spec in pod_specs(docs)
+        for container in spec.get("initContainers", []) + spec["containers"]
+    }
+    published = {image for image in images if "ledgermesh-" in image}
+    assert published
+    for image in published:
+        assert image.startswith("ghcr.io/sonalilonkar1/ledgermesh-"), image
+    assert "LEDGERMESH_ENV" not in config(docs, "ledgermesh-config")
+    assert [
+        d["metadata"]["name"].startswith("ledgermesh-db-") for d in docs if d["kind"] == "Secret"
+    ] == [True]
