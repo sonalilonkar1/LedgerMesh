@@ -18,6 +18,7 @@ from ledgermesh_messaging import (
     InboxConsumer,
     OutboxPublisher,
     RetryPolicy,
+    configure_logging,
     create_consumer,
     create_producer,
     create_retry_consumer,
@@ -71,7 +72,7 @@ async def run(stop: asyncio.Event) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging("catalog")
 
     async def serve() -> None:
         stop = asyncio.Event()

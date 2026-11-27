@@ -4,6 +4,15 @@ from .envelope import EnvelopeError, EventEnvelope
 from .inbox import Handler, ProcessResult, process_once
 from .kafka import create_consumer, create_producer
 from .metrics import MetricsServer, render_metrics, start_metrics_server
+from .logs import (
+    CORRELATION_HEADER,
+    CorrelationMiddleware,
+    configure_logging,
+    envelope_fields,
+    fault,
+    log_context,
+    log_fault_injected,
+)
 from .outbox import OutgoingMessage, enqueue
 from .publisher import BatchResult, OutboxPublisher
 from .retry import (
@@ -60,8 +69,10 @@ __all__ = [
     "REDEMPTION_EVENTS",
     "WALLET_COMMANDS",
     "WALLET_RESULTS",
+    "CORRELATION_HEADER",
     "BatchResult",
     "BootstrapReport",
+    "CorrelationMiddleware",
     "DeadLetterReason",
     "EnvelopeError",
     "EventEnvelope",
@@ -95,6 +106,7 @@ __all__ = [
     "check_and_advance",
     "check_expected_step",
     "check_participant_step",
+    "configure_logging",
     "consumer_groups",
     "create_consumer",
     "create_producer",
@@ -102,10 +114,14 @@ __all__ = [
     "dead_letter_topic",
     "enqueue",
     "ensure_topics",
+    "envelope_fields",
+    "fault",
     "in_version_order",
     "in_workflow_order",
     "inbox",
     "is_root",
+    "log_context",
+    "log_fault_injected",
     "matching_workflow_step",
     "metadata",
     "outbox",

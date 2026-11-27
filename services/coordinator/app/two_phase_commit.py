@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -10,10 +11,26 @@ from typing import Protocol
 from uuid import UUID
 
 import httpx
+from ledgermesh_messaging import CORRELATION_HEADER, log_context
+from ledgermesh_messaging.logs import current_context
 from sqlalchemy import Engine, create_engine
 
 from services.coordinator.app.errors import InvalidTransition
 from services.coordinator.app.repository import PostgresCoordinatorRepository, WorkflowRecord
+
+logger = logging.getLogger(__name__)
+
+
+def _propagate_correlation(request: httpx.Request) -> None:
+    """Send the bound correlation id, so participant logs join this transaction."""
+    if correlation_id := current_context().get("correlation_id"):
+        request.headers[CORRELATION_HEADER] = str(correlation_id)
+
+
+def _participant_client(base_url: str, timeout: float) -> httpx.Client:
+    return httpx.Client(
+        base_url=base_url, timeout=timeout, event_hooks={"request": [_propagate_correlation]}
+    )
 
 
 @dataclass(frozen=True)
@@ -51,7 +68,7 @@ class ParticipantUnavailable(RuntimeError):
 
 class HttpWalletParticipant:
     def __init__(self, base_url: str, timeout: float = 2.0) -> None:
-        self.client = httpx.Client(base_url=base_url, timeout=timeout)
+        self.client = _participant_client(base_url, timeout)
 
     def prepare(self, record: WorkflowRecord) -> ParticipantVote:
         response = self.client.post(
@@ -73,7 +90,7 @@ class HttpWalletParticipant:
 
 class HttpCatalogParticipant:
     def __init__(self, base_url: str, timeout: float = 2.0) -> None:
-        self.client = httpx.Client(base_url=base_url, timeout=timeout)
+        self.client = _participant_client(base_url, timeout)
 
     def quote(self, reward_id: str) -> RewardQuote:
         response = self.client.get(f"/v1/rewards/{reward_id}")
@@ -127,7 +144,7 @@ class TwoPhaseCommitWorkflow:
         self.lock_engine = lock_engine or _dedicated_lock_engine(repository.engine)
 
     def execute(self, transaction_id: UUID) -> WorkflowRecord:
-        with self._workflow_lock(transaction_id):
+        with log_context(transaction_id=transaction_id), self._workflow_lock(transaction_id):
             return self._execute_locked(transaction_id)
 
     def recover(self, transaction_id: UUID) -> WorkflowRecord:
@@ -137,7 +154,7 @@ class TwoPhaseCommitWorkflow:
         presumed abort; it must never repeat prepare and invent a COMMIT after
         a crash. Already-decided records retransmit the same decision.
         """
-        with self._workflow_lock(transaction_id):
+        with log_context(transaction_id=transaction_id), self._workflow_lock(transaction_id):
             record = self.repository.get_workflow(transaction_id)
             if record.coordination_mode != "two_phase_commit":
                 raise InvalidTransition("The redemption is not a 2PC transaction.", transaction_id)
@@ -188,39 +205,49 @@ class TwoPhaseCommitWorkflow:
         return self.repository.get_workflow(transaction_id)
 
     def _prepare_and_decide(self, record: WorkflowRecord) -> str:
-        votes: list[str] = []
-        try:
-            quote = self.catalog.quote(record.reward_id)
-            record = self.repository.record_quote(
-                record.transaction_id, quote.point_cost, quote.version
-            )
-            votes.append(self.wallet.prepare(record).state)
-            votes.append(self.catalog.prepare(record).state)
-        except (httpx.TimeoutException, httpx.TransportError, ParticipantUnavailable):
-            votes.append("ABORTED")
+        # The correlation id rides on every participant call (X-Correlation-Id).
+        with log_context(correlation_id=record.correlation_id):
+            votes: list[str] = []
+            try:
+                quote = self.catalog.quote(record.reward_id)
+                record = self.repository.record_quote(
+                    record.transaction_id, quote.point_cost, quote.version
+                )
+                votes.append(self.wallet.prepare(record).state)
+                votes.append(self.catalog.prepare(record).state)
+            except (httpx.TimeoutException, httpx.TransportError, ParticipantUnavailable):
+                votes.append("ABORTED")
+            logger.info("2PC votes collected: %s", votes, extra={"state": "PREPARING"})
 
-        if len(votes) == 2 and all(vote == "PREPARED" for vote in votes):
+            if len(votes) == 2 and all(vote == "PREPARED" for vote in votes):
+                self.repository.transition(
+                    record.transaction_id, "COMMIT_DECIDED", "all participants voted YES"
+                )
+                return "COMMIT_DECIDED"
             self.repository.transition(
-                record.transaction_id, "COMMIT_DECIDED", "all participants voted YES"
+                record.transaction_id, "ABORT_DECIDED", "NO vote or prepare timeout"
             )
-            return "COMMIT_DECIDED"
-        self.repository.transition(
-            record.transaction_id, "ABORT_DECIDED", "NO vote or prepare timeout"
-        )
-        return "ABORT_DECIDED"
+            return "ABORT_DECIDED"
 
     def _deliver_decision(self, record: WorkflowRecord) -> WorkflowRecord:
         operation = "commit" if record.status == "COMMIT_DECIDED" else "abort"
         terminal = "COMMITTED" if operation == "commit" else "ABORTED"
-        try:
-            getattr(self.wallet, operation)(record.transaction_id)
-            getattr(self.catalog, operation)(record.transaction_id)
-        except (httpx.TimeoutException, httpx.TransportError, ParticipantUnavailable):
-            return record
-        finalized, _envelope = self.repository.finalize_with_audit(
-            record.transaction_id, terminal, "all participants acknowledged final decision"
-        )
-        return finalized
+        with log_context(correlation_id=record.correlation_id):
+            try:
+                getattr(self.wallet, operation)(record.transaction_id)
+                getattr(self.catalog, operation)(record.transaction_id)
+            except (httpx.TimeoutException, httpx.TransportError, ParticipantUnavailable) as error:
+                logger.warning(
+                    "2PC %s not acknowledged yet; it will be retransmitted: %r",
+                    operation,
+                    error,
+                    extra={"state": record.status},
+                )
+                return record
+            finalized, _envelope = self.repository.finalize_with_audit(
+                record.transaction_id, terminal, "all participants acknowledged final decision"
+            )
+            return finalized
 
 
 def _dedicated_lock_engine(repository_engine: Engine) -> Engine:

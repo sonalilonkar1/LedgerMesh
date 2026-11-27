@@ -13,6 +13,7 @@ from aiokafka.errors import KafkaError
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .logs import envelope_fields, log_context
 from .schema import outbox
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,9 @@ class Producer(Protocol):
 
 
 def _advisory_lock_key(name: str) -> int:
-    return int.from_bytes(hashlib.blake2b(name.encode(), digest_size=8).digest(), "big", signed=True)
+    return int.from_bytes(
+        hashlib.blake2b(name.encode(), digest_size=8).digest(), "big", signed=True
+    )
 
 
 @dataclass(frozen=True)
@@ -113,7 +116,8 @@ class OutboxPublisher:
                         .where(outbox.c.id == row.id)
                         .values(attempts=outbox.c.attempts + 1, last_error=repr(exc)[:2000])
                     )
-                    logger.warning("outbox publish failed for event %s: %r", row.event_id, exc)
+                    with log_context(**envelope_fields(row.envelope)):
+                        logger.warning("outbox publish to %s failed: %r", row.topic, exc)
                     return BatchResult(published=published, failed=True)
 
                 await session.execute(

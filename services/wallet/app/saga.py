@@ -148,6 +148,16 @@ class WalletSagaHandler:
     ) -> list[OutgoingMessage]:
         command = parse_command(envelope)
         reply = await session.run_sync(lambda sync: self.apply(sync.connection(), command))
+        # The command's ids are already bound by InboxConsumer (LM-032).
+        logger.info(
+            "%s answered with %s",
+            envelope.event_type,
+            reply.event_type,
+            extra={
+                "state": reply.payload.get("outcome") or reply.payload.get("reason"),
+                "result_event_id": reply.event_id,
+            },
+        )
         return [WALLET_RESULTS.message(reply)]
 
     def apply(self, connection: Connection, command: WalletCommand) -> EventEnvelope:
