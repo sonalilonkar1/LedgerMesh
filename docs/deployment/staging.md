@@ -292,7 +292,7 @@ Keep `caddy/` so the certificate is not requested again. `infra/scripts/seed.py`
 ## 10. Secrets and rotation
 
 - The four database passwords live only in Secret Manager. `render-env.sh` reads them at deploy time with the VM's service account and writes `/etc/ledgermesh/staging.env`, mode `0600`, owned by root. It never prints them. The file is never committed, copied into a log bundle, or baked into an image.
-- Docker passes the passwords to containers as environment variables, so anyone with root or Docker access on the VM can read them. Only the named admins have that access.
+- Docker passes the passwords to containers as environment variables, so anyone with root or Docker access on the VM can read them: the named admins and, through OS Login admin, the deploy service account used by the GitHub workflows (§12).
 - There is no GHCR token: the packages are public. If they become private, add a secret `ledgermesh-staging-ghcr-read-token` holding a token with only `read:packages`, grant the VM service account access to it, and run `docker login ghcr.io` from it before pulling (see `infra/IMAGES.md`, "Pulling from a staging host").
 
 **Rotate a database password** (for example after it was printed by mistake):
@@ -344,10 +344,12 @@ Creating an environment needs repository admin. **Sonali** creates it under **Se
 `bootstrap-wif.sh` creates the Workload Identity pool `github` and provider `ledgermesh-github`. The provider only accepts GitHub tokens whose claims match exactly:
 
 ```text
-assertion.repository=='sonalilonkar1/LedgerMesh' && assertion.repository_id=='1370369282' && assertion.ref=='refs/heads/main'
+assertion.repository=='sonalilonkar1/LedgerMesh' && assertion.repository_id=='1370369282' && assertion.ref=='refs/heads/main' && assertion.environment=='staging'
 ```
 
-so workflows from forks, pull requests and other branches cannot obtain Google credentials. The deploy service account `ledgermesh-deployer` can only open IAP SSH to port 22 on the VM with OS Login admin, read Compute metadata, and act as the VM's service account; it has no Secret Manager access.
+so workflows from forks, pull requests and other branches cannot obtain Google credentials, and neither can a job on `main` that does not run in the `staging` environment (a scheduled job, an `issue_comment` or another `workflow_run` workflow). Every job that needs Google credentials declares `environment: staging`, which puts the `environment` claim into its token; the environment's `main`-only branch rule therefore also gates Google access.
+
+The deploy service account `ledgermesh-deployer` has no Secret Manager role. Its permissions are IAP SSH to port 22 on the VM, OS Login **admin** on the VM, Compute metadata reads, and acting as the VM's service account. OS Login admin means root (sudo) on the VM, and root can use the VM's service account, which can read the four database password secrets. **Treat the deploy credentials, and anyone who can change a workflow on `main` that runs in `staging`, as able to read the staging database passwords.**
 
 ## 13. Teardown
 

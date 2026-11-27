@@ -404,7 +404,7 @@ def test_lifecycle_commands_dry_run(gcloud, command):
 # ---- bootstrap-wif.sh ---------------------------------------------------------------
 
 
-def test_wif_condition_restricts_to_this_repository_and_main(gcloud):
+def test_wif_condition_restricts_to_this_repository_main_and_staging(gcloud):
     result, calls = gcloud("bootstrap-wif.sh", "--dry-run")
 
     assert result.returncode == 0, result.stderr
@@ -414,9 +414,11 @@ def test_wif_condition_restricts_to_this_repository_and_main(gcloud):
         "assertion.repository=='sonalilonkar1/LedgerMesh'"
         " && assertion.repository_id=='1370369282'"
         " && assertion.ref=='refs/heads/main'"
+        " && assertion.environment=='staging'"
     ]
     assert flag(provider, "--issuer-uri") == ["https://token.actions.githubusercontent.com"]
     assert "attribute.ref=assertion.ref" in flag(provider, "--attribute-mapping")[0]
+    assert "attribute.environment=assertion.environment" in flag(provider, "--attribute-mapping")[0]
 
 
 def test_deployer_gets_least_privilege(gcloud):

@@ -5,15 +5,20 @@
 #   bootstrap-wif.sh teardown --confirm <project> [--dry-run] [...]
 #
 # Lets a GitHub Actions job in sonalilonkar1/LedgerMesh, running for
-# refs/heads/main, impersonate a deploy service account without any stored
-# key. The provider's attribute condition rejects tokens from any other
-# repository (by name and immutable id) or ref, so pull requests and forks
-# cannot obtain credentials.
+# refs/heads/main in the GitHub environment `staging`, impersonate a deploy
+# service account without any stored key. The provider's attribute condition
+# rejects tokens from any other repository (by name and immutable id), ref or
+# environment, so pull requests, forks and main-branch jobs that do not run
+# in `staging` (schedule, issue_comment, other workflow_run workflows, ...)
+# cannot obtain credentials. The environment's own main-only branch rule then
+# also gates Google access.
 #
-# The deploy service account can only reach the staging VM over IAP SSH
-# (port 22) with OS Login admin, read Compute metadata, and act as the VM's
-# service account (required by OS Login). It has no Secret Manager access:
-# the VM reads its own secrets.
+# The deploy service account has no Secret Manager role, and its direct
+# permissions are: IAP SSH to port 22 of the VM, OS Login *admin* on the VM,
+# Compute metadata reads, and acting as the VM's service account (required
+# by OS Login). OS Login admin is root on the VM, and root can use the VM's
+# service account, which reads the database password secrets. Treat these
+# deploy credentials as able to read the staging database passwords.
 #
 # Run provision.sh up first; the VM and its service account must exist.
 # Prints the values for the GitHub `staging` environment variables.
@@ -36,8 +41,12 @@ PROVIDER="ledgermesh-github"
 ISSUER="https://token.actions.githubusercontent.com"
 DEPLOY_SA_NAME="ledgermesh-deployer"
 VM_SA_NAME="ledgermesh-staging-vm"
-ATTRIBUTE_MAPPING="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_id=assertion.repository_id,attribute.ref=assertion.ref"
-ATTRIBUTE_CONDITION="assertion.repository=='$REPOSITORY' && assertion.repository_id=='$REPOSITORY_ID' && assertion.ref=='$BRANCH_REF'"
+# Every job that needs Google credentials declares `environment: staging`
+# (deploy-staging.yml, rollback-staging.yml, hosted-smoke.yml), which puts
+# the `environment` claim into its OIDC token.
+ENVIRONMENT="staging"
+ATTRIBUTE_MAPPING="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_id=assertion.repository_id,attribute.ref=assertion.ref,attribute.environment=assertion.environment"
+ATTRIBUTE_CONDITION="assertion.repository=='$REPOSITORY' && assertion.repository_id=='$REPOSITORY_ID' && assertion.ref=='$BRANCH_REF' && assertion.environment=='$ENVIRONMENT'"
 SSH_CONDITION_TITLE="ledgermesh-staging-ssh-only"
 SSH_CONDITION="expression=destination.port == 22,title=$SSH_CONDITION_TITLE,description=IAP TCP forwarding to SSH only"
 APIS=(iam.googleapis.com iamcredentials.googleapis.com sts.googleapis.com
@@ -50,7 +59,7 @@ die() {
 }
 
 usage() {
-  sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 COMMAND="up"
