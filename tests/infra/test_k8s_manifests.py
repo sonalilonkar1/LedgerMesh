@@ -150,6 +150,12 @@ def test_kafka_config_matches_compose(rendered):
     assert data["KAFKA_ADVERTISED_LISTENERS"].startswith("INTERNAL://kafka:19092,")
     kafka = find(rendered, "StatefulSet", "kafka")["spec"]["template"]["spec"]["containers"][0]
     assert kafka["image"] == COMPOSE["services"]["kafka"]["image"]
+    # The image declares VOLUME /var/lib/kafka/data: the PVC must be mounted
+    # exactly there (compose.yaml mounts kafka_data there too), or the broker
+    # writes to an ephemeral volume and loses its topics on restart.
+    compose_mount = COMPOSE["services"]["kafka"]["volumes"][0].split(":", 1)[1]
+    assert [m["mountPath"] for m in kafka["volumeMounts"]] == [compose_mount]
+    assert data["KAFKA_LOG_DIRS"] == compose_mount
 
 
 def test_databases_match_compose(rendered):

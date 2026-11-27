@@ -104,11 +104,12 @@ spec:
               cpu: "1"
               memory: 1536Mi
           volumeMounts:
-            # The volume is mounted one level up so KAFKA_LOG_DIRS
-            # (/var/lib/kafka/data) is a clean subdirectory, never a
-            # filesystem root that may contain lost+found.
+            # Exactly KAFKA_LOG_DIRS, as compose.yaml:39 mounts it. The image
+            # declares VOLUME /var/lib/kafka/data; mounting the PVC anywhere
+            # else leaves the broker writing to that ephemeral volume, and a
+            # restarted pod re-formats its storage and loses every topic.
             - name: data
-              mountPath: /var/lib/kafka
+              mountPath: /var/lib/kafka/data
   volumeClaimTemplates:
     - metadata:
         name: data
