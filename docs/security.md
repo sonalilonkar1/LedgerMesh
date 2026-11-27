@@ -16,7 +16,7 @@ manifests are documented with their own issues.
 | Safe error bodies | handlers registered by `install_safeguards` (`safeguards.py:331`) | Validation, HTTP and unhandled errors are `application/problem+json` with only `type`, `title`, `status`, `detail`: no submitted input, stack trace or SQL |
 | Bounded input | request models; `SafeguardMiddleware` | Numbers are bounded by their PostgreSQL column types; request bodies are limited to 1 MiB |
 | No `--reload` outside local | `Makefile` `run-*` targets | The only targets that use `--reload` default to `LEDGERMESH_ENV=local` and refuse any other value. Images (`infra/docker/start-service.sh`) and Compose never reload (checked by `tests/security/test_operational_config.py`) |
-| Secret scanning | `.github/workflows/security.yml`, `infra/scripts/secret_scan.sh` | gitleaks over every commit on every ref, on every PR, on `main` and weekly |
+| Secret scanning | `.github/workflows/security.yml`, `infra/scripts/secret_scan.sh` | gitleaks over the PR's own commits on every PR, and over every commit on every ref on `main`, weekly and on manual runs |
 | Dependency audit | same workflow, `infra/scripts/dependency_audit.sh` | pip-audit over both `uv.lock` files, PyPI and OSV advisories |
 | Container scan | `.github/workflows/image-build.yml:89-101` (LM-047) | Trivy fails the image on a fixable HIGH or CRITICAL finding |
 | Pinned CI actions, least-privilege token | every workflow | Every third-party action is pinned to a full commit SHA; every top-level workflow declares `permissions` |
@@ -208,9 +208,23 @@ Re-run on this branch with `make security-secrets`: every pushed ref plus this b
 clean. Because the local scan mirrors *every* local branch, it also flagged three
 fixture values (`*_DB_PASSWORD` test passwords such as `wallet-test-pw-0123456789`) in
 unpushed staging tests on another working branch (`tests/infra/test_staging_*.py`,
-LM-048). They are fake, but the CI job will flag them once that branch is pushed; mark
-each such line with a trailing `# gitleaks:allow` comment rather than allowlisting
-whole files.
+LM-048). They are fake. On a pull request CI scans only that PR's commits
+(`SCAN_RANGE=<base sha>..<head sha>`), so they fail only the LM-048 PR, never an
+unrelated one; the full-history scan on `main` and the weekly run would still report them
+once that branch is pushed.
+
+How to clear a finding on fake values:
+
+- **Before the commit is pushed:** add a trailing `# gitleaks:allow` comment to the line
+  (amend or rebase the commit). This only works in the commit that introduces the value:
+  a later commit that adds the comment leaves the earlier commit in history, and that
+  commit is still scanned.
+- **After it is pushed:** add the finding's fingerprint (printed by gitleaks, in the form
+  `<commit>:<file>:<rule>:<line>`) to a `.gitleaksignore` file at the repository root,
+  with a comment saying why the value is safe. `secret_scan.sh` passes that file to
+  gitleaks explicitly, because the bare mirror it scans has no working tree.
+
+Never allowlist whole files or paths.
 
 The default rules do not flag the local placeholders (`ledgermesh_dev`, `ledgermesh`),
 so the repository needs no `.gitleaks.toml`. If one is ever needed for a known-safe
@@ -244,7 +258,7 @@ same image started with `LEDGERMESH_ENV=staging` and no database secret exits wi
 |---|---|---|
 | `make security-scan` | `security-deps` and `security-secrets`, as CI runs them | network, Docker |
 | `make security-deps` | pip-audit over both lockfiles (`infra/scripts/dependency_audit.sh`) | network |
-| `make security-secrets` | gitleaks over every commit on every ref (`infra/scripts/secret_scan.sh`) | Docker |
+| `make security-secrets` | gitleaks over every commit on every ref (`infra/scripts/secret_scan.sh`); `SCAN_RANGE=<sha>..<sha>` limits it to a range, as CI does on a PR | Docker |
 | `make security-images` | builds the four images, then Trivy with the CI policy (`infra/scripts/image_scan.sh`) | Docker |
 
 The tools are pinned: pip-audit `2.10.1`, `ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0…`

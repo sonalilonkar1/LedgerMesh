@@ -31,7 +31,7 @@ check: lint test
 
 # Security scans (LM-042, docs/security.md). security-scan is what CI runs:
 #   security-deps     pip-audit over both uv lockfiles (needs network)
-#   security-secrets  gitleaks over every commit on every ref (needs Docker)
+#   security-secrets  gitleaks over every commit on every ref, or SCAN_RANGE=a..b (needs Docker)
 #   security-images   build the images, then Trivy with the CI policy (needs Docker)
 security-scan: security-deps security-secrets
 
