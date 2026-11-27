@@ -49,7 +49,9 @@ SEED_ERR="$WORKDIR/seed.err"
 PIDS=()
 cleanup() {
   for pid in "${PIDS[@]:-}"; do
-    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+    [[ -n "$pid" ]] || continue
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
   done
   rm -rf "$WORKDIR"
 }

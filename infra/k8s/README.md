@@ -266,14 +266,19 @@ on an arm64 Mac with Docker limited to 7.6 GiB:
   `COMPLETED`. Each run takes 100 points and 1 unit, and the Audit Ledger holds
   `redemption.committed` and the Saga transition events.
 - **Server-side validation.** `kubectl apply -k overlays/kind --dry-run=server`
-  accepts all 28 objects.
+  accepts all 32 objects.
 - **Readiness and liveness.** The Coordinator's uvicorn process was frozen with
   `SIGSTOP`, sent from the node.
   - About 20 s later, readiness failed and the pod left the Service endpoints.
   - About 60 s later, liveness restarted the container. It became Ready again
     and rejoined the endpoints.
 - **Kafka pod deleted.** The pod was back and ready in about 10 s on the same
-  PVC, with all 15 topics. The workers reconnected without restarting.
+  PVC, with all 15 topics under `/var/lib/kafka/data/logs`. The workers
+  reconnected without restarting.
+- **Repeat runs.** A second `make k8s-smoke` on the same cluster passes, also
+  after `job/kafka-topics` was deleted, and leaves no `kubectl port-forward`
+  running. With ports 15432 already taken, the smoke stops with kubectl's
+  "address already in use" error instead of using the other listener.
 - **PostgreSQL pod deleted.** The data survived: balances carried on from
   their previous values.
 
