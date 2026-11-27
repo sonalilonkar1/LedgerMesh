@@ -72,7 +72,7 @@ Applications inside the Compose network connect to Kafka at `kafka:19092`. Progr
 | Catalog | `localhost:54323` | `catalog` | `catalog` |
 | Audit Ledger | `localhost:54324` | `audit_ledger` | `audit_ledger` |
 
-The local-development password defaults to `ledgermesh_dev`. These credentials are intentionally limited to the local Compose environment and must not be reused in a deployed environment.
+The local-development password defaults to `ledgermesh_dev`. These credentials are intentionally limited to the local Compose environment and must not be reused in a deployed environment. Compose therefore sets `LEDGERMESH_ENV=local` on every app service: outside `local`/`test` the services refuse this password, and a deployment (`LEDGERMESH_ENV=staging`, ...) refuses to start with it. See [the security guide](../docs/security.md).
 
 All PostgreSQL instances start with `max_prepared_transactions=100`, enabling the prepared transactions required by the 2PC implementation.
 

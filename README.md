@@ -11,6 +11,7 @@ A redemption spans independently owned Wallet, Rewards Catalog, Coordinator, and
 - [Project Proposal](Project_Proposal.md) — project motivation, business value, proposed architecture, technologies, experiments, and expected deliverables
 - [ADR-001: Architecture Decisions and Correctness Invariants](docs/architecture/ADR-001-ledgermesh-architecture-and-correctness.md) — canonical service boundaries, state models, recovery rules, message semantics, and correctness invariants
 - [Local Development Guide](docs/development.md) — setup, service commands, and testing instructions
+- [Security and Operational Safeguards](docs/security.md) — `LEDGERMESH_ENV`, internal-route protection, safe errors, and the dependency, secret, and container scan results
 - [Contributing Guide](CONTRIBUTING.md) — branch naming, commits, reviews, and pull-request expectations
 
 ## Architecture Overview
@@ -147,6 +148,7 @@ workflow coordination and observability are added through their assigned issues.
 | `make lint` | Check formatting and linting |
 | `make test` | Run core service unit tests |
 | `make check` | Run linting and unit tests |
+| `make security-scan` | Audit dependencies and scan Git history for secrets ([details](docs/security.md)) |
 
 Run an individual service's health tests with:
 
@@ -176,10 +178,13 @@ Always run the final `docker compose ... down -v` command after testing so the t
 
 ## Continuous Integration
 
-The repository currently uses two GitHub Actions workflows:
+The main GitHub Actions workflows:
 
 - **`ci.yml`** checks formatting, linting, and core service unit tests.
 - **`messaging.yml`** runs messaging-library unit and Kafka integration tests.
+- **`contracts.yml`** validates the API and event contracts and their v1 compatibility.
+- **`images.yml`** builds, checks, scans, and publishes the service images.
+- **`security.yml`** scans Git history for secrets and audits dependencies ([details](docs/security.md)).
 
 Before opening or updating a pull request, run the relevant local checks and include the results in the PR description.
 

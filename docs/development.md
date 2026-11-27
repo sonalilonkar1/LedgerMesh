@@ -70,6 +70,11 @@ They require the Coordinator database; use the complete local stack or set
 | Catalog | `make run-catalog` | 8002 |
 | Audit Ledger | `make run-ledger` | 8003 |
 
+These targets use `--reload`, so they are for local development only: they default to
+`LEDGERMESH_ENV=local` and refuse any other value. With `local` (or `test`), internal
+routes and the API docs at `/docs` are available; anywhere else they answer `404`. See
+[the security guide](security.md).
+
 Verify a running service:
 
 ```bash
