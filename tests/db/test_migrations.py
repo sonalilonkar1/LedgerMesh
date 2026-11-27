@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from services.audit_ledger.app.db import schema as audit_ledger
 from services.catalog.app.db import schema as catalog
 from services.coordinator.app.db import schema as coordinator
+from services.identity.app.db import schema as identity
 from services.wallet.app.db import schema as wallet
 
 from .conftest import SERVICES, downgrade, upgrade
@@ -26,6 +27,7 @@ SCHEMAS = {
     "wallet": wallet,
     "catalog": catalog,
     "audit_ledger": audit_ledger,
+    "identity": identity,
 }
 EXPECTED_TABLES = {
     "coordinator": {"redemptions", "redemption_transitions", "inbox", "outbox"},
@@ -46,6 +48,7 @@ EXPECTED_TABLES = {
         "outbox",
     },
     "audit_ledger": {"audit_events", "inbox", "aggregate_versions"},
+    "identity": {"users", "login_tokens", "sessions", "rate_limit_counters", "auth_events"},
 }
 
 
