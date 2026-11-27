@@ -43,6 +43,16 @@ def digest(image: str) -> str:
     return "sha256:" + hashlib.sha256(image.encode()).hexdigest()
 
 
+@pytest.mark.parametrize("script", sorted(CI.glob("*.sh")), ids=lambda path: path.name)
+def test_ci_script_parses_and_fails_closed(script):
+    assert subprocess.run(["bash", "-n", str(script)], check=False).returncode == 0
+    text = script.read_text()
+    assert text.startswith("#!/usr/bin/env bash\n")
+    assert "set -euo pipefail" in text
+    assert "|| true" not in text
+    assert os.access(script, os.X_OK), f"{script.name} is not executable"
+
+
 # ---- gate.sh -------------------------------------------------------------------------
 
 
