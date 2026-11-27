@@ -1,0 +1,32 @@
+# Published images from GHCR (IMAGES.md:7-10), deployed by commit SHA (LM-041).
+#
+# Unlike the kind overlay this leaves LEDGERMESH_ENV unset, so the internal
+# control routes return 404 as in a hosted environment, and 2PC runs only through
+# the recovery worker. Set newTag to a published full commit SHA before applying.
+# The images are linux/amd64 only (IMAGES.md:71): they do not run on arm64 nodes.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+generatorOptions:
+  labels:
+    app.kubernetes.io/component: db-credentials
+    app.kubernetes.io/part-of: ledgermesh
+secretGenerator:
+  - name: ledgermesh-db
+    namespace: ledgermesh
+    envs:
+      - .env.secrets
+images:
+  - name: ledgermesh-coordinator
+    newName: ghcr.io/sonalilonkar1/ledgermesh-coordinator
+    newTag: REPLACE_WITH_COMMIT_SHA
+  - name: ledgermesh-wallet
+    newName: ghcr.io/sonalilonkar1/ledgermesh-wallet
+    newTag: REPLACE_WITH_COMMIT_SHA
+  - name: ledgermesh-catalog
+    newName: ghcr.io/sonalilonkar1/ledgermesh-catalog
+    newTag: REPLACE_WITH_COMMIT_SHA
+  - name: ledgermesh-audit-ledger
+    newName: ghcr.io/sonalilonkar1/ledgermesh-audit-ledger
+    newTag: REPLACE_WITH_COMMIT_SHA

@@ -1,0 +1,6 @@
+# Single-node kind cluster for LM-041. No host port mappings: the smoke test
+# reaches services through `kubectl port-forward`.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
