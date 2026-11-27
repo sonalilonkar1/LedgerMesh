@@ -44,6 +44,10 @@ make k8s-up
 2. builds the four images with `make images-build` and loads them into kind as
    `ledgermesh-<name>:local`. Set `SKIP_IMAGE_BUILD=1` to reuse images already
    built for the current commit;
+   - **Node image.** Set `KIND_NODE_IMAGE` to choose kind's node image. On the
+     Apple-silicon machine used for verification, the default image of kind
+     v0.33.0 (`kindest/node:v1.37.0`) failed with `exec format error`, and
+     `KIND_NODE_IMAGE=kindest/node:v1.35.0` worked.
 3. creates `overlays/kind/.env.secrets` with a random hex password if it does
    not exist yet;
 4. applies `overlays/kind` and waits for Kafka, the databases, the topic Job,
@@ -73,13 +77,18 @@ inserts missing rows, so it is safe to repeat. Finally, for each mode it:
    `reward-coffee`;
 2. sends `POST /v1/redemptions` with a unique `Idempotency-Key` and expects
    `202`;
-3. polls `GET /v1/redemptions/{id}` for up to 90 s until the status is terminal.
+3. polls `GET /v1/redemptions/{id}` until the status is terminal. The default
+   limit is 90 s; set `SMOKE_TIMEOUT_SECONDS` to change it.
    2PC must reach `COMMITTED`; the Saga must reach `COMPLETED`;
 4. checks that the balance dropped by exactly `point_cost` and the inventory by
    exactly 1. The test compares against the values read before the redemption,
    so it can run again on the same cluster;
-5. polls the Audit Ledger for up to 60 s until it holds the terminal event. This
-   proves the full outbox → Kafka → audit consumer path.
+5. polls the Audit Ledger, with the same time limit, until it holds the
+   terminal event. This proves the full outbox → Kafka → audit consumer path.
+
+Seeding retries up to three times and re-opens the database port-forwards
+between attempts, because a forward opened while a database pod restarts can
+refuse connections.
 
 It ends with `LedgerMesh Kubernetes smoke test passed (2PC=COMMITTED, Saga=COMPLETED).`
 On failure it prints the redemption's transitions and the logs of the
@@ -229,12 +238,60 @@ Remove them with `docker image rm` if you need the space.
 | Password | `${POSTGRES_PASSWORD:-ledgermesh_dev}` | generated Secret, no default |
 | Kafka heap | image default | 512 MiB in the kind overlay |
 
+## Verified on kind
+
+The following was checked on kind v0.33.0 with node image `kindest/node:v1.35.0`,
+on an arm64 Mac with Docker limited to 7.6 GiB:
+
+- **Deploy.** `make k8s-up` brings every pod to Ready with 0 restarts in about
+  2 minutes, including the image build. The kind node then uses about 2.1 GiB.
+- **Smoke test.** On a fresh cluster, 2PC reaches `COMMITTED` and Saga reaches
+  `COMPLETED`. Each run takes 100 points and 1 unit, and the Audit Ledger holds
+  `redemption.committed` and the Saga transition events.
+- **Server-side validation.** `kubectl apply -k overlays/kind --dry-run=server`
+  accepts all 28 objects.
+- **Readiness and liveness.** The Coordinator's uvicorn process was frozen with
+  `SIGSTOP`, sent from the node.
+  - About 20 s later, readiness failed and the pod left the Service endpoints.
+  - About 60 s later, liveness restarted the container. It became Ready again
+    and rejoined the endpoints.
+- **Kafka pod deleted.** The pod was back and ready in about 10 s on the same
+  PVC, with all 15 topics. The workers reconnected without restarting.
+- **PostgreSQL pod deleted.** The data survived: balances carried on from
+  their previous values.
+
+**Recovery after a dependency restart is slower than a normal run.** After a
+PostgreSQL pod restart, a worker's next database connection waited about
+2 minutes until it timed out, because `DATABASE_URL` sets no `connect_timeout`,
+as in Compose. Saga steps owned by that worker paused for that time, then
+completed. Use `SMOKE_TIMEOUT_SECONDS=240` when running the smoke right after a
+fault test.
+
 ## Limits
 
 - **Single node, single replica everywhere.** There is no Kafka replication or
   PostgreSQL high availability, and a node loss loses availability until the
   pods are rescheduled. The data survives on the PVCs while the cluster exists.
 - **Readiness is process-level only** (see Probes).
+- **Kafka storage.**
+  - The PVC is mounted exactly at `KAFKA_LOG_DIRS` (`/var/lib/kafka/data`), as
+    in Compose. The `apache/kafka` image declares that path as a `VOLUME`, so
+    mounting the PVC anywhere else silently loses every topic when the pod
+    restarts.
+  - Kafka 4.4 refuses to start if that directory holds anything that is not a
+    partition directory. On storage classes that create `lost+found` (ext4
+    block volumes), point `KAFKA_LOG_DIRS` at a subdirectory. kind's
+    `local-path` storage does not create `lost+found`.
+- **Known issue: one audit event was lost after a broker restart.** This was
+  seen once, during fault testing, and is not caused by the manifests.
+  - Right after the Kafka pod was deleted, the Coordinator's first send of a
+    2PC terminal event failed with `OutOfOrderSequenceNumber`.
+  - The next attempt marked the outbox row as published.
+  - The event was never in `redemption.events`, so the Audit Ledger never
+    recorded it. The business outcome (`COMMITTED`) was correct.
+  - This is in the outbox publisher and Kafka client
+    (`libs/messaging/.../publisher.py`), not in the deployment. It is reported
+    for follow-up. The normal smoke runs do not hit it.
 - **No Ingress or NetworkPolicy.** Services are ClusterIP only and are reached
   with port-forward.
 - **The smoke test assumes it is the only writer** to `user-alice` and
