@@ -15,14 +15,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from services.catalog.app.db.schema import catalog_saga_outcomes, reservations, rewards
 from services.catalog.app.repository import PostgresCatalogRepository
-from services.catalog.app.saga import CatalogSagaHandler
+from services.catalog.app.saga import RESERVATION_REJECTED, CatalogSagaHandler
 from services.wallet.app.db.schema import (
     deduction_rejections,
     wallet_operations,
     wallets,
 )
 from services.wallet.app.repository import PostgresWalletRepository
-from services.wallet.app.saga import WalletSagaHandler
+from services.wallet.app.saga import DEDUCTION_REJECTED, WalletSagaHandler
 from tests.db.conftest import upgrade
 
 pytestmark = pytest.mark.database
@@ -78,10 +78,18 @@ def _deliver(database_url: str, engine: Engine, envelope: EventEnvelope):
             if envelope.event_type.startswith("wallet."):
                 handler = WalletSagaHandler(PostgresWalletRepository(engine))
                 name = "wallet-saga"
+                rejection_event_types = {DEDUCTION_REJECTED}
             else:
                 handler = CatalogSagaHandler(PostgresCatalogRepository(engine))
                 name = "catalog-saga"
-            return await process_once(sessions, name, envelope, handler)
+                rejection_event_types = {RESERVATION_REJECTED}
+            return await process_once(
+                sessions,
+                name,
+                envelope,
+                handler,
+                rejection_event_types=rejection_event_types,
+            )
         finally:
             await async_engine.dispose()
 
@@ -217,9 +225,27 @@ def test_concurrent_duplicate_reservations_apply_once(database_url, catalog_db, 
     )
 
     rejected = _event("catalog.reserve_inventory", uuid4(), quantity=20)
-    result = _deliver(database_url, catalog_db, rejected)
-    assert not result.duplicate
+    rejection_results = _race(database_url, catalog_db, rejected)
+    assert sum(not result.duplicate for result in rejection_results) == 1
+    assert sum(result.duplicate for result in rejection_results) == 9
+    assert _count(catalog_db, reservations) == 1
+    assert _count(catalog_db, catalog_saga_outcomes) == 2
+    assert _count(catalog_db, inbox) == 2
+    assert _count(catalog_db, outbox) == 2
     after_rejection = _scrape(metrics_endpoint)
+    assert (
+        _counter(
+            after_rejection,
+            "ledgermesh_inbox_duplicate_deliveries_total",
+            consumer="catalog-saga",
+        )
+        - _counter(
+            after_duplicates,
+            "ledgermesh_inbox_duplicate_deliveries_total",
+            consumer="catalog-saga",
+        )
+        == 9
+    )
     assert (
         _counter(
             after_rejection,

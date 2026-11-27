@@ -30,7 +30,6 @@ from ledgermesh_messaging import (
     InboxConsumer,
     OutboxPublisher,
     RetryPolicy,
-    configure_logging,
     create_consumer,
     create_producer,
     create_retry_consumer,
@@ -39,7 +38,7 @@ from ledgermesh_messaging import (
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from services.wallet.app.repository import PostgresWalletRepository, database_url, get_engine
-from services.wallet.app.saga import WalletSagaHandler
+from services.wallet.app.saga import DEDUCTION_REJECTED, WalletSagaHandler
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +83,14 @@ async def _serve(
     handler = WalletSagaHandler(PostgresWalletRepository(get_engine()))
     # Both consumers share the inbox name, so a retried command is still a duplicate.
     main_consumer, retries = (
-        InboxConsumer(source, sessions, name=CONSUMER_GROUP, handler=handler, router=router)
+        InboxConsumer(
+            source,
+            sessions,
+            name=CONSUMER_GROUP,
+            handler=handler,
+            router=router,
+            rejection_event_types={DEDUCTION_REJECTED},
+        )
         for source in (consumer, retry_consumer)
     )
     publisher = OutboxPublisher(sessions, producer, name="wallet")
@@ -92,7 +98,7 @@ async def _serve(
 
 
 def main() -> None:
-    configure_logging("wallet")
+    logging.basicConfig(level=logging.INFO)
 
     async def serve() -> None:
         stop = asyncio.Event()

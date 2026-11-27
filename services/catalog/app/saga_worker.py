@@ -18,7 +18,6 @@ from ledgermesh_messaging import (
     InboxConsumer,
     OutboxPublisher,
     RetryPolicy,
-    configure_logging,
     create_consumer,
     create_producer,
     create_retry_consumer,
@@ -27,7 +26,7 @@ from ledgermesh_messaging import (
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from services.catalog.app.repository import PostgresCatalogRepository, database_url, get_engine
-from services.catalog.app.saga import CatalogSagaHandler
+from services.catalog.app.saga import RESERVATION_REJECTED, CatalogSagaHandler
 
 logger = logging.getLogger(__name__)
 CONSUMER_GROUP = CATALOG_COMMANDS.consumer_group
@@ -56,7 +55,14 @@ async def run(stop: asyncio.Event) -> None:
         handler = CatalogSagaHandler(PostgresCatalogRepository(get_engine()))
         # Both consumers share the inbox name, so a retried command is still a duplicate.
         main_consumer, retries = (
-            InboxConsumer(source, sessions, name=CONSUMER_GROUP, handler=handler, router=router)
+            InboxConsumer(
+                source,
+                sessions,
+                name=CONSUMER_GROUP,
+                handler=handler,
+                router=router,
+                rejection_event_types={RESERVATION_REJECTED},
+            )
             for source in (consumer, retry_consumer)
         )
         publisher = OutboxPublisher(sessions, producer, name="catalog")
@@ -72,7 +78,7 @@ async def run(stop: asyncio.Event) -> None:
 
 
 def main() -> None:
-    configure_logging("catalog")
+    logging.basicConfig(level=logging.INFO)
 
     async def serve() -> None:
         stop = asyncio.Event()

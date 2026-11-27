@@ -1,7 +1,8 @@
-"""Persist Coordinator events from Kafka in the Audit Ledger.
+"""Persist Coordinator transition events from Kafka in the Audit Ledger.
 
-Failures are retried in process, then through the retry topic, then sent to the
-dead-letter topic. Retry limits come from ``LM_RETRY_*``.
+Failures (LM-024): transient errors are retried in process, then through
+``redemption.events.retry`` (read by a second consumer), then parked on
+``redemption.events.dlq`` with the reason. Limits come from ``LM_RETRY_*``.
 """
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ from ledgermesh_messaging import (
     InboxConsumer,
     PermanentError,
     RetryPolicy,
-    configure_logging,
     create_consumer,
     create_producer,
     create_retry_consumer,
@@ -47,16 +47,11 @@ class AuditEventHandler:
         await session.run_sync(
             lambda sync: self.repository.append(envelope, connection=sync.connection())
         )
-        # The event's ids are already bound by InboxConsumer (LM-032).
-        logger.info(
-            "audit event recorded",
-            extra={"state": envelope.payload.get("to_status")},
-        )
         return []
 
 
 def ordered_audit_handler(repository: PostgresAuditRepository):
-    """Sequence Saga transition events while accepting standalone 2PC outcomes."""
+    """Order Saga transition events; 2PC publishes only one terminal outcome."""
     append = AuditEventHandler(repository)
     ordered_saga = in_version_order(
         append,
@@ -66,9 +61,10 @@ def ordered_audit_handler(repository: PostgresAuditRepository):
     )
 
     async def handle(session, envelope):
-        # Saga emits every transition, so version gaps must wait for missing
-        # events. 2PC currently emits only its terminal outcome; ordering it
-        # against absent intermediate events would strand it on the retry topic.
+        # Saga publishes every transition (including the version-zero root),
+        # so gaps must be deferred. 2PC currently publishes only its terminal
+        # outcome; requiring intermediate versions that it never emits would
+        # strand every 2PC audit event on the retry topic.
         if envelope.payload.get("coordination_mode") == "two_phase_commit":
             return await append(session, envelope)
         return await ordered_saga(session, envelope)
@@ -96,12 +92,12 @@ async def run(stop: asyncio.Event) -> None:
 
         router = FailureRouter(producer, consumer=CONSUMER_GROUP, policy=policy)
         handler = ordered_audit_handler(PostgresAuditRepository(get_engine()))
-        # Both consumers share the inbox name; a retried message is a duplicate.
-        main_inbox, retry_inbox = (
+        # Both consumers share the inbox name, so a retried event is still a duplicate.
+        inbox, retries = (
             InboxConsumer(source, sessions, name=CONSUMER_GROUP, handler=handler, router=router)
             for source in (consumer, retry_consumer)
         )
-        await asyncio.gather(main_inbox.run(stop), retry_inbox.run(stop))
+        await asyncio.gather(inbox.run(stop), retries.run(stop))
     finally:
         for client in reversed(attempted):
             try:
@@ -113,7 +109,7 @@ async def run(stop: asyncio.Event) -> None:
 
 
 def main() -> None:
-    configure_logging("audit-ledger")
+    logging.basicConfig(level=logging.INFO)
 
     async def serve() -> None:
         stop = asyncio.Event()

@@ -358,7 +358,9 @@ process-local counters are:
 - `ledgermesh_inbox_duplicate_deliveries_total{consumer}` increments after a
   duplicate inbox claim commits;
 - `ledgermesh_saga_rejections_total{consumer,service,reason}` increments when
-  a Wallet or Catalog business rejection and its outbox reply commit.
+  a Wallet deduction rejection or Catalog reservation rejection and its outbox
+  reply commit. Catalog release rejections are compensation failures and are
+  intentionally excluded from this business-rejection counter.
 
 Rolled-back attempts are not counted. The duplicate-delivery database tests
 scrape this endpoint and assert the counter deltas produced by concurrent

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -31,6 +31,7 @@ async def process_once(
     handler: Handler,
     *,
     republish_on_duplicate: bool = False,
+    rejection_event_types: Collection[str] = frozenset(),
 ) -> ProcessResult:
     """Run ``handler`` for ``envelope`` at most once per ``consumer``.
 
@@ -49,8 +50,10 @@ async def process_once(
     receiver, so replay enabled throughout a workflow re-sends the whole
     downstream chain for each duplicate it sees.
 
-    Committed duplicate claims and committed Saga rejection replies increment
-    the process-local metrics exported by the owning worker.
+    Committed duplicate claims increment the process-local duplicate metric.
+    Rejection metrics are opt-in: callers provide the exact event types that
+    represent business rejections for their handler, keeping this library
+    independent of service event naming conventions.
     """
     duplicate = False
     messages: Sequence[OutgoingMessage] = ()
@@ -102,7 +105,7 @@ async def process_once(
     else:
         for message in messages:
             event_type = message.envelope.event_type
-            if event_type.endswith("_rejected"):
+            if event_type in rejection_event_types:
                 service = event_type.split(".", 1)[0]
                 reason = str(message.envelope.payload.get("reason", "unknown"))
                 record_saga_rejection(consumer, service, reason)
