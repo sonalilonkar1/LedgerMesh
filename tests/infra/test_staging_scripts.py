@@ -309,3 +309,52 @@ def test_stack_waits_on_every_health_checked_service_and_starts_the_workers():
     workers = {n for n, s in services.items() if s.get("healthcheck") == {"disable": True}}
     assert array("WORKERS") == workers
     assert array("DATA_TIER") | array("GATEWAY_TIER") == set(services) - workers
+
+
+# ---- vm-startup.sh: the data disk -----------------------------------------------------
+
+
+def disk_section() -> str:
+    """vm-startup.sh's probe-and-format step, up to reading the disk's UUID."""
+    text = (STAGING / "vm-startup.sh").read_text()
+    start = text.index('if [[ ! -e "$DATA_DEVICE" ]]')
+    end = text.index('uuid="$(blkid -s UUID')
+    return text[start:end]
+
+
+@pytest.mark.parametrize(
+    ("blkid_status", "formats", "ok"),
+    [(0, False, True), (2, True, True), (4, False, False), (8, False, False)],
+    ids=["has-filesystem", "empty-disk", "probe-error", "ambivalent"],
+)
+def test_startup_formats_the_data_disk_only_when_blkid_finds_nothing(
+    tmp_path, blkid_status, formats, ok
+):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    install(
+        bin_dir / "blkid",
+        f'#!/usr/bin/env bash\necho "probe message" >&2\nexit {blkid_status}\n',
+    )
+    marker = tmp_path / "formatted"
+    install(bin_dir / "mkfs.ext4", f'#!/usr/bin/env bash\ntouch "{marker}"\n')
+    device = tmp_path / "disk"
+    device.write_text("")
+    script = (
+        "set -euo pipefail\n"
+        'log() { echo "ledgermesh-startup: $*"; }\n'
+        f'DATA_DEVICE="{device}"\n' + disk_section() + "echo reached-mount\n"
+    )
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert marker.exists() is formats
+    assert (result.returncode == 0) is ok, result.stdout + result.stderr
+    assert ("reached-mount" in result.stdout) is ok
+    if not ok:
+        assert f"exited {blkid_status} (probe message)" in result.stdout

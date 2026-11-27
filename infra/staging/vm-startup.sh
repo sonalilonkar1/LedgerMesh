@@ -62,11 +62,23 @@ if [[ ! -e "$DATA_DEVICE" ]]; then
   exit 1
 fi
 
-if ! blkid "$DATA_DEVICE" >/dev/null 2>&1; then
-  # blkid exits 2 when the device has no recognisable filesystem: a new disk.
-  log "formatting new data disk $DATA_DEVICE"
-  mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard "$DATA_DEVICE"
-fi
+# Low-level probe (-p, no cache): exit 0 = a filesystem or partition table
+# was found, 2 = nothing recognisable (a new, empty disk). Every other status
+# (4 = usage or I/O error, 8 = ambivalent probe) stops here: this disk holds
+# all Kafka and PostgreSQL data, so it is formatted only on a definite 2.
+probe_status=0
+probe_err="$(blkid -p "$DATA_DEVICE" 2>&1 >/dev/null)" || probe_status=$?
+case "$probe_status" in
+  0) ;;
+  2)
+    log "no filesystem on $DATA_DEVICE: formatting a new data disk"
+    mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard "$DATA_DEVICE"
+    ;;
+  *)
+    log "blkid -p $DATA_DEVICE exited $probe_status (${probe_err:-no message}); refusing to format or mount it"
+    exit 1
+    ;;
+esac
 
 uuid="$(blkid -s UUID -o value "$DATA_DEVICE")"
 [[ -n "$uuid" ]] || { log "could not read the data disk UUID"; exit 1; }
