@@ -215,6 +215,19 @@ def test_unhandled_error_returns_a_generic_problem_and_logs_the_cause(environmen
     assert "hunter2" not in json.dumps(line)
 
 
+def test_operator_token_is_never_logged(environment, caplog):
+    environment("staging", token=TOKEN)
+    client = TestClient(make_app(), raise_server_exceptions=False)
+
+    with caplog.at_level(logging.DEBUG):
+        response = client.get("/v1/boom", headers={OPERATOR_TOKEN_HEADER: TOKEN})
+
+    assert response.status_code == 500
+    assert caplog.records
+    for record in caplog.records:
+        assert TOKEN not in JsonFormatter("example").format(record)
+
+
 def test_unsafe_correlation_id_is_replaced(environment):
     client = TestClient(make_app(), raise_server_exceptions=False)
 

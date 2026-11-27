@@ -221,8 +221,9 @@ curl -X POST http://localhost:8000/internal/v1/2pc/recovery/run
 
 Hosted, staging, and production configurations return `404` for both operator
 routes unless the request carries the operator token from
-`LEDGERMESH_OPERATOR_TOKEN` ([security guide](../../docs/security.md)). The periodic recovery worker calls the recovery service directly and
-does not depend on either HTTP endpoint.
+`LEDGERMESH_OPERATOR_TOKEN` ([security guide](../../docs/security.md)). The
+periodic recovery worker calls the recovery service directly and does not
+depend on either HTTP endpoint.
 
 | Variable | Default in Compose | Purpose |
 |---|---:|---|

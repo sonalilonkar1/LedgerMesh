@@ -94,7 +94,11 @@ curl -H "X-LedgerMesh-Operator-Token: $LEDGERMESH_OPERATOR_TOKEN" \
   matches, and a deployment refuses to start with one.
 - Compared in constant time on SHA-256 digests (`operator_token_matches`,
   `safeguards.py:99`), so neither the token nor its length leaks through timing.
-- Header values are never logged (`docs/logging.md`).
+- The token is never logged: no LedgerMesh code logs request headers. The unhandled-error
+  log records only the method and path (`safeguards.py:405-411`), and
+  `CorrelationMiddleware` reads only `X-Correlation-Id` and `X-Transaction-Id`
+  (`libs/messaging/src/ledgermesh_messaging/logs.py:249-253`).
+  `tests/security/test_safeguards.py` checks that a 500 carrying the token does not log it.
 - A wrong or missing token gets the same `404` as an unknown route.
 
 The token opens all internal routes and the docs. It is meant for an operator behind the
