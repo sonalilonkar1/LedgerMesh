@@ -68,7 +68,8 @@ x-worker: &worker
   restart: unless-stopped
   init: true
   # Workers have no HTTP server, so the image's /health check cannot pass.
-  # `stack.sh verify workers` checks that they stay running instead.
+  # `stack.sh verify workers` checks that they stay running instead (and
+  # starts them without `compose up --wait`, which rejects disabled checks).
   healthcheck:
     disable: true
   logging: *logging

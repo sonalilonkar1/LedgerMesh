@@ -154,8 +154,8 @@ sudo bash /opt/ledgermesh/staging/stack.sh --sha "$SHA" up
 1. starts Kafka and the four databases and waits until they are healthy;
 2. checks `max_prepared_transactions > 0` on every database;
 3. runs `alembic upgrade head` for each service in a one-off container of that service's image, with that service's own `DATABASE_URL`;
-4. runs the LM-018 topic bootstrap (`python -m ledgermesh_messaging.topics --bootstrap-servers kafka:19092 --replication-factor 1`) and checks the 15 topics;
-5. starts everything (`docker compose up --wait`, bounded by `--wait-timeout`, default 300 s);
+4. runs the LM-018 topic bootstrap (`ledgermesh-topics --bootstrap-servers kafka:19092 --replication-factor 1`, the messaging library's console script for `ledgermesh_messaging.topics`) and checks the 15 topics;
+5. starts the APIs and Caddy with `docker compose up --wait` (bounded by `--wait-timeout`, default 300 s), then the four workers (Compose's `--wait` rejects containers whose health check is disabled, so they are checked by `verify workers` instead);
 6. runs every check in [§5](#5-verify).
 
 It stops at the first failure. Running it again for the same SHA is safe: migrations and the topic bootstrap are no-ops, and Compose leaves unchanged containers alone.

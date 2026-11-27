@@ -19,7 +19,6 @@
 #   GET  /wallet/v1/wallets/{user_id}                    -> wallet /v1/wallets/{user_id}
 #   GET  /catalog/v1/rewards[/{reward_id}]               -> catalog /v1/rewards[/{reward_id}]
 #   GET  /audit/v1/transactions/{transaction_id}/events  -> audit ledger
-
 {
 	# The admin API stays inside the container; it is never published.
 	admin localhost:2019

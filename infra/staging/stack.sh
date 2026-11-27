@@ -70,6 +70,7 @@ SERVICES=(
 )
 WORKERS=(coordinator-saga wallet-saga catalog-saga audit-consumer)
 DATA_TIER=(kafka coordinator-db wallet-db catalog-db audit-ledger-db)
+GATEWAY_TIER=(coordinator wallet catalog audit-ledger caddy)
 PASSWORD_KEYS=(COORDINATOR_DB_PASSWORD WALLET_DB_PASSWORD CATALOG_DB_PASSWORD AUDIT_LEDGER_DB_PASSWORD)
 
 die() {
@@ -205,8 +206,10 @@ run_migrations() {
 
 run_topics() {
   log "creating Kafka topics (LM-018 bootstrap)"
+  # ledgermesh-topics is the messaging library's console script
+  # (ledgermesh_messaging.topics:main), installed in every service image.
   compose run --rm --no-deps -T coordinator \
-    python -m ledgermesh_messaging.topics --bootstrap-servers kafka:19092 --replication-factor 1
+    ledgermesh-topics --bootstrap-servers kafka:19092 --replication-factor 1
 }
 
 # ---- checks ------------------------------------------------------------------------
@@ -255,7 +258,7 @@ for t in ALL_TOPICS: print(t.name, t.partitions)')"
   echo "ok  $(echo "$expected" | wc -l | tr -d ' ') topics match the LM-018 definitions"
   config="$(compose exec -T kafka /opt/kafka/bin/kafka-configs.sh \
     --bootstrap-server localhost:19092 --entity-type brokers --entity-name 1 --describe --all)"
-  echo "$config" | grep -q 'auto.create.topics.enable=false' \
+  grep -q 'auto.create.topics.enable=false' <<<"$config" \
     || die "auto.create.topics.enable is not false on the broker"
   echo "ok  auto.create.topics.enable=false"
 }
@@ -371,7 +374,7 @@ verify_health() {
           body=""
         fi
       fi
-      if echo "$body" | grep -Eq "\"service\": ?\"$expected\""; then
+      if grep -Eq "\"service\": ?\"$expected\"" <<<"$body"; then
         echo "ok  https://$site$path -> $expected"
         break
       fi
@@ -385,7 +388,7 @@ verify_health() {
 worker_state() {
   local name
   name="$(docker ps -a --filter "label=com.docker.compose.project=$PROJECT" \
-    --filter "label=com.docker.compose.service=$1" --format '{{.Names}}' | grep -v -- '-run-' | head -n 1)"
+    --filter "label=com.docker.compose.service=$1" --format '{{.Names}}' | awk '!/-run-/' | head -n 1)"
   [[ -n "$name" ]] || { echo "missing"; return 0; }
   docker inspect -f '{{ .State.Status }} {{ .RestartCount }} {{ .State.StartedAt }}' "$name"
 }
@@ -475,8 +478,12 @@ case "$COMMAND" in
     run_migrations
     run_topics
     verify_topics
-    log "starting every service"
-    compose up -d --wait --wait-timeout "$WAIT_TIMEOUT" --remove-orphans
+    log "starting the APIs and the gateway"
+    compose up -d --wait --wait-timeout "$WAIT_TIMEOUT" --remove-orphans "${DATA_TIER[@]}" "${GATEWAY_TIER[@]}"
+    # `compose up --wait` rejects containers whose health check is disabled,
+    # so the workers start without it; `verify workers` checks them below.
+    log "starting the workers"
+    compose up -d "${WORKERS[@]}"
     verify all
     log "stack is up and verified"
     ;;
