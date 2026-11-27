@@ -200,6 +200,14 @@ covered by the CI job once they are rebased onto this.
 | Working tree | gitleaks v8.30.1, `dir` mode | no leaks |
 | Image layers (coordinator) | Trivy secret scanner | 0 secrets |
 
+Re-run on this branch with `make security-secrets`: every pushed ref plus this branch is
+clean. Because the local scan mirrors *every* local branch, it also flagged three
+fixture values (`*_DB_PASSWORD` test passwords such as `wallet-test-pw-0123456789`) in
+unpushed staging tests on another working branch (`tests/infra/test_staging_*.py`,
+LM-048). They are fake, but the CI job will flag them once that branch is pushed; mark
+each such line with a trailing `# gitleaks:allow` comment rather than allowlisting
+whole files.
+
 The default rules do not flag the local placeholders (`ledgermesh_dev`, `ledgermesh`),
 so the repository needs no `.gitleaks.toml`. If one is ever needed for a known-safe
 placeholder, `secret_scan.sh` picks it up automatically; each allowlist entry must say
@@ -218,6 +226,13 @@ Trivy 0.70.0 with the CI policy (`--severity HIGH,CRITICAL --ignore-unfixed`,
 | 2 CRITICAL, 96 HIGH, 144 MEDIUM, 114 LOW, 18 UNKNOWN Debian findings with no fix | all | none | Accepted until Debian ships fixes (the policy ignores unfixed findings). The CRITICALs are zlib1g CVE-2023-45853 (minizip, `will_not_fix`, unused) and libsqlite3-0 CVE-2025-7458 (the services use PostgreSQL). Most HIGHs are base-OS tools the services never run (krb5, util-linux, ncurses, systemd libs, perl-base, gzip). |
 
 The application packages in `/app/.venv` had no findings, which agrees with pip-audit.
+
+Re-run on this branch (2026-11-27, `make security-images` equivalent for the coordinator,
+`linux/amd64`): with the libpam upgrade, Trivy reports **0** fixable HIGH/CRITICAL
+findings and exits 0, and `infra/scripts/check_image.sh` passes (the image starts with
+`LEDGERMESH_ENV` unset and answers `/health`, runs as uid 10001, contains no secrets). The
+same image started with `LEDGERMESH_ENV=staging` and no database secret exits with
+`UnsafeConfigurationError ... set COORDINATOR_DATABASE_URL to a URL with a real secret`.
 
 ## Re-running the scans
 
