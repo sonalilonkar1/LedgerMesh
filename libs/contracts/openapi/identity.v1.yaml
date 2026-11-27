@@ -318,6 +318,10 @@ components:
         detail:
           type: string
         invalid_fields:
+          description: >-
+            Names of declared request fields that failed validation, never their
+            values. A field the request should not contain is reported as
+            `unexpected_field` rather than by the name the client sent.
           type: array
           items:
             type: string

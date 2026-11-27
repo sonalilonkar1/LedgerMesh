@@ -85,13 +85,21 @@ async def identity_error_handler(_request: Request, error: IdentityError) -> JSO
     return problem_response(error)
 
 
+UNEXPECTED_FIELD = "unexpected_field"
+
+
+def field_name(item: dict) -> str:
+    if item["type"] == "extra_forbidden":
+        return UNEXPECTED_FIELD
+    return ".".join(str(part) for part in item["loc"][1:]) or "body"
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error_handler(request: Request, error: RequestValidationError) -> JSONResponse:
     # FastAPI's default 422 echoes the submitted value, which here would be a
-    # token or an email address. Name the fields only.
-    fields = sorted(
-        {".".join(str(part) for part in item["loc"][1:]) or "body" for item in error.errors()}
-    )
+    # token or an email address. Name the declared fields only; a key the
+    # client invented is reported as a fixed marker, not reflected back.
+    fields = sorted({field_name(item) for item in error.errors()})
     if request.url.path == "/v1/auth/login-requests" and fields == ["email"]:
         return problem_response(InvalidEmail())
     return problem_response(InvalidRequest(), invalid_fields=fields)

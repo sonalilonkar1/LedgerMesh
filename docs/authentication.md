@@ -69,7 +69,7 @@ The session cookie is `lm_session=<id>; HttpOnly; SameSite=Lax; Path=/; Max-Age=
 | Threat | Mitigation |
 |---|---|
 | Account enumeration | `202` with an identical body and headers for new and existing addresses; the same code path (upsert) for both; email is sent after the response so SMTP timing does not leak; the per-email limit is checked before any user lookup; one `400` body for unknown, expired, used and revoked links. |
-| Token leaks through logs, proxies, `Referer` or history | The token is in the URL **fragment**, which browsers never send to a server. The confirm page strips it with `history.replaceState`, sends `Referrer-Policy: no-referrer`, and uses a strict hash-based CSP. Validation errors name fields but never echo values. |
+| Token leaks through logs, proxies, `Referer` or history | The token is in the URL **fragment**, which browsers never send to a server. The confirm page strips it with `history.replaceState`, sends `Referrer-Policy: no-referrer`, and uses a strict hash-based CSP. Validation errors name declared fields but never echo values, and report an unknown key as `unexpected_field` instead of reflecting it. |
 | Link scanners and prefetchers using up the link | `GET /v1/auth/verify` is a static page. Only the button's `POST` consumes the token. |
 | Replay and races | The conditional `UPDATE … RETURNING` lets exactly one of any number of concurrent requests win (tested with 10 threads on PostgreSQL). |
 | Brute-forcing tokens | 256-bit tokens, plus the per-IP verify limit. |

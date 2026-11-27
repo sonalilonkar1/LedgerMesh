@@ -205,8 +205,9 @@ def test_unknown_request_fields_are_rejected_without_echoing_values():
     )
 
     assert response.status_code == 422
-    assert response.json()["invalid_fields"] == ["secret"]
+    assert response.json()["invalid_fields"] == ["unexpected_field"]
     assert "hunter2" not in response.text
+    assert "secret" not in response.text
     assert harness.repository.users == {}
 
 
