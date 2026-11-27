@@ -27,6 +27,12 @@ infra/k8s/
   into `kubectl`; Helm is not used).
 - `uv` and Python 3.12 (`make install`), because the smoke test seeds data with
   the project's own seed script.
+- `git` and `openssl` (used by `kind-up.sh` for the image tag and the generated
+  password), and `curl`, `python3` and `base64` on the host (used by
+  `smoke.sh`).
+- The smoke test reads `/tmp/lm041.kubeconfig`, which `make k8s-up` writes and
+  a reboot may remove. If it is missing, run `make k8s-up` again or
+  `kind export kubeconfig --name lm041 --kubeconfig /tmp/lm041.kubeconfig`.
 - About 3 GB of memory free for Docker. Requests add up to about 2.3 GiB and limits
   to about 5.5 GiB.
 
