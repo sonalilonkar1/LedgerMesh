@@ -1,0 +1,50 @@
+# Non-secret configuration (LM-041). Every value is copied from
+# infra/compose.yaml so Kubernetes runs the same semantics as Compose.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ledgermesh-config
+  labels:
+    app.kubernetes.io/component: config
+data:
+  # compose.yaml:125 (apps reach Kafka on the INTERNAL listener).
+  KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+  # compose.yaml:128-129; read by two_phase_commit.py:278-279 and
+  # coordinator saga_worker.py:74 (which would otherwise default to localhost).
+  WALLET_URL: http://wallet:8001
+  CATALOG_URL: http://catalog:8002
+  # compose.yaml:126-127; recovery.py:99-104 and main.py:36-39. The recovery
+  # worker drives REQUESTED 2PC rows to a terminal state (repository.py:122-127).
+  COORDINATOR_RECOVERY_ENABLED: "true"
+  COORDINATOR_RECOVERY_INTERVAL_SECONDS: "5"
+  # LEDGERMESH_ENV is deliberately absent from the base: main.py:82-84 then
+  # returns 404 for the internal control routes. The kind overlay sets it to
+  # "local", as compose.yaml:123 does.
+---
+# Broker settings, copied from compose.yaml:23-38. Two differences:
+#  - KAFKA_CONTROLLER_QUORUM_VOTERS uses localhost, because the single node is
+#    its own controller and "kafka" resolves to the Service, not the pod.
+#  - EXTERNAL is advertised as localhost:29092 for `kubectl port-forward`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-config
+  labels:
+    app.kubernetes.io/component: broker
+data:
+  KAFKA_NODE_ID: "1"
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+  KAFKA_LISTENERS: CONTROLLER://:29093,INTERNAL://:19092,EXTERNAL://:29092
+  KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092,EXTERNAL://localhost:29092
+  KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:29093
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+  # Topics come only from ledgermesh-topics (kafka-topics-job.yaml).
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_LOG_DIRS: /var/lib/kafka/data
+  CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
