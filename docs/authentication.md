@@ -62,20 +62,20 @@ The role is computed on every request from the allowlist, so removing an address
 
 A plain SHA-256 is enough because the input is random and unguessable; a slow hash only matters for low-entropy secrets people choose.
 
-The session cookie is `lm_session=<id>; HttpOnly; SameSite=Lax; Path=/; Max-Age=<remaining absolute lifetime>`, plus `Secure` whenever `LEDGERMESH_ENV` is not `local` or `test` (an unset variable counts as deployed). It has no `Domain`, so it is host-only. Every authenticated request slides the idle expiry forward, but never past the absolute expiry.
+The session cookie is `lm_session=<id>; HttpOnly; SameSite=Lax; Path=/; Max-Age=<remaining absolute lifetime>`, plus `Secure` whenever `LEDGERMESH_ENV` is not `local` or `test` (an unset variable counts as deployed). It has no `Domain`, so it is host-only. Every authenticated request slides the idle expiry forward, but never past the absolute expiry. Because `Max-Age` follows the absolute lifetime, the browser keeps the cookie after the 30-minute idle timeout; the server then rejects it and `/v1/me` returns `401`. Introspection also slides the idle expiry, so a BFF that introspects on every UI poll keeps a session alive while the tab is open; the BFF should introspect only for actions that need a principal.
 
 ## Threat model
 
 | Threat | Mitigation |
 |---|---|
-| Account enumeration | `202` with an identical body and headers for new and existing addresses; the same code path (upsert) for both; email is sent after the response so SMTP timing does not leak; the per-email limit is checked before any user lookup; one `400` body for unknown, expired, used and revoked links. |
+| Account enumeration | `202` with an identical body and the same headers (apart from per-request `date` and `x-request-id`) for new and existing addresses; one upsert path for both, so there is no observable difference in the response (database timing can differ slightly); email is sent after the response so SMTP timing does not leak; the per-email limit is checked before any user lookup; one `400` body for unknown, expired, used and revoked links. |
 | Token leaks through logs, proxies, `Referer` or history | The token is in the URL **fragment**, which browsers never send to a server. The confirm page strips it with `history.replaceState`, sends `Referrer-Policy: no-referrer`, and uses a strict hash-based CSP. Validation errors name declared fields but never echo values, and report an unknown key as `unexpected_field` instead of reflecting it. |
 | Link scanners and prefetchers using up the link | `GET /v1/auth/verify` is a static page. Only the button's `POST` consumes the token. |
 | Replay and races | The conditional `UPDATE … RETURNING` lets exactly one of any number of concurrent requests win (tested with 10 threads on PostgreSQL). |
 | Brute-forcing tokens | 256-bit tokens, plus the per-IP verify limit. |
 | Database theft | Only hashes of tokens and session ids are stored. |
 | Session fixation | Every sign-in creates a new random session id and revokes any session the browser presented. |
-| CSRF / login CSRF | `SameSite=Lax`, and JSON-only `POST`s: a cross-site HTML form cannot send `application/json`, and no CORS is configured, so a cross-site script cannot either. |
+| CSRF / login CSRF | `SameSite=Lax`, and JSON-only `POST`s: a cross-site HTML form cannot send `application/json`, and no CORS is configured, so a cross-site script cannot either. This analysis covers the Identity Service alone; once the LM-011 BFF proxies `/api/auth/*`, its CORS and method handling must preserve it. |
 | XSS stealing the session | `HttpOnly` cookie; the confirm page writes only with `textContent`. |
 | Mail bombing / flooding | Persistent per-IP and per-email limits (below). |
 | Lockout by a third party | **Accepted, and not bounded in time.** Anyone who knows an address can keep it from signing in for as long as they keep sending requests: (1) every login request for the address revokes its pending link (one active link, below), so one request every few minutes, well under the per-email limit, keeps the emailed link invalid without ever getting a `429`; (2) sending the per-email limit at the start of each window keeps the address at `429`. Each request still costs the attacker a request against their per-IP limit and is audited as `login_requested` (with client IP) or `rate_limited`, so an operator can see it in `/v1/operator/auth-events`; mitigating it further (per-email cooldown, several valid links per user) is a follow-up. |
@@ -163,7 +163,7 @@ curl -i -X POST http://localhost:8005/v1/auth/login-requests \
   -H 'Content-Type: application/json' -d '{"email":"alice@example.com"}'
 ```
 
-Open the inbox at <http://localhost:8025>, click the link, and press **Sign in to LedgerMesh**. The browser now holds `lm_session` for `localhost`; `http://localhost:8005/v1/me` shows the user. Sign in as `operator@example.com` (the Compose default for `IDENTITY_OPERATOR_EMAILS`) to see `/v1/operator/auth-events`.
+Open the inbox at <http://localhost:8025>, click the link, and press **Sign in to LedgerMesh**. The browser now holds `lm_session` for `localhost`; `http://localhost:8005/v1/me` shows the user. Sign in as `operator@example.com` (the Compose default for `IDENTITY_OPERATOR_EMAILS`) to see `/v1/operator/auth-events`. That default is for local use only; staging must set `IDENTITY_OPERATOR_EMAILS` to named team members.
 
 To run only the service on the host against the Compose database and Mailpit: `make run-identity`. The automated end-to-end check (request, read the email through Mailpit's API, verify, replay, logout) is `make identity-e2e`. Each run sends two login requests (one for the fixed operator address) and three verifications from your host's single Docker gateway IP, so running it more than five times in 15 minutes hits the per-address limit, and about ten times the per-IP limits; the test then fails with a rate-limit message. To iterate, restart the stack with higher limits, for example `IDENTITY_LOGIN_LIMIT_PER_EMAIL=100 IDENTITY_LOGIN_LIMIT_PER_IP=1000 IDENTITY_VERIFY_LIMIT_PER_IP=1000 make infra-up` (Compose passes these through; the service defaults stay `5`/`20`/`30`).
 
@@ -181,4 +181,8 @@ make identity-e2e                                     # against the running stac
 - **LM-051 (#63, public/guest experience):** add a sign-in entry point to the landing page while keeping the guest demo exactly as it is.
 - **LM-048 (#56, hosted staging):** hosted cookies require HTTPS and a single same-site public entry point; `/v1/auth/*` should be reached through it, and `/v1/sessions/introspect` stays on the private network. Optionally add a shared-key header for introspection callers.
 - **LM-047 images:** add `identity:identity:8005` to `make images-build`/`images-check` and the image workflow when the service is deployed.
+- **Data retention (follow-up):** a `users` row is created at login request, before mailbox control is proven, so addresses that never sign in are kept. `login_tokens`, `sessions` and `auth_events` have no purge job yet. A follow-up should create users only on first successful verification (or delete unverified users after the token expires) and add a retention job.
+- **Local stack size:** `identity`, `identity-db` and `mailpit` are part of the default Compose stack and `make infra-smoke`. If the extra containers slow down the LM-036 experiments, move them behind a Compose profile.
+- **Other open PRs:** #96 (metrics) and #101 (tracing) enumerate four services, and #102 (Kubernetes) deploys four APIs; each needs Identity added after this merges. #101's instrumentation must keep redacting tokens and emails. #97 also edits `infra/compose.yaml` and `Makefile`, so expect a textual merge conflict.
+- **No account deletion or "log out everywhere"** yet.
 - **LM-042 security:** the shared safe-error handler and internal-route gating; the identity service already has its own validation handler that does not echo input. Adding `email` to the shared log-redaction list is a possible follow-up.
