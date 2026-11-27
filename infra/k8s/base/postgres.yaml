@@ -1,0 +1,520 @@
+# Four isolated PostgreSQL servers, one per service, as in compose.yaml:46-114
+# (LM-041). Each runs with max_prepared_transactions=100 (compose.yaml:52), which
+# the 2PC participants require. Applications use the ClusterIP Service
+# <name>; the StatefulSet is governed by the headless <name>-headless.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coordinator-db
+  labels:
+    app.kubernetes.io/name: coordinator-db
+    app.kubernetes.io/component: database
+spec:
+  selector:
+    app.kubernetes.io/name: coordinator-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+# Headless governing Service for the StatefulSet (coordinator-db-0.coordinator-db-headless).
+apiVersion: v1
+kind: Service
+metadata:
+  name: coordinator-db-headless
+  labels:
+    app.kubernetes.io/name: coordinator-db
+    app.kubernetes.io/component: database
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: coordinator-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: coordinator-db
+  labels:
+    app.kubernetes.io/name: coordinator-db
+    app.kubernetes.io/component: database
+spec:
+  serviceName: coordinator-db-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: coordinator-db
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: coordinator-db
+        app.kubernetes.io/component: database
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        # The postgres user of the alpine image; initdb runs unprivileged.
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: postgres:17.11-alpine
+          args: ["postgres", "-c", "max_prepared_transactions=100"]
+          env:
+            - name: POSTGRES_USER
+              value: coordinator
+            - name: POSTGRES_DB
+              value: coordinator
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ledgermesh-db
+                  key: POSTGRES_PASSWORD
+            # A subdirectory, so the volume root (lost+found) is never PGDATA.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          # Same check as compose.yaml:4.
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 384Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            # shm_size: 128mb in compose.yaml.
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: audit-ledger-db
+  labels:
+    app.kubernetes.io/name: audit-ledger-db
+    app.kubernetes.io/component: database
+spec:
+  selector:
+    app.kubernetes.io/name: audit-ledger-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+# Headless governing Service for the StatefulSet (audit-ledger-db-0.audit-ledger-db-headless).
+apiVersion: v1
+kind: Service
+metadata:
+  name: audit-ledger-db-headless
+  labels:
+    app.kubernetes.io/name: audit-ledger-db
+    app.kubernetes.io/component: database
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: audit-ledger-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: audit-ledger-db
+  labels:
+    app.kubernetes.io/name: audit-ledger-db
+    app.kubernetes.io/component: database
+spec:
+  serviceName: audit-ledger-db-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: audit-ledger-db
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: audit-ledger-db
+        app.kubernetes.io/component: database
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        # The postgres user of the alpine image; initdb runs unprivileged.
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: postgres:17.11-alpine
+          args: ["postgres", "-c", "max_prepared_transactions=100"]
+          env:
+            - name: POSTGRES_USER
+              value: audit_ledger
+            - name: POSTGRES_DB
+              value: audit_ledger
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ledgermesh-db
+                  key: POSTGRES_PASSWORD
+            # A subdirectory, so the volume root (lost+found) is never PGDATA.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          # Same check as compose.yaml:4.
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 384Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            # shm_size: 128mb in compose.yaml.
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wallet-db
+  labels:
+    app.kubernetes.io/name: wallet-db
+    app.kubernetes.io/component: database
+spec:
+  selector:
+    app.kubernetes.io/name: wallet-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+# Headless governing Service for the StatefulSet (wallet-db-0.wallet-db-headless).
+apiVersion: v1
+kind: Service
+metadata:
+  name: wallet-db-headless
+  labels:
+    app.kubernetes.io/name: wallet-db
+    app.kubernetes.io/component: database
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: wallet-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: wallet-db
+  labels:
+    app.kubernetes.io/name: wallet-db
+    app.kubernetes.io/component: database
+spec:
+  serviceName: wallet-db-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wallet-db
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wallet-db
+        app.kubernetes.io/component: database
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        # The postgres user of the alpine image; initdb runs unprivileged.
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: postgres:17.11-alpine
+          args: ["postgres", "-c", "max_prepared_transactions=100"]
+          env:
+            - name: POSTGRES_USER
+              value: wallet
+            - name: POSTGRES_DB
+              value: wallet
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ledgermesh-db
+                  key: POSTGRES_PASSWORD
+            # A subdirectory, so the volume root (lost+found) is never PGDATA.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          # Same check as compose.yaml:4.
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 384Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            # shm_size: 128mb in compose.yaml.
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog-db
+  labels:
+    app.kubernetes.io/name: catalog-db
+    app.kubernetes.io/component: database
+spec:
+  selector:
+    app.kubernetes.io/name: catalog-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+# Headless governing Service for the StatefulSet (catalog-db-0.catalog-db-headless).
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog-db-headless
+  labels:
+    app.kubernetes.io/name: catalog-db
+    app.kubernetes.io/component: database
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: catalog-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: catalog-db
+  labels:
+    app.kubernetes.io/name: catalog-db
+    app.kubernetes.io/component: database
+spec:
+  serviceName: catalog-db-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: catalog-db
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: catalog-db
+        app.kubernetes.io/component: database
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        # The postgres user of the alpine image; initdb runs unprivileged.
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: postgres:17.11-alpine
+          args: ["postgres", "-c", "max_prepared_transactions=100"]
+          env:
+            - name: POSTGRES_USER
+              value: catalog
+            - name: POSTGRES_DB
+              value: catalog
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ledgermesh-db
+                  key: POSTGRES_PASSWORD
+            # A subdirectory, so the volume root (lost+found) is never PGDATA.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          # Same check as compose.yaml:4.
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 5
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 384Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            # shm_size: 128mb in compose.yaml.
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi

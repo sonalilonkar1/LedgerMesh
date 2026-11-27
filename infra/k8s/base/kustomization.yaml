@@ -1,0 +1,17 @@
+# LedgerMesh Kubernetes base (LM-041). Render an overlay, not the base: the
+# base references the Secret "ledgermesh-db" that overlays generate.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ledgermesh
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: ledgermesh
+    includeTemplates: true
+resources:
+  - namespace.yaml
+  - config.yaml
+  - kafka.yaml
+  - postgres.yaml
+  - kafka-topics-job.yaml
+  - apis.yaml
+  - workers.yaml

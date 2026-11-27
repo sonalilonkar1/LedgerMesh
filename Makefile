@@ -1,4 +1,4 @@
-.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean images-build images-check
+.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean images-build images-check k8s-up k8s-smoke k8s-down
 
 COMPOSE_FILE ?= infra/compose.yaml
 COMPOSE := docker compose -f $(COMPOSE_FILE)
@@ -139,3 +139,15 @@ images-check: images-build
 	  bash infra/scripts/check_image.sh ledgermesh-$$name:$(IMAGE_REVISION) $$name $$port || exit 1; \
 	done
 
+
+# Kubernetes on a local kind cluster named lm041 (LM-041). The kubeconfig goes to
+# /tmp/lm041.kubeconfig, so the default kubectl context is never changed.
+# See infra/k8s/README.md.
+k8s-up:
+	bash infra/k8s/kind-up.sh
+
+k8s-smoke:
+	bash infra/k8s/smoke.sh
+
+k8s-down:
+	bash infra/k8s/kind-down.sh

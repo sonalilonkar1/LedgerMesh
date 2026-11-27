@@ -1,0 +1,451 @@
+# Saga workers and the audit consumer (LM-041). Compose does not run these, so
+# each command comes from the Makefile:
+#   coordinator-saga  python -m services.coordinator.app.saga_worker   Makefile:35-38
+#   wallet-saga       python -m services.wallet.app.saga_worker        Makefile:43-45
+#   catalog-saga      python -m services.catalog.app.saga_worker       Makefile:50-52
+#   audit-consumer    python -m services.audit_ledger.app.event_worker Makefile:57-59
+#
+# The coordinator-saga worker also runs the Coordinator's OutboxPublisher
+# (saga_worker.py:71), which is the only path that ships the 2PC terminal audit
+# event to Kafka. Each worker publishes its own service's outbox.
+#
+# - One replica, Recreate. A second replica would only add an idle outbox
+#   publisher (advisory lock, libs/messaging/README.md:32); scaling the
+#   consumers is out of scope for LM-041.
+# - No probes: workers have no HTTP endpoint. They exit on failure and on
+#   SIGTERM (saga_worker.py:95-96) and the kubelet restarts them.
+# - Init containers: wait until the owning API is healthy (its migration has
+#   run, see apis.yaml), then make sure the topics exist (auto-create is off).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coordinator-saga
+  labels:
+    app.kubernetes.io/name: coordinator-saga
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: coordinator-saga
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: coordinator-saga
+        app.kubernetes.io/component: worker
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Same check as the compose healthcheck (compose.yaml:141), bounded.
+        - name: wait-api
+          image: ledgermesh-coordinator
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - >-
+              for url in http://coordinator:8000/health http://catalog:8002/health; do
+              ok=0; for i in $(seq 1 150); do
+              python -c "import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=2)" "$url" && { ok=1; break; };
+              sleep 2; done;
+              [ "$ok" = 1 ] || { echo "timed out waiting for $url"; exit 1; };
+              done
+          securityContext: &containerSecurity
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources: &initResources
+            requests:
+              cpu: 25m
+              memory: 96Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts: &tmpMount
+            - name: tmp
+              mountPath: /tmp
+        - name: ensure-topics
+          image: ledgermesh-coordinator
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - >-
+              for i in $(seq 1 60); do
+              ledgermesh-topics --bootstrap-servers kafka:19092 --replication-factor 1 && exit 0;
+              sleep 5; done; exit 1
+          securityContext: *containerSecurity
+          resources: *initResources
+          volumeMounts: *tmpMount
+      containers:
+        - name: worker
+          image: ledgermesh-coordinator
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "services.coordinator.app.saga_worker"]
+          # CATALOG_URL is needed for quotes (saga_worker.py:74); its default is
+          # localhost, so the shared config must be present.
+          envFrom:
+            - configMapRef:
+                name: ledgermesh-config
+          env:
+            - name: SERVICE_NAME
+              value: coordinator
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ledgermesh-db
+                  key: POSTGRES_PASSWORD
+            # Read by each worker's repository.database_url().
+            - name: DATABASE_URL
+              value: postgresql+psycopg://coordinator:$(POSTGRES_PASSWORD)@coordinator-db:5432/coordinator
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: ledgermesh-config
+                  key: KAFKA_BOOTSTRAP_SERVERS
+          securityContext: *containerSecurity
+          resources:
+            requests:
+              cpu: 25m
+              memory: 96Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts: *tmpMount
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wallet-saga
+  labels:
+    app.kubernetes.io/name: wallet-saga
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wallet-saga
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wallet-saga
+        app.kubernetes.io/component: worker
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Same check as the compose healthcheck (compose.yaml:141), bounded.
+        - name: wait-api
+          image: ledgermesh-wallet
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - >-
+              for url in http://wallet:8001/health; do
+              ok=0; for i in $(seq 1 150); do
+              python -c "import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=2)" "$url" && { ok=1; break; };
+              sleep 2; done;
+              [ "$ok" = 1 ] || { echo "timed out waiting for $url"; exit 1; };
+              done
+          securityContext: &containerSecurity
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources: &initResources
+            requests:
+              cpu: 25m
+              memory: 96Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts: &tmpMount
+            - name: tmp
+              mountPath: /tmp
+        - name: ensure-topics
+          image: ledgermesh-wallet
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - >-
+              for i in $(seq 1 60); do
+              ledgermesh-topics --bootstrap-servers kafka:19092 --replication-factor 1 && exit 0;
+              sleep 5; done; exit 1
+          securityContext: *containerSecurity
+          resources: *initResources
+          volumeMounts: *tmpMount
+      containers:
+        - name: worker
+          image: ledgermesh-wallet
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "services.wallet.app.saga_worker"]
+          env:
+            - name: SERVICE_NAME
+              value: wallet
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ledgermesh-db
+                  key: POSTGRES_PASSWORD
+            # Read by each worker's repository.database_url().
+            - name: DATABASE_URL
+              value: postgresql+psycopg://wallet:$(POSTGRES_PASSWORD)@wallet-db:5432/wallet
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: ledgermesh-config
+                  key: KAFKA_BOOTSTRAP_SERVERS
+          securityContext: *containerSecurity
+          resources:
+            requests:
+              cpu: 25m
+              memory: 96Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts: *tmpMount
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-saga
+  labels:
+    app.kubernetes.io/name: catalog-saga
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: catalog-saga
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: catalog-saga
+        app.kubernetes.io/component: worker
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Same check as the compose healthcheck (compose.yaml:141), bounded.
+        - name: wait-api
+          image: ledgermesh-catalog
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - >-
+              for url in http://catalog:8002/health; do
+              ok=0; for i in $(seq 1 150); do
+              python -c "import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=2)" "$url" && { ok=1; break; };
+              sleep 2; done;
+              [ "$ok" = 1 ] || { echo "timed out waiting for $url"; exit 1; };
+              done
+          securityContext: &containerSecurity
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources: &initResources
+            requests:
+              cpu: 25m
+              memory: 96Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts: &tmpMount
+            - name: tmp
+              mountPath: /tmp
+        - name: ensure-topics
+          image: ledgermesh-catalog
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - >-
+              for i in $(seq 1 60); do
+              ledgermesh-topics --bootstrap-servers kafka:19092 --replication-factor 1 && exit 0;
+              sleep 5; done; exit 1
+          securityContext: *containerSecurity
+          resources: *initResources
+          volumeMounts: *tmpMount
+      containers:
+        - name: worker
+          image: ledgermesh-catalog
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "services.catalog.app.saga_worker"]
+          env:
+            - name: SERVICE_NAME
+              value: catalog
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ledgermesh-db
+                  key: POSTGRES_PASSWORD
+            # Read by each worker's repository.database_url().
+            - name: DATABASE_URL
+              value: postgresql+psycopg://catalog:$(POSTGRES_PASSWORD)@catalog-db:5432/catalog
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: ledgermesh-config
+                  key: KAFKA_BOOTSTRAP_SERVERS
+          securityContext: *containerSecurity
+          resources:
+            requests:
+              cpu: 25m
+              memory: 96Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts: *tmpMount
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-consumer
+  labels:
+    app.kubernetes.io/name: audit-consumer
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: audit-consumer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: audit-consumer
+        app.kubernetes.io/component: worker
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Same check as the compose healthcheck (compose.yaml:141), bounded.
+        - name: wait-api
+          image: ledgermesh-audit-ledger
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - >-
+              for url in http://audit-ledger:8003/health; do
+              ok=0; for i in $(seq 1 150); do
+              python -c "import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=2)" "$url" && { ok=1; break; };
+              sleep 2; done;
+              [ "$ok" = 1 ] || { echo "timed out waiting for $url"; exit 1; };
+              done
+          securityContext: &containerSecurity
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources: &initResources
+            requests:
+              cpu: 25m
+              memory: 96Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts: &tmpMount
+            - name: tmp
+              mountPath: /tmp
+        - name: ensure-topics
+          image: ledgermesh-audit-ledger
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - >-
+              for i in $(seq 1 60); do
+              ledgermesh-topics --bootstrap-servers kafka:19092 --replication-factor 1 && exit 0;
+              sleep 5; done; exit 1
+          securityContext: *containerSecurity
+          resources: *initResources
+          volumeMounts: *tmpMount
+      containers:
+        - name: worker
+          image: ledgermesh-audit-ledger
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "services.audit_ledger.app.event_worker"]
+          env:
+            - name: SERVICE_NAME
+              value: audit-ledger
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ledgermesh-db
+                  key: POSTGRES_PASSWORD
+            # Read by each worker's repository.database_url().
+            - name: DATABASE_URL
+              value: postgresql+psycopg://audit_ledger:$(POSTGRES_PASSWORD)@audit-ledger-db:5432/audit_ledger
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: ledgermesh-config
+                  key: KAFKA_BOOTSTRAP_SERVERS
+          securityContext: *containerSecurity
+          resources:
+            requests:
+              cpu: 25m
+              memory: 96Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts: *tmpMount
+      volumes:
+        - name: tmp
+          emptyDir: {}

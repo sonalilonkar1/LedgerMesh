@@ -14,6 +14,9 @@ The messaging library's test-only environment remains separate at
 The same `infra/Dockerfile.service` also builds the production images that CI
 publishes to GHCR. See [Service images (LM-047)](IMAGES.md).
 
+To run the whole system, including the Saga workers and the audit consumer, on
+Kubernetes (a local kind cluster), see [Kubernetes deployment (LM-041)](k8s/README.md).
+
 ## Start the stack
 
 From the repository root:

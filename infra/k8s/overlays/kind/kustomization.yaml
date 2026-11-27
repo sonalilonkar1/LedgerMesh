@@ -1,0 +1,47 @@
+# Local kind cluster overlay (LM-041). `make k8s-up` creates the cluster
+# "lm041", builds and loads the images as ledgermesh-<name>:local and applies
+# this overlay.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+generatorOptions:
+  labels:
+    app.kubernetes.io/component: db-credentials
+    app.kubernetes.io/part-of: ledgermesh
+# POSTGRES_PASSWORD comes from a gitignored file (.gitignore: ".env.*").
+# kind-up.sh creates it with a random hex password when it is missing; see
+# .env.secrets.example.
+secretGenerator:
+  - name: ledgermesh-db
+    namespace: ledgermesh
+    envs:
+      - .env.secrets
+images:
+  - name: ledgermesh-coordinator
+    newTag: local
+  - name: ledgermesh-wallet
+    newTag: local
+  - name: ledgermesh-catalog
+    newTag: local
+  - name: ledgermesh-audit-ledger
+    newTag: local
+patches:
+  # compose.yaml:127: the local Coordinator runs with LEDGERMESH_ENV=local, which
+  # enables the internal control routes (main.py:82-84).
+  - target:
+      kind: ConfigMap
+      name: ledgermesh-config
+    patch: |-
+      - op: add
+        path: /data/LEDGERMESH_ENV
+        value: local
+  # Tuning for an 8 GB laptop, not a Compose setting: cap the broker heap so it
+  # stays well inside the 1536Mi container limit.
+  - target:
+      kind: ConfigMap
+      name: kafka-config
+    patch: |-
+      - op: add
+        path: /data/KAFKA_HEAP_OPTS
+        value: -Xmx512m -Xms512m
