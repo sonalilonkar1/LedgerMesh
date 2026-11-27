@@ -10,6 +10,7 @@
 
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -17,6 +18,7 @@ import tarfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 from .conftest import install
 
@@ -291,3 +293,19 @@ def test_stack_rejects_unsafe_arguments(stack, args, message):
     result = stack(*args)
     assert result.returncode != 0
     assert message in result.stderr
+
+
+def test_stack_waits_on_every_health_checked_service_and_starts_the_workers():
+    # `compose up --wait` rejects containers whose health check is disabled,
+    # so stack.sh waits on the data tier, APIs and Caddy, then starts the workers.
+    text = (STAGING / "stack.sh").read_text()
+
+    def array(name: str) -> set[str]:
+        match = re.search(rf"^{name}=\(([^)]*)\)", text, re.MULTILINE)
+        assert match, name
+        return set(match.group(1).split())
+
+    services = yaml.safe_load((STAGING / "compose.yaml").read_text())["services"]
+    workers = {n for n, s in services.items() if s.get("healthcheck") == {"disable": True}}
+    assert array("WORKERS") == workers
+    assert array("DATA_TIER") | array("GATEWAY_TIER") == set(services) - workers
