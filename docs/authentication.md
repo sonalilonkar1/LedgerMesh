@@ -106,7 +106,7 @@ Fixed-window counters in the `rate_limit_counters` table, keyed by `sha256(scope
 
 Verification is limited per IP only: the email is unknown until the token is looked up, and a 256-bit token cannot be guessed anyway. Over the limit the response is `429` with `Retry-After` and the body `Too many requests. Try again later.` A fixed window can allow up to twice the limit across a window boundary.
 
-The client IP is `request.client.host`. Behind a proxy, uvicorn only trusts `X-Forwarded-For` from `FORWARDED_ALLOW_IPS`, so staging must set it to the BFF or ingress address, and the BFF must forward the browser's IP; otherwise every request counts against the proxy's IP.
+The client IP is `request.client.host`. For the per-IP limits an IPv6 address is reduced to its `/64` network (an IPv4-mapped address to its IPv4 address), because one subscriber usually holds a whole `/64` and could otherwise rotate addresses to escape the limit; the cost is that clients sharing a `/64` share the budget. Behind a proxy, uvicorn only trusts `X-Forwarded-For` from `FORWARDED_ALLOW_IPS`, so staging must set it to the BFF or ingress address, and the BFF must forward the browser's IP; otherwise every request counts against the proxy's IP.
 
 ## Audit and logging
 
