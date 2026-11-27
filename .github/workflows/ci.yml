@@ -11,6 +11,8 @@ on:
       - "infra/scripts/prepared_transactions.py"
       - "infra/compose.yaml"
       - "infra/Dockerfile.service"
+      - "infra/staging/**"
+      - "docs/deployment/**"
       - "pyproject.toml"
       - "uv.lock"
       - "Makefile"
