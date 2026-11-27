@@ -1,4 +1,4 @@
-# Hosted staging runbook (LM-048, LM-049)
+# Hosted staging runbook (LM-048, LM-049, LM-050)
 
 Staging is a single Google Compute Engine VM that runs the LedgerMesh images with Docker Compose behind Caddy. The decision, alternatives and cost estimate are in [ADR-002](../architecture/ADR-002-hosted-staging.md). ADR-001 wins on any conflict.
 
@@ -275,6 +275,19 @@ for p in 22 5432 8000 8001 8002 8003 9092 19092 29092 2019; do
 done
 ```
 
+### 5.1 Hosted smoke suite (LM-050)
+
+The suite in `tests/hosted/` checks a deployed environment end to end through the public URL only: health and service identity, the gateway allowlist (40 forbidden requests must get Caddy's empty 404), closed ports, and Saga redemptions to `COMPLETED`, `FAILED` (insufficient points) and `COMPENSATED` (exhausted inventory) with exactly-once wallet and catalog effects, idempotency-key replay and conflict, the audit trail and the correlation id. 2PC cannot be started through the public API and is skipped with the reason. Details, the full case list and every setting: [tests/hosted/README.md](../../tests/hosted/README.md).
+
+It runs automatically after every deploy and rollback (`.github/workflows/hosted-smoke.yml`). To run it by hand, choose the environment explicitly:
+
+- **GitHub:** Actions, **Hosted smoke**, *Run workflow*, `base_url` = `STAGING_URL`.
+- **Laptop:** `bash infra/staging/ci/remote.sh fixtures <run_id>`, then `LEDGERMESH_HOSTED_BASE_URL=<STAGING_URL> LEDGERMESH_HOSTED_RUN_ID=<run_id> LEDGERMESH_HOSTED_REQUIRE_FIXTURES=true make hosted-smoke`.
+
+Each run first creates its own fixtures on the VM (`deploy.sh fixtures <run_id>`, run by the smoke workflow over IAP SSH). It uses the running release's `fixtures.py`, piped into the running `wallet` and `catalog` containers, so each service's rows are written with that service's own credentials and nothing leaves the containers. Only `smoke-<run_id>-*` rows are inserted, with a plain `INSERT` (a reused run id fails), and the script refuses unless `LEDGERMESH_ENV` is `staging`, `local` or `test`. When `expected_revision` is given, the workflow also runs `remote.sh status --expect <sha>` first.
+
+When it fails, open the run's `hosted-smoke-<run_id>` artifact: `junit.xml` and `diagnostics.json` (per scenario: transaction and correlation ids, the statuses seen while polling, audit events, final balances; only public API data). Then look the transaction up on the VM (§7), for example `stack.sh logs coordinator-saga | grep <transaction_id>`.
+
 ## 6. Stop, start and cost
 
 ```bash
@@ -442,7 +455,7 @@ How the LM-049 workflows use the environment:
 
 - Every job that reaches the VM (`deploy`, `promote`, `rollback` in `deploy-staging.yml`, and `rollback-staging.yml`) declares `environment: {name: staging, deployment: false}`. That gives it the variables above and applies the `main`-only branch rule, without GitHub creating an automatic deployment, which would name the workflow's own commit rather than the one deployed. The workflows record the deployment themselves for the exact SHA (`infra/staging/ci/github-deployment.sh`, `deployments: write`): `in_progress`, then `success` with `STAGING_URL` after the smoke suite, or `failure`. The environment page therefore shows which commit is live. `github-deployment.sh` first creates the deployment with `ref` = the exact SHA. GitHub applies the environment's deployment branch rule to deployments created through the API too, and may reject a bare SHA because it is not the branch `main` ("is not allowed to deploy to staging due to environment protection rules"). In that case the script records the deployment against `ref: main` instead. The exact SHA is then in the deployment's description (`Deploy <sha12> to staging`) and in `payload.revision`, and the commit GitHub shows next to it is `main`'s tip when the deployment was created. For automatic deploys that is the same commit, because the gate deploys only `main`'s tip. For a manual deploy or rollback of an older commit, it is not. Any other API error fails the job.
 - Custom deployment protection rules are not compatible with `deployment: false`; do not add one. Required reviewers would still apply, and would make every deploy wait for approval.
-- The hosted smoke workflow (LM-050) is called with `id-token: write` so it can create its run fixtures over IAP.
+- The hosted smoke workflow (LM-050) also runs in `environment: {name: staging, deployment: false}` and is called with `id-token: write`: for `base_url` = `STAGING_URL` it authenticates as the same deploy service account and uses IAP SSH (`remote.sh fixtures` and `remote.sh status --expect`) to create its run fixtures and check the revision. It needs no extra variable, secret or IAM role. It must not join the `staging-deploy` concurrency group, because its caller holds it.
 - The job permissions are declared in the workflows (`contents: read` by default; `actions: read` and `packages: read` for the gate; `id-token: write` and `deployments: write` only where needed), so the repository's default `GITHUB_TOKEN` setting does not need to change.
 
 ## 13. Teardown
@@ -481,6 +494,8 @@ make staging-local-status
 make staging-local-rollback STAGING_TARGET=previous   # or last-known-good, or a SHA
 ```
 
+The hosted smoke suite runs against the local stack as well; it needs the local CA file and its own fixtures (`make staging-local-fixtures RUN_ID=<id>`), see [tests/hosted/README.md](../../tests/hosted/README.md#running-it).
+
 It needs host ports 80 and 443 free (`LEDGERMESH_HTTP_PORT` and `LEDGERMESH_HTTPS_PORT` override them, and `stack.sh --https-port` must match). Differences from the VM: images are not `linux/amd64` on Apple silicon, TLS uses Caddy's local CA, secrets come from a file instead of Secret Manager, and there is no cloud firewall or IAP.
 
 ## 15. Optional web UI
@@ -501,5 +516,7 @@ The web UI (`services/web`, PR #97) is not merged and staging does not depend on
 - A rollback never migrates down, so every migration must work with the previous release (§4.1). A release that fails in its migration step leaves the schema at its last successful revision.
 - The first deploy has nothing to roll back to (exit 22); fix forward or run **Roll back staging** once a good release exists.
 - `deploy.sh status` and the deploy workflow check the running revision on the VM, because `/health` does not report one (`services/*/app/main.py`).
+- The hosted smoke suite cannot exercise 2PC: it can only be started through the coordinator's internal route, which is 404 outside `local`/`test` and blocked by the gateway (tests/hosted/README.md). 2PC is covered by `make test-2pc-integration`.
+- Hosted smoke fixture rows (`smoke-<run_id>-*` wallets and rewards, and the redemptions, operations and audit events made with them) accumulate: they are never deleted, because the history refers to them. They are a few rows per deploy; `make staging-local-reset` or a fresh data disk removes them.
 - After quick successive merges only the newest pending deploy runs (GitHub concurrency); intermediate commits are skipped.
 - `sslip.io` is a third-party DNS service. If it is unavailable the URL does not resolve, although the VM keeps running; a team-owned domain removes that dependency (ADR-002 §6).
