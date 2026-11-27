@@ -118,10 +118,12 @@ def restricted_access_allowed(presented_token: str | None) -> bool:
 
 
 def require_safe_database_url(url: str, *, setting: str) -> str:
-    """Return ``url``, unless it uses the local development password outside local/test.
+    """Return ``url``, unless outside local/test it has no real password.
 
-    ``setting`` names the variable an operator should set; the URL itself never
-    appears in the error, because it may contain a password.
+    Outside local/test the URL must carry a non-empty password (in the userinfo
+    or as a ``password`` query parameter) that is not the local development
+    password. ``setting`` names the variable an operator should set; the URL
+    itself never appears in the error, because it may contain a password.
     """
     if is_local_environment():
         return url
@@ -129,13 +131,24 @@ def require_safe_database_url(url: str, *, setting: str) -> str:
     from sqlalchemy.exc import ArgumentError
 
     try:
-        password = make_url(url).password
+        parsed = make_url(url)
     except ArgumentError:
         raise UnsafeConfigurationError(f"{setting} is not a valid database URL") from None
-    if password == DEV_DATABASE_PASSWORD:
+    query_password = parsed.query.get("password")
+    if isinstance(query_password, tuple):
+        query_password = query_password[-1] if query_password else None
+    passwords = [value for value in (parsed.password, query_password) if value is not None]
+    environment = current_environment()
+    hint = " (or set LEDGERMESH_ENV=local for local development)" if environment is None else ""
+    if not any(passwords):
+        raise UnsafeConfigurationError(
+            f"the database URL has no password; set {setting} to a URL with a real "
+            f"secret{hint} (LEDGERMESH_ENV={environment!r})"
+        )
+    if DEV_DATABASE_PASSWORD in passwords:
         raise UnsafeConfigurationError(
             f"the database URL uses the local development password; set {setting} to a URL "
-            f"with a real secret (LEDGERMESH_ENV={current_environment()!r})"
+            f"with a real secret{hint} (LEDGERMESH_ENV={environment!r})"
         )
     return url
 

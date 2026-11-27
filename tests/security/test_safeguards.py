@@ -265,6 +265,60 @@ def test_development_password_is_refused_outside_local_and_test(environment, val
     assert require_safe_database_url(SECRET_URL, setting="SVC_DATABASE_URL") == SECRET_URL
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql+psycopg://svc@db:5432/svc",
+        "postgresql+psycopg://svc:@db:5432/svc",
+        "postgresql+psycopg:///svc?host=db&user=svc",
+        "postgresql+psycopg:///svc?host=db&user=svc&password=",
+    ],
+)
+@pytest.mark.parametrize("value", [None, "staging"])
+def test_missing_or_empty_password_is_refused_outside_local_and_test(environment, value, url):
+    environment(value)
+
+    with pytest.raises(UnsafeConfigurationError, match="has no password"):
+        require_safe_database_url(url, setting="SVC_DATABASE_URL")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"postgresql+psycopg://svc:x@db/svc?password={DEV_DATABASE_PASSWORD}",
+        f"postgresql+psycopg:///svc?host=db&user=svc&password={DEV_DATABASE_PASSWORD}",
+    ],
+)
+def test_development_password_in_the_query_is_refused(environment, url):
+    environment("staging")
+
+    with pytest.raises(UnsafeConfigurationError, match="local development password") as raised:
+        require_safe_database_url(url, setting="SVC_DATABASE_URL")
+
+    assert DEV_DATABASE_PASSWORD not in str(raised.value)
+
+
+def test_real_password_in_the_query_is_accepted(environment):
+    environment("staging")
+    url = "postgresql+psycopg:///svc?host=db&user=svc&password=hunter2-secret"
+
+    assert require_safe_database_url(url, setting="SVC_DATABASE_URL") == url
+
+
+def test_unset_environment_error_points_developers_at_local(environment):
+    with pytest.raises(UnsafeConfigurationError, match="set LEDGERMESH_ENV=local"):
+        require_safe_database_url(DEV_URL, setting="SVC_DATABASE_URL")
+
+
+def test_deployment_error_does_not_suggest_local(environment):
+    environment("staging")
+
+    with pytest.raises(UnsafeConfigurationError) as raised:
+        require_safe_database_url(DEV_URL, setting="SVC_DATABASE_URL")
+
+    assert "LEDGERMESH_ENV=local" not in str(raised.value)
+
+
 @pytest.mark.parametrize("value", ["local", "test"])
 def test_development_password_is_accepted_in_local_and_test(environment, value):
     environment(value)

@@ -156,7 +156,8 @@ class CoordinatorRepository(Protocol):
 def database_url() -> str:
     url = os.environ.get("COORDINATOR_DATABASE_URL") or os.environ.get("DATABASE_URL")
     if not url:
-        password = os.environ.get("POSTGRES_PASSWORD", DEV_DATABASE_PASSWORD)
+        # An empty POSTGRES_PASSWORD counts as unset (LM-042).
+        password = os.environ.get("POSTGRES_PASSWORD") or DEV_DATABASE_PASSWORD
         url = f"postgresql+psycopg://coordinator:{password}@coordinator-db:5432/coordinator"
     # LM-042: the Compose development password is refused outside local/test.
     return require_safe_database_url(url, setting="COORDINATOR_DATABASE_URL")

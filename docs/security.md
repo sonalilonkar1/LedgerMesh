@@ -11,8 +11,8 @@ manifests are documented with their own issues.
 |---|---|---|
 | Internal and operator routes closed outside local/test | `SafeguardMiddleware` (`libs/messaging/src/ledgermesh_messaging/safeguards.py:240`), plus `require_internal_access` on each Coordinator route (`services/coordinator/app/main.py:94`) | Every `/internal/...` path answers `404`, exactly like an unknown route, unless `LEDGERMESH_ENV` is `local` or `test` or the request carries the operator token |
 | API docs closed outside local/test | same middleware | `/docs`, `/redoc`, `/openapi.json` and `/docs/oauth2-redirect` follow the same rule |
-| No local database password in a deployment | `require_safe_database_url` (`safeguards.py:120`), called by every `database_url()` | The Compose password `ledgermesh_dev` is refused unless `LEDGERMESH_ENV` is `local` or `test` |
-| Refuse to start with local defaults | `check_startup_configuration` (`safeguards.py:143`), run by `install_safeguards` when `main.py` is imported | With `LEDGERMESH_ENV` set to anything but `local`/`test`, the service exits at startup if its database URL uses the development password or the operator token is too short |
+| No local database password in a deployment | `require_safe_database_url` (`safeguards.py:120`), called by every `database_url()` | Unless `LEDGERMESH_ENV` is `local` or `test`, a database URL must carry a non-empty password (in the userinfo or a `password` query parameter) that is not the Compose password `ledgermesh_dev`; an empty `POSTGRES_PASSWORD` counts as unset |
+| Refuse to start with local defaults | `check_startup_configuration` (`safeguards.py:143`), run by `install_safeguards` when `main.py` is imported | With `LEDGERMESH_ENV` set to anything but `local`/`test`, the service exits at startup if its database URL has no password or uses the development password, or the operator token is too short |
 | Safe error bodies | handlers registered by `install_safeguards` (`safeguards.py:331`) | Validation, HTTP and unhandled errors are `application/problem+json` with only `type`, `title`, `status`, `detail`: no submitted input, stack trace or SQL |
 | Bounded input | request models; `SafeguardMiddleware` | Numbers are bounded by their PostgreSQL column types; request bodies are limited to 1 MiB |
 | No `--reload` outside local | `Makefile` `run-*` targets | The only targets that use `--reload` default to `LEDGERMESH_ENV=local` and refuse any other value. Images (`infra/docker/start-service.sh`) and Compose never reload (checked by `tests/security/test_operational_config.py`) |
@@ -108,7 +108,11 @@ gateway, not for clients: the gateway should not forward the header from the int
   `services/catalog/app/repository.py:129`, `services/audit_ledger/app/repository.py:40`).
   That covers the HTTP services and the Kafka workers, which use the same function. The
   error names the variable to set (for example `WALLET_DATABASE_URL`) and never the URL,
-  which may contain a password.
+  which may contain a password. A URL with no password, or an empty one, is refused
+  the same way, and so is `ledgermesh_dev` passed as a `password` query parameter. An
+  empty `POSTGRES_PASSWORD` is treated as unset. With `LEDGERMESH_ENV` unset the error
+  also says to set `LEDGERMESH_ENV=local` for local development, which is what a
+  developer running a worker by hand usually needs (`make run-*` already does it).
 - **API docs** are closed outside local/test (see above). FastAPI still builds the
   schema, so `app.openapi()` and the contract tests are unaffected.
 - **`--reload`** only appears in the `make run-*` targets, which now refuse a non-local

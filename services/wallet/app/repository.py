@@ -87,7 +87,8 @@ class WalletRepository(Protocol):
 def database_url() -> str:
     url = os.environ.get("WALLET_DATABASE_URL") or os.environ.get("DATABASE_URL")
     if not url:
-        password = os.environ.get("POSTGRES_PASSWORD", DEV_DATABASE_PASSWORD)
+        # An empty POSTGRES_PASSWORD counts as unset (LM-042).
+        password = os.environ.get("POSTGRES_PASSWORD") or DEV_DATABASE_PASSWORD
         url = f"postgresql+psycopg://wallet:{password}@wallet-db:5432/wallet"
     # LM-042: the Compose development password is refused outside local/test.
     return require_safe_database_url(url, setting="WALLET_DATABASE_URL")

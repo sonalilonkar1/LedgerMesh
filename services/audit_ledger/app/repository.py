@@ -40,7 +40,8 @@ class AuditRepository(Protocol):
 def database_url() -> str:
     url = os.environ.get("AUDIT_LEDGER_DATABASE_URL") or os.environ.get("DATABASE_URL")
     if not url:
-        password = os.environ.get("POSTGRES_PASSWORD", DEV_DATABASE_PASSWORD)
+        # An empty POSTGRES_PASSWORD counts as unset (LM-042).
+        password = os.environ.get("POSTGRES_PASSWORD") or DEV_DATABASE_PASSWORD
         url = f"postgresql+psycopg://audit_ledger:{password}@audit-ledger-db:5432/audit_ledger"
     # LM-042: the Compose development password is refused outside local/test.
     return require_safe_database_url(url, setting="AUDIT_LEDGER_DATABASE_URL")

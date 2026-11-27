@@ -1,10 +1,14 @@
 """Run the Wallet Saga command consumer and its outbox publisher (LM-020).
 
 From the repository root, with the local stack running and topics created
-(``uv run ledgermesh-topics``):
+(``uv run ledgermesh-topics``), run ``make run-wallet-saga``, or:
 
+    LEDGERMESH_ENV=local \\
     WALLET_DATABASE_URL=postgresql+psycopg://wallet:ledgermesh_dev@localhost:54322/wallet \\
       uv run python -m services.wallet.app.saga_worker
+
+``LEDGERMESH_ENV=local`` is required: outside local/test the development
+password is refused (LM-042, docs/security.md).
 
 Restart safety: ``InboxConsumer`` commits a Kafka offset only after the command's
 database transaction (inbox row, Wallet change and reply) has committed. A crash

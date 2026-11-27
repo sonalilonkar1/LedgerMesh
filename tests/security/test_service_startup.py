@@ -51,6 +51,25 @@ def test_deployment_without_a_real_database_secret_refuses_to_start(service):
     assert "ledgermesh_dev" not in result.stderr
 
 
+@pytest.mark.parametrize(
+    "secret",
+    [
+        {"POSTGRES_PASSWORD": ""},
+        {"DATABASE_URL": "postgresql+psycopg://svc@db:5432/svc"},
+        {"DATABASE_URL": "postgresql+psycopg://svc:@db:5432/svc"},
+        {"DATABASE_URL": "postgresql+psycopg://svc:x@db/svc?password=ledgermesh_dev"},
+        {"DATABASE_URL": "postgresql+psycopg:///svc?host=db&user=svc&password=ledgermesh_dev"},
+    ],
+    ids=["empty-postgres-password", "no-password", "empty-password", "query", "query-only"],
+)
+def test_deployment_with_an_empty_or_hidden_dev_password_refuses_to_start(secret):
+    result = start("wallet", LEDGERMESH_ENV="staging", **secret)
+
+    assert result.returncode != 0
+    assert "UnsafeConfigurationError" in result.stderr
+    assert "ledgermesh_dev" not in result.stderr
+
+
 @pytest.mark.parametrize("service", SERVICES)
 def test_deployment_with_real_secrets_starts(service):
     result = start(
