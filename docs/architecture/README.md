@@ -9,3 +9,8 @@ Use sequential ADR names such as:
 ADR-001-ledgermesh-architecture-and-correctness.md
 ADR-002-event-contract-versioning.md
 ```
+
+## Records
+
+- [ADR-001: Architecture Decisions and Correctness Invariants](ADR-001-ledgermesh-architecture-and-correctness.md)
+- [ADR-002: Hosted staging environment](ADR-002-hosted-staging.md) (LM-048)
