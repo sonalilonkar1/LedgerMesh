@@ -1,4 +1,4 @@
-.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean images-build images-check
+.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean images-build images-check staging-images-local staging-local-env staging-local-up staging-local-verify staging-local-logs staging-local-down staging-local-reset staging-provision-dry-run
 
 COMPOSE_FILE ?= infra/compose.yaml
 COMPOSE := docker compose -f $(COMPOSE_FILE)
@@ -139,3 +139,48 @@ images-check: images-build
 	  bash infra/scripts/check_image.sh ledgermesh-$$name:$(IMAGE_REVISION) $$name $$port || exit 1; \
 	done
 
+
+# Hosted staging (LM-048). See docs/deployment/staging.md.
+# The staging stack (infra/staging/compose.yaml) runs the published GHCR images.
+# Locally, staging-images-local builds them natively from this checkout and tags
+# them with the GHCR names, and Caddy uses its own local CA (`tls internal`).
+#   cp infra/staging/.env.local.example infra/staging/.env.local
+#   make staging-images-local staging-local-up
+STAGING_PROJECT ?= ledgermesh-staging-local
+STAGING_DATA_DIR ?= $(CURDIR)/artifacts/staging/data
+STAGING_ENV_FILE ?= $(CURDIR)/artifacts/staging/staging.env
+STAGING_LOCAL_SOURCE ?= infra/staging/.env.local
+STAGING_STACK = bash infra/staging/stack.sh --env-file $(STAGING_ENV_FILE) \
+	--data-dir $(STAGING_DATA_DIR) --project-name $(STAGING_PROJECT)
+
+staging-images-local: images-build
+	for name in coordinator wallet catalog audit-ledger; do \
+	  docker tag ledgermesh-$$name:$(IMAGE_REVISION) \
+	    ghcr.io/sonalilonkar1/ledgermesh-$$name:$(IMAGE_REVISION) || exit 1; \
+	done
+
+staging-local-env:
+	bash infra/staging/render-env.sh --source file:$(STAGING_LOCAL_SOURCE) --out $(STAGING_ENV_FILE)
+
+staging-local-up: staging-local-env
+	$(STAGING_STACK) --sha $(IMAGE_REVISION) up
+
+staging-local-verify:
+	$(STAGING_STACK) verify all
+
+staging-local-logs:
+	$(STAGING_STACK) logs --tail 200
+
+staging-local-down:
+	$(STAGING_STACK) down
+
+# Destructive, local only: removes the local staging data directory.
+staging-local-reset: staging-local-down
+	rm -rf $(STAGING_DATA_DIR)
+
+# Prints every gcloud command `provision.sh up` would run, with placeholder
+# billing account and emails; runs nothing.
+staging-provision-dry-run:
+	bash infra/staging/provision.sh up --dry-run \
+	  --billing-account 000000-000000-000000 \
+	  --acme-email ops@example.com --admin-member user:admin@example.com
