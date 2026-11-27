@@ -78,7 +78,7 @@ The session cookie is `lm_session=<id>; HttpOnly; SameSite=Lax; Path=/; Max-Age=
 | CSRF / login CSRF | `SameSite=Lax`, and JSON-only `POST`s: a cross-site HTML form cannot send `application/json`, and no CORS is configured, so a cross-site script cannot either. |
 | XSS stealing the session | `HttpOnly` cookie; the confirm page writes only with `textContent`. |
 | Mail bombing / flooding | Persistent per-IP and per-email limits (below). |
-| Lockout by a third party | Accepted: someone can exhaust an address's per-email limit and delay that sign-in for at most one window. The limits are configurable. |
+| Lockout by a third party | **Accepted, and not bounded in time.** Anyone who knows an address can keep it from signing in for as long as they keep sending requests: (1) every login request for the address revokes its pending link (one active link, below), so one request every few minutes, well under the per-email limit, keeps the emailed link invalid without ever getting a `429`; (2) sending the per-email limit at the start of each window keeps the address at `429`. Each request still costs the attacker a request against their per-IP limit and is audited as `login_requested` (with client IP) or `rate_limited`, so an operator can see it in `/v1/operator/auth-events`; mitigating it further (per-email cooldown, several valid links per user) is a follow-up. |
 
 ## Policy choices
 
@@ -90,7 +90,7 @@ The session cookie is `lm_session=<id>; HttpOnly; SameSite=Lax; Path=/; Max-Age=
 
 **Disposable domains.** No list is bundled, because any list goes stale and blocks legitimate users. `IDENTITY_BLOCKED_EMAIL_DOMAINS` is an optional comma-separated denylist (subdomains included) that returns the same generic `422`.
 
-**One active link.** Requesting a new link revokes the previous one.
+**One active link.** Requesting a new link revokes the previous one, so an older email (forwarded, or left in a shared inbox) can no longer sign anyone in. The cost is the lockout described in the threat model: a third party who requests links for an address also invalidates the one its owner is about to use.
 
 **Background sending.** The email is sent after the `202` response. If delivery fails, it is logged by user id and the person simply asks again; the response never changes.
 
