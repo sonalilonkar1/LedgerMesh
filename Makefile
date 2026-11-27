@@ -1,4 +1,4 @@
-.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean images-build images-check staging-images-local staging-local-env staging-local-up staging-local-verify staging-local-logs staging-local-down staging-local-reset staging-provision-dry-run staging-local-deploy staging-local-promote staging-local-rollback staging-local-status staging-local-fixtures
+.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean images-build images-check staging-images-local staging-local-env staging-local-up staging-local-verify staging-local-logs staging-local-down staging-local-reset staging-provision-dry-run staging-local-deploy staging-local-promote staging-local-rollback staging-local-status staging-local-fixtures hosted-smoke
 
 COMPOSE_FILE ?= infra/compose.yaml
 COMPOSE := docker compose -f $(COMPOSE_FILE)
@@ -202,7 +202,31 @@ staging-local-rollback:
 staging-local-status:
 	$(STAGING_DEPLOY) status
 
-# Per-run fixtures for the hosted smoke suite (LM-050): smoke-<RUN_ID>-* wallets
-# and rewards in the running local stack.
+# Hosted smoke suite (LM-050), see tests/hosted/README.md. It runs only against
+# an environment named explicitly in LEDGERMESH_HOSTED_BASE_URL and talks only
+# to that public URL. Per-run fixtures come first, e.g. locally:
+#   make staging-local-fixtures RUN_ID=loc$$(date +%s)
+#   LEDGERMESH_HOSTED_BASE_URL=https://localhost LEDGERMESH_HOSTED_RUN_ID=<id> \
+#     LEDGERMESH_HOSTED_CA_BUNDLE=$(STAGING_DATA_DIR)/caddy/data/caddy/pki/authorities/local/root.crt \
+#     make hosted-smoke
+HOSTED_SMOKE_ARTIFACTS ?= artifacts/hosted-smoke
+
 staging-local-fixtures:
 	$(STAGING_STACK) fixtures $(RUN_ID)
+
+hosted-smoke:
+	@if [ -z "$$LEDGERMESH_HOSTED_BASE_URL" ]; then \
+	  echo "hosted-smoke: set LEDGERMESH_HOSTED_BASE_URL=https://<host> to the environment to test; none is chosen by default" >&2; \
+	  exit 2; \
+	fi
+	mkdir -p $(HOSTED_SMOKE_ARTIFACTS)
+	LEDGERMESH_HOSTED_ARTIFACTS=$${LEDGERMESH_HOSTED_ARTIFACTS:-$(HOSTED_SMOKE_ARTIFACTS)} \
+	  uv run pytest tests/hosted -v -rs -p no:cacheprovider \
+	  --junitxml=$${LEDGERMESH_HOSTED_ARTIFACTS:-$(HOSTED_SMOKE_ARTIFACTS)}/junit.xml
+
+# Prints every gcloud command `provision.sh up` would run, with placeholder
+# billing account and emails; runs nothing.
+staging-provision-dry-run:
+	bash infra/staging/provision.sh up --dry-run \
+	  --billing-account 000000-000000-000000 \
+	  --acme-email ops@example.com --admin-member user:admin@example.com
