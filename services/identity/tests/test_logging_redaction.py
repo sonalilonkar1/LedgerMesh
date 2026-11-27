@@ -6,6 +6,10 @@ from dataclasses import astuple
 
 import pytest
 from ledgermesh_messaging.logs import JsonFormatter
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
+
+from services.identity.app.repository import make_engine
 
 from .fakes import make_harness
 
@@ -82,3 +86,25 @@ def test_audit_events_contain_no_token_session_secret_or_full_email(captured):
     }
     masked = {e.email_masked for e in harness.repository.events if e.email_masked}
     assert masked == {"s***@example.com"}
+
+
+def test_database_errors_do_not_carry_the_bound_email(captured):
+    # A failing statement's exception text normally lists its bound values;
+    # uvicorn logs that text with the traceback ("Exception in ASGI application").
+    engine = make_engine("sqlite://")
+    statement = text("INSERT INTO missing_users (email) VALUES (:email)")
+    # Built at runtime so the traceback's source lines do not contain it.
+    address = "@".join(("secret.person", "example.com"))
+
+    with pytest.raises(DBAPIError) as failure, engine.begin() as connection:
+        connection.execute(statement, {"email": address})
+    logging.getLogger("uvicorn.error").error(
+        "Exception in ASGI application", exc_info=failure.value
+    )
+
+    assert "SQL parameters hidden" in str(failure.value)
+    output = "\n".join(captured)
+    assert "Traceback" in output
+    assert address not in output
+    assert "secret.person" not in output
+    engine.dispose()

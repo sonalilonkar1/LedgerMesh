@@ -13,8 +13,8 @@ from threading import Barrier
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import Engine, create_engine, delete, func, select, text, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import Engine, create_engine, delete, event, func, select, text, update
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from infra.scripts import seed as seeding
 from services.identity.app.db.schema import (
@@ -25,7 +25,7 @@ from services.identity.app.db.schema import (
     users,
 )
 from services.identity.app.errors import InvalidOrExpiredLink, RateLimited
-from services.identity.app.repository import PostgresIdentityRepository
+from services.identity.app.repository import PostgresIdentityRepository, make_engine
 from services.identity.app.service import IdentityService
 from services.identity.app.tokens import hash_secret
 from services.identity.tests.fakes import START, FakeClock, RecordingMailer, make_settings
@@ -198,6 +198,38 @@ def test_baseline_empties_identity(database_url, engine, monkeypatch, clock, mai
 
     assert count(engine, users) == 0
     assert count(engine, auth_events) == 0
+
+
+def test_failed_statements_do_not_put_the_email_in_the_error(database_url, identity_db):
+    # uvicorn logs an unhandled error's text with the traceback; the service
+    # engine hides bound parameters so the address is not part of it.
+    run(identity_db, new_user())
+    engine = make_engine(database_url)
+
+    @event.listens_for(engine, "connect")
+    def short_lock_timeout(dbapi_connection, _record):
+        with dbapi_connection.cursor() as cursor:
+            cursor.execute("SET lock_timeout = '200ms'")
+        dbapi_connection.commit()
+
+    try:
+        with identity_db.begin() as blocker:
+            blocker.execute(select(users).with_for_update())
+            with pytest.raises(OperationalError) as failure:
+                PostgresIdentityRepository(engine).issue_login_token(
+                    email="alice@example.com",
+                    token_hash="0" * 64,
+                    now=START,
+                    expires_at=START + timedelta(minutes=15),
+                    client_ip=IP,
+                )
+    finally:
+        engine.dispose()
+
+    message = str(failure.value)
+    assert "lock timeout" in message
+    assert "SQL parameters hidden" in message
+    assert "alice@example.com" not in message
 
 
 # --- sign-in flow against PostgreSQL ----------------------------------------

@@ -138,9 +138,16 @@ def database_url() -> str:
     return f"postgresql+psycopg://identity:{password}@identity-db:5432/identity"
 
 
+def make_engine(url: str) -> Engine:
+    # hide_parameters keeps bound values (a full email address) out of
+    # SQLAlchemy exception text, which uvicorn logs with the traceback when a
+    # statement fails.
+    return create_engine(url, pool_pre_ping=True, hide_parameters=True)
+
+
 @lru_cache
 def get_engine(url: str | None = None) -> Engine:
-    return create_engine(url or database_url(), pool_pre_ping=True)
+    return make_engine(url or database_url())
 
 
 def ip_or_none(value: str | None) -> str | None:
