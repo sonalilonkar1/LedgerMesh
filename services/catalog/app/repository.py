@@ -29,6 +29,7 @@ from functools import lru_cache
 from typing import Protocol
 from uuid import UUID
 
+from ledgermesh_messaging.safeguards import DEV_DATABASE_PASSWORD, require_safe_database_url
 from psycopg.errors import UniqueViolation
 from sqlalchemy import Connection, Engine, create_engine, insert, select, update
 from sqlalchemy.exc import IntegrityError
@@ -126,10 +127,12 @@ class CatalogRepository(Protocol):
 
 
 def database_url() -> str:
-    if override := os.environ.get("CATALOG_DATABASE_URL") or os.environ.get("DATABASE_URL"):
-        return override
-    password = os.environ.get("POSTGRES_PASSWORD", "ledgermesh_dev")
-    return f"postgresql+psycopg://catalog:{password}@catalog-db:5432/catalog"
+    url = os.environ.get("CATALOG_DATABASE_URL") or os.environ.get("DATABASE_URL")
+    if not url:
+        password = os.environ.get("POSTGRES_PASSWORD", DEV_DATABASE_PASSWORD)
+        url = f"postgresql+psycopg://catalog:{password}@catalog-db:5432/catalog"
+    # LM-042: the Compose development password is refused outside local/test.
+    return require_safe_database_url(url, setting="CATALOG_DATABASE_URL")
 
 
 @lru_cache

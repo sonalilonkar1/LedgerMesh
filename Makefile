@@ -29,33 +29,47 @@ contracts-compat:
 
 check: lint test
 
+# Local development only (LM-042): --reload and the Compose database password
+# are refused anywhere but LEDGERMESH_ENV=local or test, which these default to.
+LOCAL_ENV = LEDGERMESH_ENV=$${LEDGERMESH_ENV:-local}
+REQUIRE_LOCAL = @case "$${LEDGERMESH_ENV:-local}" in local|test) ;; \
+	*) echo "run-* targets are for local development; LEDGERMESH_ENV=$$LEDGERMESH_ENV" >&2; exit 1;; esac
+
 run-coordinator:
-	uv run uvicorn services.coordinator.app.main:app --reload --port 8000
+	$(REQUIRE_LOCAL)
+	$(LOCAL_ENV) uv run uvicorn services.coordinator.app.main:app --reload --port 8000
 
 run-coordinator-saga:
-	COORDINATOR_DATABASE_URL=$${COORDINATOR_DATABASE_URL:-postgresql+psycopg://coordinator:ledgermesh_dev@localhost:54321/coordinator} \
+	$(REQUIRE_LOCAL)
+	$(LOCAL_ENV) COORDINATOR_DATABASE_URL=$${COORDINATOR_DATABASE_URL:-postgresql+psycopg://coordinator:ledgermesh_dev@localhost:54321/coordinator} \
 	  CATALOG_URL=$${CATALOG_URL:-http://localhost:8002} \
 	  uv run python -m services.coordinator.app.saga_worker
 
 run-wallet:
-	uv run uvicorn services.wallet.app.main:app --reload --port 8001
+	$(REQUIRE_LOCAL)
+	$(LOCAL_ENV) uv run uvicorn services.wallet.app.main:app --reload --port 8001
 
 run-wallet-saga:
-	WALLET_DATABASE_URL=$${WALLET_DATABASE_URL:-postgresql+psycopg://wallet:ledgermesh_dev@localhost:54322/wallet} \
+	$(REQUIRE_LOCAL)
+	$(LOCAL_ENV) WALLET_DATABASE_URL=$${WALLET_DATABASE_URL:-postgresql+psycopg://wallet:ledgermesh_dev@localhost:54322/wallet} \
 	  uv run python -m services.wallet.app.saga_worker
 
 run-catalog:
-	uv run uvicorn services.catalog.app.main:app --reload --port 8002
+	$(REQUIRE_LOCAL)
+	$(LOCAL_ENV) uv run uvicorn services.catalog.app.main:app --reload --port 8002
 
 run-catalog-saga:
-	CATALOG_DATABASE_URL=$${CATALOG_DATABASE_URL:-postgresql+psycopg://catalog:ledgermesh_dev@localhost:54323/catalog} \
+	$(REQUIRE_LOCAL)
+	$(LOCAL_ENV) CATALOG_DATABASE_URL=$${CATALOG_DATABASE_URL:-postgresql+psycopg://catalog:ledgermesh_dev@localhost:54323/catalog} \
 	  uv run python -m services.catalog.app.saga_worker
 
 run-ledger:
-	uv run uvicorn services.audit_ledger.app.main:app --reload --port 8003
+	$(REQUIRE_LOCAL)
+	$(LOCAL_ENV) uv run uvicorn services.audit_ledger.app.main:app --reload --port 8003
 
 run-audit-consumer:
-	AUDIT_LEDGER_DATABASE_URL=$${AUDIT_LEDGER_DATABASE_URL:-postgresql+psycopg://audit_ledger:ledgermesh_dev@localhost:54324/audit_ledger} \
+	$(REQUIRE_LOCAL)
+	$(LOCAL_ENV) AUDIT_LEDGER_DATABASE_URL=$${AUDIT_LEDGER_DATABASE_URL:-postgresql+psycopg://audit_ledger:ledgermesh_dev@localhost:54324/audit_ledger} \
 	  uv run python -m services.audit_ledger.app.event_worker
 
 infra-up:

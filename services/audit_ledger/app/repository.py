@@ -10,6 +10,7 @@ from typing import Protocol
 from uuid import UUID
 
 from ledgermesh_messaging import EventEnvelope
+from ledgermesh_messaging.safeguards import DEV_DATABASE_PASSWORD, require_safe_database_url
 from sqlalchemy import Connection, Engine, create_engine, select
 from sqlalchemy.dialects.postgresql import insert
 
@@ -37,10 +38,12 @@ class AuditRepository(Protocol):
 
 
 def database_url() -> str:
-    if override := os.environ.get("AUDIT_LEDGER_DATABASE_URL") or os.environ.get("DATABASE_URL"):
-        return override
-    password = os.environ.get("POSTGRES_PASSWORD", "ledgermesh_dev")
-    return f"postgresql+psycopg://audit_ledger:{password}@audit-ledger-db:5432/audit_ledger"
+    url = os.environ.get("AUDIT_LEDGER_DATABASE_URL") or os.environ.get("DATABASE_URL")
+    if not url:
+        password = os.environ.get("POSTGRES_PASSWORD", DEV_DATABASE_PASSWORD)
+        url = f"postgresql+psycopg://audit_ledger:{password}@audit-ledger-db:5432/audit_ledger"
+    # LM-042: the Compose development password is refused outside local/test.
+    return require_safe_database_url(url, setting="AUDIT_LEDGER_DATABASE_URL")
 
 
 @lru_cache
