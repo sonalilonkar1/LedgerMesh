@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from ledgermesh_messaging import CorrelationMiddleware, configure_logging
+from ledgermesh_messaging.safeguards import install_safeguards
 
 from services.audit_ledger.app.errors import AuditLedgerError
 from services.audit_ledger.app.models import (
@@ -13,7 +14,7 @@ from services.audit_ledger.app.models import (
     AuditEventView,
     Problem,
 )
-from services.audit_ledger.app.repository import PostgresAuditRepository, get_engine
+from services.audit_ledger.app.repository import PostgresAuditRepository, database_url, get_engine
 from services.audit_ledger.app.service import AuditLedgerService
 
 SERVICE_NAME = "audit-ledger"
@@ -21,6 +22,9 @@ configure_logging(SERVICE_NAME)  # LM-032: JSON logs with shared field names
 
 app = FastAPI(title="LedgerMesh Audit Ledger Service", version="0.1.0")
 app.add_middleware(CorrelationMiddleware)
+
+# LM-042: internal routes and docs closed outside local/test, safe error bodies.
+install_safeguards(app, SERVICE_NAME, database_url=database_url)
 
 
 @lru_cache
