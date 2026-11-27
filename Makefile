@@ -1,4 +1,4 @@
-.PHONY: install format lint test check contracts-check contracts-compat run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean images-build images-check
+.PHONY: install format lint test check contracts-check contracts-compat security-scan security-deps security-secrets security-images run-coordinator run-coordinator-saga run-wallet run-wallet-saga run-catalog run-catalog-saga run-ledger run-audit-consumer infra-up infra-status infra-smoke infra-logs infra-down infra-reset db-upgrade db-downgrade db-reset db-test test-2pc test-2pc-integration db-seed db-baseline db-prepared-list db-prepared-clean images-build images-check
 
 COMPOSE_FILE ?= infra/compose.yaml
 COMPOSE := docker compose -f $(COMPOSE_FILE)
@@ -28,6 +28,18 @@ contracts-compat:
 	PYTHONPATH=libs/contracts/src uv run python -m ledgermesh_contracts.compatibility --base-ref $(BASE_REF)
 
 check: lint test
+
+# Security scans (LM-042, docs/security.md). security-scan is what CI runs:
+#   security-deps     pip-audit over both uv lockfiles (needs network)
+#   security-secrets  gitleaks over every commit on every ref (needs Docker)
+#   security-images   build the images, then Trivy with the CI policy (needs Docker)
+security-scan: security-deps security-secrets
+
+security-deps:
+	bash infra/scripts/dependency_audit.sh
+
+security-secrets:
+	bash infra/scripts/secret_scan.sh
 
 # Local development only (LM-042): --reload and the Compose database password
 # are refused anywhere but LEDGERMESH_ENV=local or test, which these default to.
@@ -145,6 +157,11 @@ images-build:
 	    --build-arg SERVICE=$$service --build-arg SERVICE_NAME=$$name --build-arg PORT=$$port \
 	    --build-arg LEDGERMESH_REVISION=$(IMAGE_REVISION) \
 	    -t ledgermesh-$$name:$(IMAGE_REVISION) . || exit 1; \
+	done
+
+security-images: images-build
+	for name in coordinator wallet catalog audit-ledger; do \
+	  bash infra/scripts/image_scan.sh ledgermesh-$$name:$(IMAGE_REVISION) || exit 1; \
 	done
 
 images-check: images-build

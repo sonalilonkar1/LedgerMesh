@@ -1,0 +1,50 @@
+name: security
+
+# LM-042: committed-secret and dependency-vulnerability scans.
+#
+# - secrets: gitleaks over every commit on every ref, so a secret that was
+#   committed and later deleted is still found.
+# - dependencies: pip-audit over both uv lockfiles (PyPI advisories and OSV).
+#
+# Container images are scanned by Trivy in image-build.yml when they are built.
+# The weekly run catches advisories published after the code last changed.
+# Both jobs run the same scripts as `make security-scan` (docs/security.md).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    name: Secret scan (gitleaks, full history)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan every commit on every ref
+        run: bash infra/scripts/secret_scan.sh
+
+  dependencies:
+    name: Dependency audit (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: "0.13.6"
+
+      - name: Audit both lockfiles
+        run: bash infra/scripts/dependency_audit.sh
