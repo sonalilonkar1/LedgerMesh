@@ -23,9 +23,14 @@ from ledgermesh_messaging import (
     create_retry_consumer,
     start_metrics_server,
 )
+from ledgermesh_messaging.logs import configure_logging
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from services.catalog.app.repository import PostgresCatalogRepository, database_url, get_engine
+from services.catalog.app.repository import (
+    PostgresCatalogRepository,
+    database_url,
+    get_engine,
+)
 from services.catalog.app.saga import RESERVATION_REJECTED, CatalogSagaHandler
 
 logger = logging.getLogger(__name__)
@@ -78,7 +83,7 @@ async def run(stop: asyncio.Event) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging("catalog")
 
     async def serve() -> None:
         stop = asyncio.Event()

@@ -35,9 +35,14 @@ from ledgermesh_messaging import (
     create_retry_consumer,
     start_metrics_server,
 )
+from ledgermesh_messaging.logs import configure_logging
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from services.wallet.app.repository import PostgresWalletRepository, database_url, get_engine
+from services.wallet.app.repository import (
+    PostgresWalletRepository,
+    database_url,
+    get_engine,
+)
 from services.wallet.app.saga import DEDUCTION_REJECTED, WalletSagaHandler
 
 logger = logging.getLogger(__name__)
@@ -77,7 +82,12 @@ async def run(stop: asyncio.Event) -> None:
 
 
 async def _serve(
-    stop: asyncio.Event, sessions, producer, consumer, retry_consumer, policy: RetryPolicy
+    stop: asyncio.Event,
+    sessions,
+    producer,
+    consumer,
+    retry_consumer,
+    policy: RetryPolicy,
 ) -> None:
     router = FailureRouter(producer, consumer=CONSUMER_GROUP, policy=policy)
     handler = WalletSagaHandler(PostgresWalletRepository(get_engine()))
@@ -98,7 +108,7 @@ async def _serve(
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging("wallet")
 
     async def serve() -> None:
         stop = asyncio.Event()

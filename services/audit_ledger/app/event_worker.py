@@ -24,9 +24,14 @@ from ledgermesh_messaging import (
     in_version_order,
     start_metrics_server,
 )
+from ledgermesh_messaging.logs import configure_logging
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from services.audit_ledger.app.repository import PostgresAuditRepository, database_url, get_engine
+from services.audit_ledger.app.repository import (
+    PostgresAuditRepository,
+    database_url,
+    get_engine,
+)
 
 logger = logging.getLogger(__name__)
 CONSUMER_GROUP = REDEMPTION_EVENTS.consumer_group
@@ -47,6 +52,7 @@ class AuditEventHandler:
         await session.run_sync(
             lambda sync: self.repository.append(envelope, connection=sync.connection())
         )
+        logger.info("audit event recorded")
         return []
 
 
@@ -109,7 +115,7 @@ async def run(stop: asyncio.Event) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging("audit-ledger")
 
     async def serve() -> None:
         stop = asyncio.Event()
