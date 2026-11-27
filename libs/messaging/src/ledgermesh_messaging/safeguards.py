@@ -342,10 +342,17 @@ class SafeguardMiddleware:
 
 
 def _validation_detail(errors: Iterable[dict]) -> str:
-    """Field locations and messages only: never the submitted input or ``ctx``."""
+    """Field locations and messages only: never the submitted input or ``ctx``.
+
+    For an unexpected field the last location element is the key the client
+    sent, which is input too, so it is replaced with a placeholder.
+    """
     parts = []
     for error in errors:
-        location = ".".join(str(part) for part in error.get("loc", ()))
+        loc = list(error.get("loc", ()))
+        if error.get("type") == "extra_forbidden" and loc:
+            loc[-1] = "<unexpected field>"
+        location = ".".join(str(part) for part in loc)
         parts.append(f"{location}: {error.get('msg', 'invalid value')}")
     return "; ".join(parts) or "Invalid request"
 

@@ -162,6 +162,18 @@ def test_validation_errors_are_problems_without_the_submitted_input(environment,
     assert '"field"' not in response.text
 
 
+def test_unexpected_field_names_are_not_echoed(environment):
+    client = TestClient(make_app())
+
+    response = client.post(
+        "/v1/items", json={"name": "a", "quantity": 1, "<script>hunter2</script>": 1}
+    )
+
+    body = assert_safe_problem(response, 422)
+    assert "<script>" not in response.text
+    assert body["detail"] == "body.<unexpected field>: Extra inputs are not permitted"
+
+
 def test_malformed_json_is_a_problem(environment):
     client = TestClient(make_app())
 
