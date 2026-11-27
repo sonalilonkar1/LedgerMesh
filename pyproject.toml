@@ -16,6 +16,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "jsonschema>=4.23,<5",
+    "locust>=2.32,<3",
     "openapi-spec-validator>=0.7,<1",
     "pytest>=8.2,<10",
     "pyyaml>=6,<7",
