@@ -181,3 +181,58 @@ def test_core_ci_runs_for_these_workflows():
     for name in ("deploy-staging.yml", "rollback-staging.yml"):
         assert f".github/workflows/{name}" in paths
     assert "infra/staging/**" in paths
+
+
+# ---- hosted-smoke.yml (LM-050) ------------------------------------------------------
+
+
+def test_hosted_smoke_actions_are_pinned_and_reuse_existing_pins():
+    test_every_action_is_pinned_and_reuses_existing_pins((SMOKE, load(SMOKE)))
+
+
+def test_hosted_smoke_interpolates_nothing_into_shell_scripts():
+    test_no_expression_is_interpolated_into_a_shell_script((SMOKE, load(SMOKE)))
+
+
+def test_hosted_smoke_can_be_run_by_hand_against_a_chosen_url():
+    data = load(SMOKE)
+    assert set(data["on"]) == {"workflow_call", "workflow_dispatch"}
+    assert set(data["on"]["workflow_dispatch"]["inputs"]) == {"base_url"}
+    assert data["on"]["workflow_dispatch"]["inputs"]["base_url"]["required"] is True
+    assert set(data["on"]["workflow_call"]["inputs"]) == {"base_url", "expected_revision"}
+    assert data["permissions"] == {"contents": "read"}
+
+
+def test_hosted_smoke_reaches_the_vm_only_for_the_staging_url():
+    job = load(SMOKE)["jobs"]["smoke"]
+    assert job["environment"] == {"name": "staging", "deployment": False}
+    assert job["permissions"] == {"contents": "read", "id-token": "write"}
+    assert job["timeout-minutes"] <= 30
+    by_name = {step.get("name", step.get("uses", "")): step for step in job["steps"]}
+    auth = next(s for s in job["steps"] if s.get("uses", "").startswith("google-github-actions/"))
+    assert auth["if"] == "steps.plan.outputs.fixtures == 'true'"
+    fixtures = by_name["Create this run's fixtures on the VM"]
+    assert fixtures["if"] == "steps.plan.outputs.fixtures == 'true'"
+    assert fixtures["run"] == 'bash infra/staging/ci/remote.sh fixtures "$RUN_ID"'
+    revision = by_name["Check the running revision on the VM"]
+    assert "remote.sh status --expect" in revision["run"]
+    plan = by_name["Plan the run"]["run"]
+    assert 'run_id="gh${RUN_NUMBER}a${RUN_ATTEMPT}"' in plan
+    assert '"$base" == "${STAGING_URL%/}"' in plan
+    suite = by_name["Run the hosted smoke suite"]
+    assert "make hosted-smoke" in suite["run"]
+    assert "LEDGERMESH_HOSTED_REQUIRE_FIXTURES=true" in suite["run"]
+    upload = next(s for s in job["steps"] if "upload-artifact" in s.get("uses", ""))
+    assert upload["if"] == "always()"
+    assert upload["with"]["path"] == "artifacts/hosted-smoke/"
+    # The fixture and revision steps need the VM credentials, so they come after auth.
+    names = [step.get("name", step.get("uses", "")) for step in job["steps"]]
+    assert names.index(auth.get("name")) < names.index("Create this run's fixtures on the VM")
+    assert names.index("Create this run's fixtures on the VM") < names.index(
+        "Run the hosted smoke suite"
+    )
+
+
+def test_core_ci_runs_for_the_hosted_smoke_workflow():
+    paths = yaml.safe_load((WORKFLOWS / "ci.yml").read_text())[True]["pull_request"]["paths"]
+    assert ".github/workflows/hosted-smoke.yml" in paths
