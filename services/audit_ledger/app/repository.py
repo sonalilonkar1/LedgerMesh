@@ -9,7 +9,7 @@ from functools import lru_cache
 from typing import Protocol
 from uuid import UUID
 
-from ledgermesh_messaging import EventEnvelope
+from ledgermesh_messaging import EventEnvelope, trace_engine
 from sqlalchemy import Connection, Engine, create_engine, select
 from sqlalchemy.dialects.postgresql import insert
 
@@ -45,7 +45,7 @@ def database_url() -> str:
 
 @lru_cache
 def get_engine(url: str | None = None) -> Engine:
-    return create_engine(url or database_url(), pool_pre_ping=True)
+    return trace_engine(create_engine(url or database_url(), pool_pre_ping=True))
 
 
 class PostgresAuditRepository:

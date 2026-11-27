@@ -337,4 +337,4 @@ GitHub Actions runs the full suite, including the PostgreSQL and Kafka integrati
 ## Not yet included
 
 - `EventEnvelope` is provisional until the shared contracts from LM-004 exist.
-- Trace propagation: `headers` are carried through, and LM-033 will fill in `traceparent`.
+- Trace propagation (LM-033): `enqueue` adds the current `traceparent` to the outbox headers, `InboxConsumer` continues it, and retry/DLQ republishing keeps it. See `docs/tracing.md`.

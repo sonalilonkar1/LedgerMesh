@@ -7,6 +7,9 @@ import os
 from dataclasses import dataclass
 from threading import Event, Thread
 
+from ledgermesh_messaging import use_trace_context
+from ledgermesh_messaging.tracing import tracer
+
 from services.coordinator.app.models import InDoubtTransactionView, RecoveryRunResponse
 from services.coordinator.app.repository import PostgresCoordinatorRepository, WorkflowRecord
 from services.coordinator.app.two_phase_commit import TwoPhaseCommitWorkflow
@@ -42,13 +45,26 @@ class TwoPhaseCommitRecovery:
         recovered = 0
         failed = 0
         for candidate in candidates:
-            try:
-                result = self.workflow.recover(candidate.transaction_id)
-                if result.status in {"COMMITTED", "ABORTED"}:
-                    recovered += 1
-            except Exception:  # One poison transaction must not stop the recovery batch.
-                failed += 1
-                LOGGER.exception("2PC recovery failed for %s", candidate.transaction_id)
+            # Recovery continues the trace the redemption was created in (LM-033),
+            # so a recovered commit or abort shows up on that redemption's trace.
+            with (
+                use_trace_context(candidate.trace_context),
+                tracer().start_as_current_span(
+                    "2pc recovery",
+                    attributes={
+                        "ledgermesh.transaction_id": str(candidate.transaction_id),
+                        "ledgermesh.mode": "two_phase_commit",
+                        "ledgermesh.from_state": candidate.status,
+                    },
+                ),
+            ):
+                try:
+                    result = self.workflow.recover(candidate.transaction_id)
+                    if result.status in {"COMMITTED", "ABORTED"}:
+                        recovered += 1
+                except Exception:  # One poison transaction must not stop the recovery batch.
+                    failed += 1
+                    LOGGER.exception("2PC recovery failed for %s", candidate.transaction_id)
         return RecoveryRunResponse(
             scanned=len(candidates),
             recovered=recovered,

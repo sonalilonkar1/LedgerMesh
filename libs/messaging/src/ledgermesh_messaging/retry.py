@@ -37,6 +37,7 @@ from aiokafka import AIOKafkaConsumer
 from .envelope import EnvelopeError, EventEnvelope
 from .kafka import create_consumer
 from .topics import MAIN_TOPICS, TopicSpec, dead_letter_topic, retry_topic
+from .tracing import trace_headers_from
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +241,7 @@ class FailureRouter:
         delay = self.policy.redelivery_delay(redelivery)
         source = source_topic(record)
         headers = {
+            **trace_headers_from(headers_of(record)),
             **self._origin(record),
             RETRY_COUNT: str(redelivery),
             NOT_BEFORE_MS: str(int((self._clock() + delay) * 1000)),
@@ -265,6 +267,7 @@ class FailureRouter:
         """Park ``record`` on its source topic's DLQ with the reason in its headers."""
         source = source_topic(record)
         headers = {
+            **trace_headers_from(headers_of(record)),
             **self._origin(record),
             RETRY_COUNT: str(retry_count(record)),
             DLQ_REASON: str(reason),

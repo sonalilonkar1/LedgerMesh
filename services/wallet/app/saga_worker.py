@@ -31,9 +31,11 @@ from ledgermesh_messaging import (
     OutboxPublisher,
     RetryPolicy,
     configure_logging,
+    configure_tracing,
     create_consumer,
     create_producer,
     create_retry_consumer,
+    trace_engine,
 )
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -51,7 +53,7 @@ def bootstrap_servers() -> str:
 
 async def run(stop: asyncio.Event) -> None:
     policy = RetryPolicy.from_env()  # fails fast on an invalid LM_RETRY_* value
-    engine = create_async_engine(database_url(), pool_pre_ping=True)
+    engine = trace_engine(create_async_engine(database_url(), pool_pre_ping=True))
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     producer = create_producer(bootstrap_servers())
     consumer = create_consumer(bootstrap_servers(), CONSUMER_GROUP, WALLET_COMMANDS.name)
@@ -90,6 +92,7 @@ async def _serve(
 
 def main() -> None:
     configure_logging("wallet")
+    configure_tracing("wallet")
 
     async def serve() -> None:
         stop = asyncio.Event()
