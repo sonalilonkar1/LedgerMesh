@@ -76,10 +76,15 @@ def test_internal_routes_are_hidden_outside_local_and_test(monkeypatch, environm
     if environment:
         monkeypatch.setenv("LEDGERMESH_ENV", environment)
 
-    response = getattr(client(), method)(path)
+    http = client()
+    response = getattr(http, method)(path)
+    unknown = getattr(http, method)("/no-such-route")
 
     # 404, not 500: the failing dependency was never reached.
     assert_safe_problem(response, 404)
+    # Byte for byte the same as a route that does not exist.
+    assert response.content == unknown.content
+    assert response.headers.raw == unknown.headers.raw
 
 
 @pytest.mark.parametrize(("method", "path"), INTERNAL_ROUTES)

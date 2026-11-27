@@ -224,15 +224,24 @@ def problem_body(status: int, detail: str | None = None, problem_type: str = "ab
 async def _send_problem(
     send: Any, status: int, detail: str | None = None, headers: Iterable[tuple[bytes, bytes]] = ()
 ) -> None:
-    body = json.dumps(problem_body(status, detail)).encode()
+    # Byte for byte what Starlette's JSONResponse sends (its ``render`` and
+    # ``init_headers``), so a closed route cannot be told apart from an unknown
+    # one by its body, Content-Length or header order.
+    body = json.dumps(
+        problem_body(status, detail),
+        ensure_ascii=False,
+        allow_nan=False,
+        indent=None,
+        separators=(",", ":"),
+    ).encode("utf-8")
     await send(
         {
             "type": "http.response.start",
             "status": status,
             "headers": [
-                (b"content-type", b"application/problem+json"),
-                (b"content-length", str(len(body)).encode()),
                 *headers,
+                (b"content-length", str(len(body)).encode()),
+                (b"content-type", b"application/problem+json"),
             ],
         }
     )

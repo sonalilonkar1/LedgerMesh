@@ -92,8 +92,10 @@ def test_internal_routes_and_docs_are_closed_outside_local_and_test(environment,
     for path in ("/internal/v1/things", "/internal", "/docs", "/redoc", "/openapi.json"):
         response = client.get(path)
         assert_safe_problem(response, 404)
-        # A closed route is indistinguishable from one that does not exist.
-        assert response.json() == unknown.json()
+        # A closed route is indistinguishable from one that does not exist:
+        # same bytes, same headers in the same order.
+        assert response.content == unknown.content
+        assert response.headers.raw == unknown.headers.raw
 
 
 @pytest.mark.parametrize("value", ["local", "test"])
