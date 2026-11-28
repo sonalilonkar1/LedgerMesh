@@ -114,7 +114,7 @@ for name, conclusion in json.loads(os.environ["FAKE_JOBS"]):
         )
         return result, outputs
 
-    run.old, run.good, run.feature = old, good, feature
+    run.old, run.good, run.feature, run.repo = old, good, feature, repo
     return run
 
 
@@ -130,7 +130,10 @@ def triggered(gate, **overrides: str) -> dict[str, str]:
         "RUN_EVENT": "workflow_run",
         "RUN_BRANCH": "main",
         "RUN_REPO": "sonalilonkar1/LedgerMesh",
-        "RUN_SHA": gate.good,
+        # A workflow_run-triggered run's head_sha is main's tip when it was
+        # queued, not what it built; the gate must ignore it.
+        "RUN_SHA": "0" * 40,
+        "RUN_TITLE": f"Service images {gate.good}",
         "FAKE_JOBS": published(),
     }
     env.update(overrides)
@@ -170,7 +173,8 @@ def test_gate_skips_runs_that_published_nothing_for_main(gate, overrides):
     [
         ("workflow_run", {"FAKE_JOBS": published(images=IMAGES[:3])}, "only 3 of 4"),
         ("workflow_run", {"FAKE_JOBS": published("failure")}, "concluded 'failure'"),
-        ("workflow_run", {"RUN_SHA": "feature"}, "invalid head SHA"),
+        ("workflow_run", {"RUN_TITLE": "Service images"}, "does not name the commit"),
+        ("workflow_run", {"RUN_TITLE": "Service images feature"}, "does not name the commit"),
         ("workflow_run", {"FAKE_DIGEST_STATUS": "3"}, "never published"),
         ("workflow_run", {"FAKE_DIGEST_STATUS": "1"}, "could not look up"),
         ("workflow_dispatch", {"GITHUB_REF": "refs/heads/feature"}, "only run from main"),
@@ -187,6 +191,38 @@ def test_gate_fails_closed(gate, event, overrides, message):
     assert result.returncode == 1
     assert message in result.stderr
     assert "deploy" not in outputs
+
+
+def test_gate_deploys_the_commit_the_images_run_built_not_its_head_sha(gate):
+    # Quick merges: the images run for `good` was queued when `newer` was
+    # already main's tip, so its head_sha is `newer`, whose images are not
+    # published yet. Only the title names what the run built.
+    result, outputs = gate("workflow_run", **triggered(gate, RUN_SHA=gate.feature))
+
+    assert result.returncode == 0, result.stderr
+    assert outputs["sha"] == gate.good
+
+
+def test_gate_never_moves_staging_back_to_an_older_commit(gate):
+    git(gate.repo, "checkout", "-q", "--detach", gate.good)
+    newer = commit(gate.repo, "README.md", "newer merge")
+    git(gate.repo, "update-ref", "refs/remotes/origin/main", newer)
+
+    # The older commit's images finished after the newer commit landed.
+    result, outputs = gate("workflow_run", **triggered(gate))
+    assert result.returncode == 0, result.stderr
+    assert outputs == {"deploy": "false"}
+    assert "no longer main's tip" in result.stdout
+
+    # The newest commit's own run deploys it.
+    result, outputs = gate("workflow_run", **triggered(gate, RUN_TITLE=f"Service images {newer}"))
+    assert result.returncode == 0, result.stderr
+    assert outputs["sha"] == newer
+
+    # A manual run may still deploy the older commit, for recovery.
+    result, outputs = gate("workflow_dispatch", INPUT_SHA=gate.good)
+    assert result.returncode == 0, result.stderr
+    assert outputs["sha"] == gate.good
 
 
 def test_gate_dispatch_requires_a_commit_on_main_with_the_deploy_tooling(gate):

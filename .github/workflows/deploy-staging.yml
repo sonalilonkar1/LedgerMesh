@@ -35,7 +35,9 @@ permissions:
 
 # One staging change at a time, never cancelled half-way. GitHub keeps only
 # the newest pending run per group, so after several quick merges an
-# intermediate commit may be skipped and the newest one deployed.
+# intermediate commit may be skipped and the newest one deployed. Image runs
+# can also finish out of order: the gate deploys a workflow_run's commit only
+# while it is still main's tip, so an older commit never replaces a newer one.
 concurrency:
   group: staging-deploy
   cancel-in-progress: false
@@ -74,7 +76,9 @@ jobs:
           RUN_EVENT: ${{ github.event.workflow_run.event }}
           RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
           RUN_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
-          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          # "Service images <sha it built>" (run-name in images.yml); the
+          # run's head_sha is main's tip when it was queued, not that commit.
+          RUN_TITLE: ${{ github.event.workflow_run.display_title }}
         run: bash infra/staging/ci/gate.sh
 
   deploy:

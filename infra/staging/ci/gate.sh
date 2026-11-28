@@ -8,8 +8,10 @@
 #   EVENT            github.event_name (workflow_run | workflow_dispatch)
 #   GITHUB_REPOSITORY, GITHUB_REF, GITHUB_OUTPUT, GH_TOKEN (actions: read)
 #   GHCR_USER, GHCR_TOKEN   for infra/scripts/ghcr_digest.sh (packages: read)
-#   workflow_run:     RUN_ID, RUN_CONCLUSION, RUN_EVENT, RUN_BRANCH, RUN_REPO, RUN_SHA
-#                     (the triggering "Service images" run)
+#   workflow_run:     RUN_ID, RUN_CONCLUSION, RUN_EVENT, RUN_BRANCH, RUN_REPO,
+#                     RUN_TITLE (the triggering "Service images" run; its
+#                     display title, set by `run-name` in images.yml, is
+#                     "Service images <sha of the commit it built>")
 #   workflow_dispatch: INPUT_SHA
 #
 # Writes deploy=true|false, sha and digests to $GITHUB_OUTPUT.
@@ -18,6 +20,19 @@
 # job was skipped but the run still concluded success; or a pull request)
 # is not an error: the run ends green with deploy=false and a notice. Anything
 # that looks wrong about the commit or its images fails the job.
+#
+# The revision comes from RUN_TITLE, never from the run's head_sha: a
+# workflow_run-triggered run's head_sha is main's tip when it was queued,
+# not the commit core-ci tested and images.yml built
+# (github.event.workflow_run.head_sha in images.yml), so after quick merges
+# it names a newer commit whose images may not exist yet.
+#
+# A workflow_run deploys only main's current tip. Image runs for consecutive
+# commits run in parallel and finish in any order; a run for an older commit
+# skips with a notice instead of deploying over a newer one. The tip's own
+# run deploys it (core-ci and images.yml run for every push to main). A
+# manual workflow_dispatch may still deploy any published commit on main,
+# for recovery.
 #
 # LEDGERMESH_GHCR_DIGEST overrides the digest lookup command (tests only).
 set -euo pipefail
@@ -52,8 +67,10 @@ case "$EVENT" in
     [[ "${RUN_BRANCH:-}" == "main" ]] || skip "Service images ran for branch '${RUN_BRANCH:-}'"
     [[ "${RUN_REPO:-}" == "$GITHUB_REPOSITORY" ]] || skip "Service images ran for repository '${RUN_REPO:-}'"
     [[ "${RUN_ID:-}" =~ ^[0-9]+$ ]] || fail "invalid run id"
-    sha="${RUN_SHA:-}"
-    [[ "$sha" =~ $SHA_RE ]] || fail "invalid head SHA from the Service images run"
+    title_re='^Service images ([0-9a-f]{40})$'
+    [[ "${RUN_TITLE:-}" =~ $title_re ]] \
+      || fail "Service images run $RUN_ID does not name the commit it built (title '${RUN_TITLE:-}'); deploy it with workflow_dispatch"
+    sha="${BASH_REMATCH[1]}"
 
     # The publish jobs are named by image-build.yml ("publish <image>") under
     # the caller job "publish" in images.yml. If core-ci failed they are skipped.
@@ -84,6 +101,11 @@ esac
 # Only commits that are on main, and that carry the deploy tooling.
 git cat-file -e "$sha^{commit}" 2>/dev/null || fail "$sha is not a commit in this repository"
 git merge-base --is-ancestor "$sha" origin/main || fail "$sha is not on main"
+if [[ "$EVENT" == "workflow_run" ]]; then
+  tip="$(git rev-parse --verify origin/main^{commit})" || fail "could not resolve origin/main"
+  [[ "$sha" == "$tip" ]] \
+    || skip "$sha is no longer main's tip ($tip is newer and its own run deploys it); staging never moves back to an older commit automatically"
+fi
 git cat-file -e "$sha:infra/staging/deploy.sh" 2>/dev/null \
   || fail "$sha has no infra/staging/deploy.sh (it predates LM-049); deploy a newer commit"
 
