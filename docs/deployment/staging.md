@@ -153,7 +153,7 @@ If anything in steps 2 to 4 fails, `deploy.sh` saves the failing containers' log
 
 **Migrations must stay backward compatible** with the previous release (add first, remove in a later release): a rollback runs the previous image against the newer schema, and never migrates down.
 
-**Skipped commits.** GitHub keeps only the newest pending run per concurrency group, so after several quick merges an intermediate commit may never be deployed; the newest one is.
+**Skipped commits.** GitHub keeps only the newest pending run per concurrency group, so after several quick merges an intermediate commit may never be deployed; the newest one is. Image runs can also finish out of order; the gate then skips the older commit (see **Gate** above), so staging never moves back to an older commit by itself.
 
 **Pull requests can never deploy:** the workflow has no `pull_request` trigger; the gate checks the triggering run's event and repository (a fork's pull request can have a branch called `main`); the Workload Identity provider only accepts tokens for `refs/heads/main` of `sonalilonkar1/LedgerMesh` (§12); and the `staging` environment allows only `main`. A `workflow_run` workflow only runs once its file is on the default branch, so nothing deploys before this workflow is merged.
 
