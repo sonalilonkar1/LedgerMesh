@@ -14,6 +14,13 @@ The messaging library's test-only environment remains separate at
 The same `infra/Dockerfile.service` also builds the production images that CI
 publishes to GHCR. See [Service images (LM-047)](IMAGES.md).
 
+The hosted staging environment (LM-048) runs those images with its own Compose
+file, `infra/staging/compose.yaml`: no host ports except the Caddy HTTPS
+gateway, one password per database, data on a persistent disk, and the Saga
+workers and audit consumer as their own containers. See the
+[staging runbook](../docs/deployment/staging.md) and
+[ADR-002](../docs/architecture/ADR-002-hosted-staging.md).
+
 ## Start the stack
 
 From the repository root:
@@ -113,7 +120,9 @@ Coordinator decision and participant logs before issuing a specific `COMMIT
 PREPARED` or `ROLLBACK PREPARED`; bulk cleanup could violate the durable 2PC
 decision. Prepared transactions count against `max_prepared_transactions` and
 can hold locks indefinitely, so alerting on their age and count is required in
-the hosted environment.
+the hosted environment. In staging, `infra/staging/stack.sh verify
+prepared-transactions` reports both and fails when the oldest is older than a
+threshold; a paging alert is still a follow-up.
 
 `max_prepared_transactions` is a server-wide capacity, is allocated in shared
 memory at PostgreSQL startup, and therefore requires a server restart when

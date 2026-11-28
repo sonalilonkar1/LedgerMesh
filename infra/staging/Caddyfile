@@ -1,0 +1,154 @@
+# Public HTTPS gateway for hosted staging (LM-048).
+#
+# An explicit allowlist: only the routes below are forwarded and every other
+# request gets 404. Never add /internal/*, FastAPI /docs or /openapi.json, or
+# any participant write route (deductions, refunds, prepare, commit, abort,
+# reservations, releases, fulfillments, audit-events). The 2PC participant
+# routes are service-to-service only and stay on the private networks.
+#
+# Environment (set by compose.yaml):
+#   LEDGERMESH_SITE_ADDRESS  <ip-with-dashes>.sslip.io on the VM, localhost locally
+#   LEDGERMESH_TLS           the ACME account email on the VM (automatic
+#                            certificates), `internal` locally (Caddy's local CA)
+#
+# Public contract (see docs/deployment/staging.md):
+#   GET  /health                                         -> coordinator /health
+#   POST /v1/redemptions                                 -> coordinator
+#   GET  /v1/redemptions/{transaction_id}                -> coordinator
+#   GET  /health/{coordinator|wallet|catalog|audit-ledger} -> that service's /health
+#   GET  /wallet/v1/wallets/{user_id}                    -> wallet /v1/wallets/{user_id}
+#   GET  /catalog/v1/rewards[/{reward_id}]               -> catalog /v1/rewards[/{reward_id}]
+#   GET  /audit/v1/transactions/{transaction_id}/events  -> audit ledger
+{
+	# The admin API stays inside the container; it is never published.
+	admin localhost:2019
+	# The firewall allows TCP only, so do not advertise HTTP/3 over UDP.
+	servers {
+		protocols h1 h2
+	}
+	# The local CA is used only with `tls internal`; there is no trust store
+	# to install it into inside the container.
+	skip_install_trust
+}
+
+{$LEDGERMESH_SITE_ADDRESS} {
+	tls {$LEDGERMESH_TLS}
+
+	request_body {
+		max_size 64KB
+	}
+
+	header {
+		# Deleting a header defers it to the response, so this also removes
+		# the upstream's `server: uvicorn`.
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+	}
+
+	# ---- Coordinator --------------------------------------------------------
+
+	@coordinator_health {
+		method GET
+		path /health
+	}
+	handle @coordinator_health {
+		reverse_proxy coordinator:8000
+	}
+
+	@create_redemption {
+		method POST
+		path /v1/redemptions
+	}
+	handle @create_redemption {
+		reverse_proxy coordinator:8000
+	}
+
+	@get_redemption {
+		method GET
+		path_regexp ^/v1/redemptions/[0-9a-fA-F-]{36}$
+	}
+	handle @get_redemption {
+		reverse_proxy coordinator:8000
+	}
+
+	# ---- Per-service health -------------------------------------------------
+
+	@health_coordinator {
+		method GET
+		path /health/coordinator
+	}
+	handle @health_coordinator {
+		rewrite * /health
+		reverse_proxy coordinator:8000
+	}
+
+	@health_wallet {
+		method GET
+		path /health/wallet
+	}
+	handle @health_wallet {
+		rewrite * /health
+		reverse_proxy wallet:8001
+	}
+
+	@health_catalog {
+		method GET
+		path /health/catalog
+	}
+	handle @health_catalog {
+		rewrite * /health
+		reverse_proxy catalog:8002
+	}
+
+	@health_audit_ledger {
+		method GET
+		path /health/audit-ledger
+	}
+	handle @health_audit_ledger {
+		rewrite * /health
+		reverse_proxy audit-ledger:8003
+	}
+
+	# ---- Read-only participant views -----------------------------------------
+	# Identifiers may not start with a dot, so `.` and `..` never match.
+
+	@wallet_balance {
+		method GET
+		path_regexp ^/wallet/v1/wallets/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$
+	}
+	handle @wallet_balance {
+		uri strip_prefix /wallet
+		reverse_proxy wallet:8001
+	}
+
+	@catalog_rewards {
+		method GET
+		path_regexp ^/catalog/v1/rewards(/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127})?$
+	}
+	handle @catalog_rewards {
+		uri strip_prefix /catalog
+		reverse_proxy catalog:8002
+	}
+
+	@audit_events {
+		method GET
+		path_regexp ^/audit/v1/transactions/[0-9a-fA-F-]{36}/events$
+	}
+	handle @audit_events {
+		uri strip_prefix /audit
+		reverse_proxy audit-ledger:8003
+	}
+
+	# ---- Optional web UI (PR #97, disabled by default) -----------------------
+	# Put a snippet in infra/staging/caddy.d/, mount that directory at
+	# /etc/caddy/caddy.d, and uncomment the next line. See
+	# docs/deployment/staging.md, "Optional web UI".
+	# import /etc/caddy/caddy.d/*.caddy
+
+	# ---- Everything else ----------------------------------------------------
+
+	handle {
+		respond 404
+	}
+}

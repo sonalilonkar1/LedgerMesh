@@ -28,7 +28,7 @@ The default command, `infra/docker/start-service.sh`:
 2. runs migrations only if `RUN_MIGRATIONS=true` (default `false`, so an image can start without a database);
 3. starts uvicorn for that service.
 
-Deployments set `RUN_MIGRATIONS=true` and `DATABASE_URL`. Any other module in the image can be run by overriding the command, for example the Saga worker:
+Deployments set `RUN_MIGRATIONS=true` and `DATABASE_URL`, or run the migrations as a separate one-off step, as hosted staging does (`infra/staging/stack.sh migrate`, LM-048). Any other module in the image can be run by overriding the command, for example the Saga worker:
 
 ```bash
 docker run --rm -e DATABASE_URL=... -e KAFKA_BOOTSTRAP_SERVERS=... \
@@ -127,4 +127,4 @@ The first publish creates the four packages under the repository owner's account
     ```
 - **Manage Actions access:** in the same package settings, make sure the LedgerMesh repository has **Write** access, so later workflow runs can push new tags.
 
-Provisioning the host and deploying are LM-048 and LM-049.
+The staging host is provisioned by LM-048 ([ADR-002](../docs/architecture/ADR-002-hosted-staging.md), [staging runbook](../docs/deployment/staging.md)); it runs these images by full commit SHA and, because the packages are public, needs no registry credential. Automatic deployment from `main` is LM-049.

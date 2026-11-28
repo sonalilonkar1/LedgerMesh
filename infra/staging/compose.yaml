@@ -1,0 +1,347 @@
+# Hosted staging stack (LM-048). See docs/deployment/staging.md and ADR-002.
+#
+# Differences from the local stack (infra/compose.yaml, LM-003):
+# - Runs the published GHCR images; nothing is built here. The image
+#   references come from LEDGERMESH_*_IMAGE and are required.
+# - Only Caddy publishes host ports (TCP 80 and 443). Kafka, the databases and
+#   the service APIs are reachable only on private Docker networks.
+# - Only Caddy is on a network with internet egress (it needs it for ACME).
+#   Every other container, the APIs included, is on internal networks only,
+#   so none can reach the internet or the GCE metadata server (and with it
+#   the VM service account, which can read every database password).
+# - Each database has its own required password variable; there are no
+#   defaults, so a missing secret stops Compose before anything starts.
+# - Data is bind-mounted from LEDGERMESH_DATA_DIR (the persistent disk at
+#   /var/lib/ledgermesh on the VM), so it survives container and VM recreation.
+# - Migrations and the LM-018 topic bootstrap are explicit one-off steps run by
+#   infra/staging/stack.sh before the services start (RUN_MIGRATIONS=false).
+# - The Saga workers and the audit consumer run as their own containers.
+#
+# Run it through infra/staging/stack.sh, which sets the required variables.
+
+name: ledgermesh-staging
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-postgres-healthcheck: &postgres-healthcheck
+  test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+  interval: 5s
+  timeout: 5s
+  retries: 12
+  start_period: 10s
+
+x-service-healthcheck: &service-healthcheck
+  interval: 5s
+  timeout: 3s
+  retries: 12
+  start_period: 10s
+
+x-postgres: &postgres
+  image: postgres:17.11-alpine
+  restart: unless-stopped
+  shm_size: 128mb
+  # Prepared transactions are required by 2PC (LM-012). Verified after
+  # startup by `stack.sh verify prepared-transactions`.
+  command: ["postgres", "-c", "max_prepared_transactions=100"]
+  healthcheck:
+    <<: *postgres-healthcheck
+  logging: *logging
+  deploy:
+    resources:
+      limits:
+        cpus: "1.0"
+        memory: 1g
+  networks: [backend]
+
+x-api: &api
+  restart: unless-stopped
+  init: true
+  logging: *logging
+  deploy:
+    resources:
+      limits:
+        cpus: "1.0"
+        memory: 512m
+  networks: [backend, proxy]
+
+x-worker: &worker
+  restart: unless-stopped
+  init: true
+  # Workers have no HTTP server, so the image's /health check cannot pass.
+  # `stack.sh verify workers` checks that they stay running instead (and
+  # starts them without `compose up --wait`, which rejects disabled checks).
+  healthcheck:
+    disable: true
+  logging: *logging
+  deploy:
+    resources:
+      limits:
+        cpus: "0.5"
+        memory: 384m
+  networks: [backend]
+
+services:
+  kafka:
+    image: apache/kafka:4.4.0
+    restart: unless-stopped
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_LISTENERS: CONTROLLER://:29093,INTERNAL://:19092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:19092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics are created only by the LM-018 bootstrap.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: "-Xms512m -Xmx1g"
+      # Fixed for the lifetime of the data directory: Kafka refuses to start
+      # on existing data formatted with a different cluster id. Not a secret.
+      CLUSTER_ID: N_QH_5q0SfeLAabnBsEjYg
+    volumes:
+      - ${LEDGERMESH_DATA_DIR:?LEDGERMESH_DATA_DIR is required}/kafka:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 2g
+    networks: [backend]
+
+  coordinator-db:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: coordinator
+      POSTGRES_PASSWORD: ${COORDINATOR_DB_PASSWORD:?COORDINATOR_DB_PASSWORD is required}
+      POSTGRES_DB: coordinator
+    volumes:
+      - ${LEDGERMESH_DATA_DIR:?LEDGERMESH_DATA_DIR is required}/postgres/coordinator:/var/lib/postgresql/data
+
+  wallet-db:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: wallet
+      POSTGRES_PASSWORD: ${WALLET_DB_PASSWORD:?WALLET_DB_PASSWORD is required}
+      POSTGRES_DB: wallet
+    volumes:
+      - ${LEDGERMESH_DATA_DIR:?LEDGERMESH_DATA_DIR is required}/postgres/wallet:/var/lib/postgresql/data
+
+  catalog-db:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: catalog
+      POSTGRES_PASSWORD: ${CATALOG_DB_PASSWORD:?CATALOG_DB_PASSWORD is required}
+      POSTGRES_DB: catalog
+    volumes:
+      - ${LEDGERMESH_DATA_DIR:?LEDGERMESH_DATA_DIR is required}/postgres/catalog:/var/lib/postgresql/data
+
+  audit-ledger-db:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: audit_ledger
+      POSTGRES_PASSWORD: ${AUDIT_LEDGER_DB_PASSWORD:?AUDIT_LEDGER_DB_PASSWORD is required}
+      POSTGRES_DB: audit_ledger
+    volumes:
+      - ${LEDGERMESH_DATA_DIR:?LEDGERMESH_DATA_DIR is required}/postgres/audit-ledger:/var/lib/postgresql/data
+
+  # ---- Service APIs (default image command: infra/docker/start-service.sh) ----
+
+  coordinator:
+    <<: *api
+    image: ${LEDGERMESH_COORDINATOR_IMAGE:?LEDGERMESH_COORDINATOR_IMAGE is required}
+    environment:
+      SERVICE_NAME: coordinator
+      LEDGERMESH_ENV: staging
+      RUN_MIGRATIONS: "false"
+      DATABASE_URL: postgresql+psycopg://coordinator:${COORDINATOR_DB_PASSWORD:?COORDINATOR_DB_PASSWORD is required}@coordinator-db:5432/coordinator
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      COORDINATOR_RECOVERY_ENABLED: "true"
+      COORDINATOR_RECOVERY_INTERVAL_SECONDS: "5"
+      WALLET_URL: http://wallet:8001
+      CATALOG_URL: http://catalog:8002
+    depends_on:
+      coordinator-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      <<: *service-healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+
+  wallet:
+    <<: *api
+    image: ${LEDGERMESH_WALLET_IMAGE:?LEDGERMESH_WALLET_IMAGE is required}
+    environment:
+      SERVICE_NAME: wallet
+      LEDGERMESH_ENV: staging
+      RUN_MIGRATIONS: "false"
+      DATABASE_URL: postgresql+psycopg://wallet:${WALLET_DB_PASSWORD:?WALLET_DB_PASSWORD is required}@wallet-db:5432/wallet
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+    depends_on:
+      wallet-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      <<: *service-healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2)"]
+
+  catalog:
+    <<: *api
+    image: ${LEDGERMESH_CATALOG_IMAGE:?LEDGERMESH_CATALOG_IMAGE is required}
+    environment:
+      SERVICE_NAME: catalog
+      LEDGERMESH_ENV: staging
+      RUN_MIGRATIONS: "false"
+      DATABASE_URL: postgresql+psycopg://catalog:${CATALOG_DB_PASSWORD:?CATALOG_DB_PASSWORD is required}@catalog-db:5432/catalog
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+    depends_on:
+      catalog-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      <<: *service-healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=2)"]
+
+  audit-ledger:
+    <<: *api
+    image: ${LEDGERMESH_AUDIT_LEDGER_IMAGE:?LEDGERMESH_AUDIT_LEDGER_IMAGE is required}
+    environment:
+      SERVICE_NAME: audit-ledger
+      LEDGERMESH_ENV: staging
+      RUN_MIGRATIONS: "false"
+      DATABASE_URL: postgresql+psycopg://audit_ledger:${AUDIT_LEDGER_DB_PASSWORD:?AUDIT_LEDGER_DB_PASSWORD is required}@audit-ledger-db:5432/audit_ledger
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+    depends_on:
+      audit-ledger-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      <<: *service-healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/health', timeout=2)"]
+
+  # ---- Kafka consumers (Make targets run-*-saga / run-audit-consumer locally) ----
+
+  coordinator-saga:
+    <<: *worker
+    image: ${LEDGERMESH_COORDINATOR_IMAGE:?LEDGERMESH_COORDINATOR_IMAGE is required}
+    command: ["python", "-m", "services.coordinator.app.saga_worker"]
+    environment:
+      SERVICE_NAME: coordinator-saga
+      LEDGERMESH_ENV: staging
+      DATABASE_URL: postgresql+psycopg://coordinator:${COORDINATOR_DB_PASSWORD:?COORDINATOR_DB_PASSWORD is required}@coordinator-db:5432/coordinator
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      CATALOG_URL: http://catalog:8002
+    depends_on:
+      coordinator:
+        condition: service_healthy
+
+  wallet-saga:
+    <<: *worker
+    image: ${LEDGERMESH_WALLET_IMAGE:?LEDGERMESH_WALLET_IMAGE is required}
+    command: ["python", "-m", "services.wallet.app.saga_worker"]
+    environment:
+      SERVICE_NAME: wallet-saga
+      LEDGERMESH_ENV: staging
+      DATABASE_URL: postgresql+psycopg://wallet:${WALLET_DB_PASSWORD:?WALLET_DB_PASSWORD is required}@wallet-db:5432/wallet
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+    depends_on:
+      wallet:
+        condition: service_healthy
+
+  catalog-saga:
+    <<: *worker
+    image: ${LEDGERMESH_CATALOG_IMAGE:?LEDGERMESH_CATALOG_IMAGE is required}
+    command: ["python", "-m", "services.catalog.app.saga_worker"]
+    environment:
+      SERVICE_NAME: catalog-saga
+      LEDGERMESH_ENV: staging
+      DATABASE_URL: postgresql+psycopg://catalog:${CATALOG_DB_PASSWORD:?CATALOG_DB_PASSWORD is required}@catalog-db:5432/catalog
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+    depends_on:
+      catalog:
+        condition: service_healthy
+
+  audit-consumer:
+    <<: *worker
+    image: ${LEDGERMESH_AUDIT_LEDGER_IMAGE:?LEDGERMESH_AUDIT_LEDGER_IMAGE is required}
+    command: ["python", "-m", "services.audit_ledger.app.event_worker"]
+    environment:
+      SERVICE_NAME: audit-consumer
+      LEDGERMESH_ENV: staging
+      DATABASE_URL: postgresql+psycopg://audit_ledger:${AUDIT_LEDGER_DB_PASSWORD:?AUDIT_LEDGER_DB_PASSWORD is required}@audit-ledger-db:5432/audit_ledger
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+    depends_on:
+      audit-ledger:
+        condition: service_healthy
+
+  # ---- Public HTTPS gateway: the only container with host ports ----
+
+  caddy:
+    image: caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+    restart: unless-stopped
+    ports:
+      - "${LEDGERMESH_HTTP_PORT:-80}:80/tcp"
+      - "${LEDGERMESH_HTTPS_PORT:-443}:443/tcp"
+    environment:
+      LEDGERMESH_SITE_ADDRESS: ${LEDGERMESH_SITE_ADDRESS:?LEDGERMESH_SITE_ADDRESS is required}
+      LEDGERMESH_TLS: ${LEDGERMESH_TLS:?LEDGERMESH_TLS is required}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${LEDGERMESH_DATA_DIR:?LEDGERMESH_DATA_DIR is required}/caddy/data:/data
+      - ${LEDGERMESH_DATA_DIR:?LEDGERMESH_DATA_DIR is required}/caddy/config:/config
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      wallet:
+        condition: service_healthy
+      catalog:
+        condition: service_healthy
+      audit-ledger:
+        condition: service_healthy
+    healthcheck:
+      # The admin API listens on localhost inside the container only.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+    networks: [edge, proxy]
+
+  # Optional web UI hook (PR #97, services/web, not merged): see
+  # docs/deployment/staging.md, "Optional web UI". Add it as a `web` service
+  # with `profiles: ["web"]` so it never starts unless that profile is enabled.
+
+networks:
+  # No internet egress and no published ports: Kafka, databases, workers, APIs.
+  backend:
+    internal: true
+  # Caddy to the four APIs only; also internal, so the APIs have no egress.
+  proxy:
+    internal: true
+  # Caddy only: egress for Let's Encrypt and the published ports 80/443.
+  edge: {}
