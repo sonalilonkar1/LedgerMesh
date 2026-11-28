@@ -3,7 +3,6 @@ from .consumer import InboxConsumer, PermanentError, TransientError
 from .envelope import EnvelopeError, EventEnvelope
 from .inbox import Handler, ProcessResult, process_once
 from .kafka import create_consumer, create_producer
-from .metrics import MetricsServer, render_metrics, start_metrics_server
 from .logs import (
     CORRELATION_HEADER,
     CorrelationMiddleware,
@@ -13,6 +12,7 @@ from .logs import (
     log_context,
     log_fault_injected,
 )
+from .metrics import MetricsServer, render_metrics, start_metrics_server
 from .outbox import OutgoingMessage, enqueue
 from .publisher import BatchResult, OutboxPublisher
 from .retry import (

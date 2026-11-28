@@ -52,7 +52,11 @@ class AuditEventHandler:
         await session.run_sync(
             lambda sync: self.repository.append(envelope, connection=sync.connection())
         )
-        logger.info("audit event recorded")
+        # InboxConsumer has already bound the event and transaction context.
+        logger.info(
+            "audit event recorded",
+            extra={"state": envelope.payload.get("to_status")},
+        )
         return []
 
 

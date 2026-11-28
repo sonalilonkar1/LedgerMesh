@@ -15,8 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .envelope import EnvelopeError, EventEnvelope
 from .inbox import Handler, ProcessResult, process_once
-from .retry import DeadLetterReason, FailureRouter, not_before
 from .logs import envelope_fields, log_context
+from .retry import DeadLetterReason, FailureRouter, not_before
 
 logger = logging.getLogger(__name__)
 
@@ -120,27 +120,33 @@ class InboxConsumer:
             await self._reject(record, exc, DeadLetterReason.INVALID_ENVELOPE)
             return None
 
+        # Every log while handling this message (handler, retries, dead
+        # letters) carries its transaction, event and correlation ids (LM-032).
         with log_context(**envelope_fields(envelope)):
-            for attempt in range(1, self._max_attempts + 1):
-                try:
-                    return await self._process(envelope)
-                except PermanentError as exc:
-                    await self._reject(record, exc, DeadLetterReason.PERMANENT_ERROR)
+            return await self._handle_envelope(record, envelope)
+
+    async def _handle_envelope(
+        self, record: ConsumerRecord, envelope: EventEnvelope
+    ) -> ProcessResult | None:
+        for attempt in range(1, self._max_attempts + 1):
+            try:
+                return await self._process(envelope)
+            except PermanentError as exc:
+                await self._reject(record, exc, DeadLetterReason.PERMANENT_ERROR)
+                return None
+            except (TransientError, OperationalError, TimeoutError) as exc:
+                if attempt == self._max_attempts:
+                    await self._give_up(record, exc)
                     return None
-                except (TransientError, OperationalError, TimeoutError) as exc:
-                    if attempt == self._max_attempts:
-                        await self._give_up(record, exc)
-                        return None
-                    logger.warning(
-                        "retrying event %s (attempt %d/%d): %r",
-                        envelope.event_id,
-                        attempt,
-                        self._max_attempts,
-                        exc,
-                    )
-                    await asyncio.sleep(self._backoff(attempt))
+                logger.warning(
+                    "retrying event %s (attempt %d/%d): %r",
+                    envelope.event_id,
+                    attempt,
+                    self._max_attempts,
+                    exc,
+                )
+                await asyncio.sleep(self._backoff(attempt))
         return None
-    
 
     async def commit(self, record: ConsumerRecord) -> None:
         await self._consumer.commit(
