@@ -86,3 +86,15 @@ password redaction. `test_staging_ci.py` covers the workflow helpers in
 `infra/staging/ci/` (gate, IAP remote, GitHub deployments) with fake `gh`,
 `gcloud` and `sudo`, and `test_staging_workflows.py` checks the deploy and
 rollback workflows' triggers, pins, permissions and the hosted smoke contract.
+
+## Hosted smoke suite (LM-050)
+
+`tests/hosted/` checks a deployed environment through its public URL only. It
+is skipped entirely unless `LEDGERMESH_HOSTED_BASE_URL` is set, so `make check`
+only counts it as skipped; run it with `make hosted-smoke` against an
+explicitly chosen environment. See [hosted/README.md](hosted/README.md).
+Its own machinery is tested offline in `make check`:
+`tests/infra/test_hosted_smoke_support.py` (configuration, bounded backoff,
+unique keys, diagnostics) and `tests/infra/test_staging_fixtures.py` (the
+per-run fixture script against SQLite copies of the wallet and reward tables,
+and `stack.sh fixtures` with a fake `docker`).

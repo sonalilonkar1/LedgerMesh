@@ -580,3 +580,27 @@ def test_deployment_rejects_bad_input(deployment, args):
     result, calls = deployment(*args)
     assert result.returncode != 0
     assert calls == []
+
+
+def test_remote_fixtures_run_on_the_vm(remote):
+    result, calls, sudo = remote("fixtures", "gh123456a1")
+    assert result.returncode == 0, result.stderr
+    assert [call[:2] for call in calls] == [["compute", "scp"], ["compute", "ssh"]]
+    assert sudo[0]["args"] == ["fixtures", "gh123456a1"]
+    assert list(remote.home.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["fixtures"],
+        ["fixtures", "BAD"],
+        ["fixtures", "x;reboot"],
+        ["fixtures", "gh123456a1", "extra1"],
+        ["fixtures", "a" * 41],
+    ],
+)
+def test_remote_fixtures_reject_bad_run_ids_before_connecting(remote, args):
+    result, calls, _ = remote(*args)
+    assert result.returncode == 2
+    assert calls == []

@@ -19,6 +19,7 @@ on:
       - ".github/workflows/ci.yml"
       - ".github/workflows/deploy-staging.yml"
       - ".github/workflows/rollback-staging.yml"
+      - ".github/workflows/hosted-smoke.yml"
   # No path filter on main: every merge is tested, and the image workflow
   # publishes only after this succeeds, so a filter here would silently skip
   # publication for any image input missing from the list (LM-047).
@@ -39,10 +40,10 @@ jobs:
         run: uv sync --python 3.12 --locked
 
       - name: Check formatting
-        run: uv run ruff format --check services libs/contracts infra/scripts tests
+        run: uv run ruff format --check services libs/contracts infra/scripts infra/staging tests
 
       - name: Run linting
-        run: uv run ruff check services libs/contracts infra/scripts tests
+        run: uv run ruff check services libs/contracts infra/scripts infra/staging tests
 
       - name: Run non-database tests
         run: uv run pytest services libs/contracts/tests tests --ignore=tests/db -q

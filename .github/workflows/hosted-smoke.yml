@@ -1,0 +1,166 @@
+name: Hosted smoke
+
+# LM-050: run the hosted smoke suite (tests/hosted) against a public URL.
+#
+# deploy-staging.yml and rollback-staging.yml call it after a release is
+# healthy; a failure fails the deployment and triggers the automatic
+# rollback. It can also be run by hand against an explicitly chosen URL.
+#
+# When base_url is the staging environment's STAGING_URL, the job first
+# creates this run's isolated fixtures on the VM over IAP SSH
+# (`deploy.sh fixtures <run_id>`: smoke-<run_id>-* wallets and rewards, each
+# written with its own service's credentials) and, when expected_revision is
+# given, checks on the VM that every container runs it. For any other URL it
+# cannot reach a VM: the redemption tests are then skipped with that reason
+# and only the gateway checks run.
+#
+# Deliberately no `staging-deploy` concurrency group: as a called workflow it
+# would wait for its caller, which holds that group, forever. Runs are
+# isolated by their run id instead, and on the VM `deploy.sh fixtures` takes
+# the deploy lock, which waits (bounded) for a running deploy, promote or
+# rollback instead of making it fail.
+
+on:
+  workflow_call:
+    inputs:
+      base_url:
+        description: Public https:// URL to test
+        type: string
+        required: true
+      expected_revision:
+        description: Full commit SHA that should be running (checked on the VM)
+        type: string
+        required: false
+        default: ""
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: Public https:// URL to test (the staging URL to include the redemption tests)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Hosted smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The variables, the main-only branch rule and the Workload Identity
+    # trust come from the environment; no deployment is recorded here.
+    environment:
+      name: staging
+      deployment: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      BASE_URL: ${{ inputs.base_url }}
+      EXPECTED_REVISION: ${{ inputs.expected_revision }}
+      STAGING_URL: ${{ vars.STAGING_URL }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_ZONE: ${{ vars.GCP_ZONE }}
+      STAGING_VM_NAME: ${{ vars.STAGING_VM_NAME }}
+      RUN_NUMBER: ${{ github.run_id }}
+      RUN_ATTEMPT: ${{ github.run_attempt }}
+    steps:
+      # The tests come from the commit that is deployed, so they match its
+      # fixtures.py (the fixture contract with tests/hosted/_support.py)
+      # even when main has moved on. Without expected_revision: the
+      # workflow's own commit.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.expected_revision }}
+          persist-credentials: false
+
+      - name: Plan the run
+        id: plan
+        run: |
+          set -euo pipefail
+          base="${BASE_URL%/}"
+          if [[ ! "$base" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?$ ]]; then
+            echo "::error::base_url must be https://<host>[:port] with no path" >&2
+            exit 1
+          fi
+          if [[ -n "$EXPECTED_REVISION" && ! "$EXPECTED_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::expected_revision must be a full 40-character lowercase SHA" >&2
+            exit 1
+          fi
+          # Unique per workflow run and attempt; the fixtures and every
+          # Idempotency-Key carry it (6-40 lowercase letters and digits).
+          run_id="gh${RUN_NUMBER}a${RUN_ATTEMPT}"
+          fixtures=false
+          if [[ -n "$STAGING_URL" && "$base" == "${STAGING_URL%/}" ]]; then
+            fixtures=true
+          fi
+          {
+            echo "base_url=$base"
+            echo "run_id=$run_id"
+            echo "fixtures=$fixtures"
+          } >> "$GITHUB_OUTPUT"
+          echo "Testing $base as run $run_id (fixtures on the VM: $fixtures)"
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        if: steps.plan.outputs.fixtures == 'true'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Check the running revision on the VM
+        if: steps.plan.outputs.fixtures == 'true' && inputs.expected_revision != ''
+        run: bash infra/staging/ci/remote.sh status --expect "$EXPECTED_REVISION"
+
+      - name: Create this run's fixtures on the VM
+        if: steps.plan.outputs.fixtures == 'true'
+        env:
+          RUN_ID: ${{ steps.plan.outputs.run_id }}
+        run: bash infra/staging/ci/remote.sh fixtures "$RUN_ID"
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: "0.13.6"
+          enable-cache: true
+
+      - name: Install Python and dependencies
+        run: uv sync --python 3.12 --locked
+
+      - name: Run the hosted smoke suite
+        env:
+          LEDGERMESH_HOSTED_BASE_URL: ${{ steps.plan.outputs.base_url }}
+          FIXTURES: ${{ steps.plan.outputs.fixtures }}
+          PLANNED_RUN_ID: ${{ steps.plan.outputs.run_id }}
+          LEDGERMESH_HOSTED_EXPECTED_REVISION: ${{ inputs.expected_revision }}
+          LEDGERMESH_HOSTED_ARTIFACTS: artifacts/hosted-smoke
+        run: |
+          set -euo pipefail
+          if [[ "$FIXTURES" == "true" ]]; then
+            # Staging: the redemption tests must run, never skip.
+            export LEDGERMESH_HOSTED_RUN_ID="$PLANNED_RUN_ID"
+            export LEDGERMESH_HOSTED_REQUIRE_FIXTURES=true
+          fi
+          make hosted-smoke
+
+      - name: Keep the results and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hosted-smoke-${{ steps.plan.outputs.run_id || github.run_id }}
+          path: artifacts/hosted-smoke/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Summary
+        if: always()
+        env:
+          BASE: ${{ steps.plan.outputs.base_url }}
+          RUN_ID: ${{ steps.plan.outputs.run_id }}
+          FIXTURES: ${{ steps.plan.outputs.fixtures }}
+        run: |
+          {
+            echo "### Hosted smoke against ${BASE:-?}"
+            echo "- Run id: \`${RUN_ID:-?}\` (fixtures \`smoke-${RUN_ID:-?}-*\`; created on the VM: ${FIXTURES:-false})"
+            echo "- Expected revision: \`${EXPECTED_REVISION:-not given}\`"
+            echo "- Results: the \`hosted-smoke-${RUN_ID:-?}\` artifact (junit.xml, diagnostics.json)"
+          } >> "$GITHUB_STEP_SUMMARY"

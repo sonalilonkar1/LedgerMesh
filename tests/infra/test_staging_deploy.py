@@ -167,7 +167,7 @@ with open(os.environ["FAKE_STACK_LOG"], "a") as log:
 def value(flag):
     return args[args.index(flag) + 1] if flag in args else None
 
-command = [a for a in args if a in ("up", "collect-logs", "verify")][0]
+command = [a for a in args if a in ("up", "collect-logs", "verify", "fixtures")][0]
 state_path = os.environ["FAKE_STATE"]
 state = json.load(open(state_path))
 images = {{
@@ -185,6 +185,9 @@ if command == "collect-logs":
         info.size = len(data)
         bundle.addfile(info, io.BytesIO(data))
     sys.exit(0)
+if command == "fixtures":
+    print("stack: creating wallet fixtures for run " + args[-1], file=sys.stderr)
+    sys.exit(int(os.environ.get("FAKE_FIXTURES_EXIT", "0")))
 if command == "verify":
     print("ok  coordinator-db max_prepared_transactions=100 prepared_now=0 oldest_age_s=0")
     sys.exit(0)
@@ -246,7 +249,7 @@ class Host:
         # The bundle the workflow uploads: infra/staging with a fake stack.sh.
         self.bundle = tmp_path / "bundle"
         self.bundle.mkdir()
-        for name in ("deploy.sh", "render-env.sh", "compose.yaml", "Caddyfile"):
+        for name in ("deploy.sh", "render-env.sh", "compose.yaml", "Caddyfile", "fixtures.py"):
             shutil.copy(STAGING / name, self.bundle / name)
         install(self.bundle / "fake_stack.py", FAKE_STACK)
         (self.bundle / "stack.sh").write_text(
@@ -858,3 +861,51 @@ def test_local_images_are_used_by_tag_and_checked_on_rollback(host):
 def test_rejects_unsafe_arguments(host, args):
     result = host.run(*args)
     assert result.returncode != 0
+
+
+# ---- fixtures (LM-050) ---------------------------------------------------------------
+
+
+def test_fixtures_use_the_running_release_bundle_and_images(host):
+    host.publish(A)
+    assert host.deploy(A).returncode == 0
+
+    result = host.run("fixtures", "gh123456a1")
+
+    assert result.returncode == 0, result.stderr
+    call = host.stack_calls()[-1]
+    assert call["args"][-2:] == ["fixtures", "gh123456a1"]
+    assert Path(call["bundle"]).resolve() == (host.data / "releases" / A / "bundle").resolve()
+    assert call["images"]["LEDGERMESH_WALLET_IMAGE"].startswith(
+        f"{REGISTRY}/ledgermesh-wallet@sha256:"
+    )
+
+
+def test_fixtures_fail_when_the_stack_fails(host):
+    host.publish(A)
+    assert host.deploy(A).returncode == 0
+    result = host.run("fixtures", "gh123456a1", env={"FAKE_FIXTURES_EXIT": "1"})
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize("run_id", ["", "BAD", "abc", "x;reboot", "a" * 41])
+def test_fixtures_refuse_bad_run_ids(host, run_id):
+    host.publish(A)
+    assert host.deploy(A).returncode == 0
+    calls = len(host.stack_calls())
+    result = host.run("fixtures", run_id)
+    assert result.returncode != 0
+    assert len(host.stack_calls()) == calls
+
+
+def test_fixtures_need_a_deployed_release_that_ships_them(host):
+    result = host.run("fixtures", "gh123456a1")
+    assert result.returncode != 0
+    assert "nothing is deployed" in result.stderr
+
+    host.publish(A)
+    assert host.deploy(A).returncode == 0
+    (host.data / "releases" / A / "bundle" / "fixtures.py").unlink()
+    result = host.run("fixtures", "gh123456a1")
+    assert result.returncode != 0
+    assert "predates LM-050" in result.stderr

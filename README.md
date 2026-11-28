@@ -13,6 +13,7 @@ A redemption spans independently owned Wallet, Rewards Catalog, Coordinator, and
 - [Local Development Guide](docs/development.md) — setup, service commands, and testing instructions
 - [ADR-002: Hosted Staging Environment](docs/architecture/ADR-002-hosted-staging.md) — provider, architecture, cost estimate, and alternatives for staging
 - [Hosted Staging Runbook](docs/deployment/staging.md) — provisioning, automatic deployment and rollback, operations, recovery, and teardown of the staging environment. Staging URL: pending provisioning (recorded in the runbook once the VM exists)
+- [Hosted Smoke Suite](tests/hosted/README.md) — end-to-end checks of a deployed environment through its public URL (`make hosted-smoke`), run after every staging deploy
 - [Contributing Guide](CONTRIBUTING.md) — branch naming, commits, reviews, and pull-request expectations
 
 ## Architecture Overview

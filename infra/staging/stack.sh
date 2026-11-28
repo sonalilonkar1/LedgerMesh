@@ -16,6 +16,10 @@
 #   logs [service...]   Print recent logs (--tail, --follow).
 #   collect-logs <out.tgz>
 #                       Write a secret-free log bundle for debugging.
+#   fixtures <run_id>   Create the hosted smoke suite's rows for one run
+#                       (LM-050): fixtures.py runs inside the running wallet
+#                       and catalog containers with each one's own database
+#                       credentials, and only inserts smoke-<run_id>-* rows.
 #   restart             Restart every container (data is kept).
 #   down                Stop and remove the containers. Data on --data-dir is
 #                       kept; this script never deletes data.
@@ -103,7 +107,7 @@ phase() {
 }
 
 usage() {
-  sed -n '2,50p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,54p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 field() {
@@ -233,6 +237,19 @@ run_topics() {
   # (ledgermesh_messaging.topics:main), installed in every service image.
   compose run --rm --no-deps -T coordinator \
     ledgermesh-topics --bootstrap-servers kafka:19092 --replication-factor 1
+}
+
+create_fixtures() {
+  # fixtures.py is piped into `python -` in each running API container, so it
+  # uses that image's schema module and that service's own DATABASE_URL.
+  local run_id="$1" service
+  [[ "$run_id" =~ ^[a-z0-9]{6,40}$ ]] || die "fixtures needs a run id of 6-40 lowercase letters and digits"
+  [[ -f "$SCRIPT_DIR/fixtures.py" ]] || die "$SCRIPT_DIR/fixtures.py is missing"
+  for service in wallet catalog; do
+    log "creating $service fixtures for run $run_id"
+    compose exec -T "$service" python - "$service" --run-id "$run_id" <"$SCRIPT_DIR/fixtures.py" \
+      || die "$service fixtures for run $run_id failed"
+  done
 }
 
 # ---- checks ------------------------------------------------------------------------
@@ -591,6 +608,7 @@ case "$COMMAND" in
     fi
     ;;
   collect-logs) resolve_images optional; collect_logs "${CMD_ARGS[0]:-}" ;;
+  fixtures) resolve_images optional; create_fixtures "${CMD_ARGS[0]:-}" ;;
   restart) resolve_images optional; compose restart ;;
   down) resolve_images optional; compose down --remove-orphans ;;
   *) usage >&2; die "unknown command: $COMMAND" ;;
