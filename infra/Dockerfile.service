@@ -63,6 +63,7 @@ RUN apt-get update \
         libpam-modules-bin \
         libpam-runtime \
         libpam0g \
+        libzstd1 \
     && rm -rf /var/lib/apt/lists/*
 
 USER 10001:10001
