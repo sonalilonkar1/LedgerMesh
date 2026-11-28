@@ -209,13 +209,13 @@ covered by the CI job once they are rebased onto this.
 | Image layers (coordinator) | Trivy secret scanner | 0 secrets |
 
 Re-run on this branch with `make security-secrets`: every pushed ref plus this branch is
-clean. Because the local scan mirrors *every* local branch, it also flagged three
-fixture values (`*_DB_PASSWORD` test passwords such as `wallet-test-pw-0123456789`) in
-unpushed staging tests on another working branch (`tests/infra/test_staging_*.py`,
-LM-048). They are fake. On a pull request CI scans only that PR's commits
-(`SCAN_RANGE=<base sha>..<head sha>`), so they fail only the LM-048 PR, never an
-unrelated one; the full-history scan on `main` and the weekly run would still report them
-once that branch is pushed.
+clean. Because the local scan mirrors *every* local branch, it also flags fake fixture
+values (`generic-api-key` matches on `*_DB_PASSWORD` test passwords such as
+`wallet-test-pw-0123456789`) in unpushed hosted-staging tests on other working branches
+(`tests/infra/test_staging_*.py`, LM-048 to LM-050). On a pull request CI scans only that
+PR's commits (`SCAN_RANGE=<base sha>..<head sha>`), so such findings fail only the PR
+that adds them, never an unrelated one; the full-history scan on `main` and the weekly
+run would still report them once they are pushed, unless they are cleared as below.
 
 How to clear a finding on fake values:
 
