@@ -67,6 +67,8 @@
 #   --keep <n>               Keep the images of the newest <n> releases plus the
 #                            current and last-known-good ones (default 3,
 #                            registry mode only).
+#   --lock-timeout <secs>    How long to wait for another deploy.sh on this
+#                            host to finish before failing (default 300).
 #
 # Exit status: 0 ok, 1 error, 2 usage, 3 no such rollback target, 10 images
 # missing or wrong (nothing changed), 20 deploy failed and was rolled back,
@@ -99,6 +101,7 @@ HTTPS_PORT=""
 CA_FILE=""
 WORKER_WINDOW=""
 KEEP=3
+LOCK_TIMEOUT=300
 
 ACTOR="unknown"
 RUN_URL=""
@@ -137,7 +140,7 @@ die_code() {
 }
 
 usage() {
-  sed -n '2,77p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,79p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 utc() {
@@ -152,7 +155,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --env-file | --secrets-source | --image-source | --data-dir | --project-name | \
       --current-link | --public-url | --wait-timeout | --https-port | --ca-file | \
-      --worker-window | --keep)
+      --worker-window | --keep | --lock-timeout)
       [[ $# -ge 2 ]] || { echo "deploy: $1 needs a value" >&2; exit 2; }
       ORIG_OPTS+=("$1" "$2")
       case "$1" in
@@ -168,6 +171,7 @@ while [[ $# -gt 0 ]]; do
         --ca-file) CA_FILE="$2" ;;
         --worker-window) WORKER_WINDOW="$2" ;;
         --keep) KEEP="$2" ;;
+        --lock-timeout) LOCK_TIMEOUT="$2" ;;
       esac
       shift 2
       ;;
@@ -197,7 +201,7 @@ case "$IMAGE_SOURCE" in registry | local) ;; *) die "--image-source must be regi
 [[ "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "invalid --project-name: $PROJECT"
 [[ "$DATA_DIR" == /* ]] || die "--data-dir must be an absolute path"
 [[ "$CURRENT_LINK" == /* ]] || die "--current-link must be an absolute path"
-for number in "$WAIT_TIMEOUT" "$KEEP" ${HTTPS_PORT:+"$HTTPS_PORT"} ${WORKER_WINDOW:+"$WORKER_WINDOW"}; do
+for number in "$WAIT_TIMEOUT" "$KEEP" "$LOCK_TIMEOUT" ${HTTPS_PORT:+"$HTTPS_PORT"} ${WORKER_WINDOW:+"$WORKER_WINDOW"}; do
   [[ "$number" =~ ^[0-9]+$ ]] || die "expected a whole number, got: $number"
 done
 # Recorded in JSON and shown in logs, so only plain values.
@@ -356,20 +360,35 @@ release_lock() {
   fi
 }
 
+# Waits (bounded, backing off up to 15 s) for another deploy.sh on this host,
+# so short operations such as `fixtures` or `promote` queue behind each other
+# instead of failing. A lock whose pid is gone, or that never got a pid within
+# a minute, is stale and removed.
 acquire_lock() {
-  local dir="$RELEASES/.lock" owner=""
+  local dir="$RELEASES/.lock" owner="" deadline=$((SECONDS + LOCK_TIMEOUT)) delay=1 waiting=0
   mkdir -p "$RELEASES" "$DEPLOY_LOGS"
-  if ! mkdir "$dir" 2>/dev/null; then
-    if [[ -f "$dir/pid" ]]; then
-      owner="$(cat "$dir/pid")"
+  until mkdir "$dir" 2>/dev/null; do
+    owner="$(cat "$dir/pid" 2>/dev/null)" || owner=""
+    if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+      log "removing a stale lock (pid $owner is gone)"
+      rm -rf "$dir"
+      continue
     fi
-    if [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null; then
-      die "another deploy.sh (pid $owner) is running; try again when it has finished"
+    if [[ -z "$owner" && -n "$(find "$dir" -maxdepth 0 -mmin +1 2>/dev/null)" ]]; then
+      log "removing a stale lock (no pid after a minute)"
+      rm -rf "$dir"
+      continue
     fi
-    log "removing a stale lock (pid ${owner:-unknown} is gone)"
-    rm -rf "$dir"
-    mkdir "$dir" || die "could not take the deploy lock $dir"
-  fi
+    if [[ "$SECONDS" -ge "$deadline" ]]; then
+      die "another deploy.sh (pid ${owner:-starting}) is still running after ${LOCK_TIMEOUT}s; try again when it has finished"
+    fi
+    if [[ "$waiting" == 0 ]]; then
+      log "another deploy.sh (pid ${owner:-starting}) is running; waiting up to ${LOCK_TIMEOUT}s"
+      waiting=1
+    fi
+    sleep "$delay"
+    delay=$((delay * 2 > 15 ? 15 : delay * 2))
+  done
   echo "$$" >"$dir/pid"
   LOCK_DIR="$dir"
   trap release_lock EXIT

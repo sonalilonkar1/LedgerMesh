@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 from pathlib import Path
 
 import pytest
@@ -727,14 +728,53 @@ def test_a_running_deploy_holds_the_lock_and_a_stale_lock_is_cleared(host):
     lock.mkdir(parents=True)
     (lock / "pid").write_text(str(os.getpid()))  # this test process is alive
 
-    busy = host.deploy(A)
+    busy = host.deploy(A, options=("--lock-timeout", "2"))
     assert busy.returncode == 1
-    assert "is running" in busy.stderr
+    assert "is still running after 2s" in busy.stderr
+    assert lock.exists()
 
     (lock / "pid").write_text("999999")
     result = host.deploy(A)
     assert result.returncode == 0, result.stderr
     assert "stale lock" in result.stderr
+    assert not lock.exists()
+
+
+def test_a_lock_that_never_got_a_pid_is_stale_after_a_minute(host):
+    host.publish(A)
+    lock = host.data / "releases" / ".lock"
+    lock.mkdir(parents=True)
+    old = time.time() - 120
+    os.utime(lock, (old, old))
+
+    result = host.deploy(A, options=("--lock-timeout", "5"))
+    assert result.returncode == 0, result.stderr
+    assert "no pid after a minute" in result.stderr
+
+
+def test_overlapping_invocations_queue_instead_of_failing(host):
+    # Another deploy.sh (e.g. `fixtures` from a manual smoke run) holds the
+    # lock for about two seconds and then releases it, as release_lock does.
+    host.publish(A)
+    lock = host.data / "releases" / ".lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    holder = subprocess.Popen(
+        ["bash", "-c", 'mkdir "$1" && echo $$ >"$1/pid" && sleep 2 && rm -rf "$1"', "_", str(lock)]
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not (lock / "pid").exists():
+            assert time.monotonic() < deadline, "the holder never took the lock"
+            time.sleep(0.05)
+        result = host.deploy(A, options=("--lock-timeout", "60"))
+    finally:
+        holder.wait(timeout=30)
+
+    assert holder.returncode == 0
+    assert result.returncode == 0, result.stderr
+    assert "waiting up to 60s" in result.stderr
+    assert "stale lock" not in result.stderr
+    assert host.pointer("current") == A
     assert not lock.exists()
 
 

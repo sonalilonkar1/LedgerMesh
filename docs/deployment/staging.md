@@ -127,7 +127,7 @@ It ends with `ledgermesh-startup: ready: docker …`.
 
 ### 4.1 Automatic deploy from `main`
 
-`.github/workflows/deploy-staging.yml` runs when the **Service images** workflow (`.github/workflows/images.yml`) completes for `main`, and by hand (**Actions → Deploy staging → Run workflow**, from `main`, with a full commit SHA on `main`). Only one staging change runs at a time (concurrency group `staging-deploy`, never cancelled mid-way; the manual rollback workflow uses the same group).
+`.github/workflows/deploy-staging.yml` runs when the **Service images** workflow (`.github/workflows/images.yml`) completes for `main`, and by hand (**Actions → Deploy staging → Run workflow**, from `main`, with a full commit SHA on `main`). Only one staging change runs at a time (concurrency group `staging-deploy`, never cancelled mid-way; the manual rollback workflow uses the same group). On the VM, every `deploy.sh` command that changes state takes a lock in `/var/lib/ledgermesh/releases/.lock`. A second invocation waits for it with backoff, for up to `--lock-timeout` seconds (default 300), and then fails. Short operations such as `promote`, or a manually started smoke run's fixture setup, therefore queue instead of failing a deployment. A lock whose process is gone is removed.
 
 | Job | What it does |
 |---|---|
