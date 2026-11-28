@@ -573,13 +573,29 @@ stack_args() {
   if [[ -n "$WORKER_WINDOW" ]]; then STACK_ARGS+=(--worker-window "$WORKER_WINDOW"); fi
 }
 
+# Is $ENV_FILE a complete env file as render-env.sh writes it: a regular
+# file, mode 0600, with the site address and all four passwords set?
+env_file_usable() {
+  local key
+  [[ -f "$ENV_FILE" && ! -L "$ENV_FILE" ]] || return 1
+  [[ -n "$(find "$ENV_FILE" -maxdepth 0 -perm 600 2>/dev/null)" ]] || return 1
+  for key in LEDGERMESH_SITE_ADDRESS "${PASSWORD_KEYS[@]}"; do
+    grep -q "^$key=." "$ENV_FILE" || return 1
+  done
+}
+
 apply_child() {
   # Internal (`__apply <sha> deploy|rollback`), run as its own process so that
   # `set -e` applies to every step and the parent can react to the outcome.
   local sha="$1" mode="$2" rel="$RELEASES/$1"
   local phase_file="$rel/phase"
   echo "env" >"$phase_file"
-  if [[ "$SECRETS_SOURCE" != "none" ]]; then
+  if [[ "$mode" == "rollback" ]] && env_file_usable; then
+    # The env file holds no release-specific values. Reusing it means a
+    # rollback after a deploy that failed in `env` (Secret Manager or the
+    # metadata server unavailable) does not fail at the same step.
+    log "reusing the existing env file $ENV_FILE for the rollback"
+  elif [[ "$SECRETS_SOURCE" != "none" ]]; then
     bash "$SCRIPT_DIR/render-env.sh" --source "$SECRETS_SOURCE" --out "$ENV_FILE"
   fi
   [[ -f "$ENV_FILE" ]] || die "env file $ENV_FILE is missing"

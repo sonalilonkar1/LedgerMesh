@@ -538,6 +538,22 @@ def test_first_deploy_failure_has_nothing_to_restore(host):
     assert host.pointer("last-known-good") == ""
 
 
+def test_rollback_after_an_env_failure_reuses_the_env_file(host):
+    host.publish(A)
+    host.publish(B)
+    assert host.deploy(A).returncode == 0
+
+    # Secrets unavailable: rendering the env file fails, nothing has changed.
+    host.source.unlink()
+    result = host.deploy(B)
+
+    assert result.returncode == 20, result.stderr
+    assert host.release(B)["status"] == "failed_rolled_back"
+    assert "reusing the existing env file" in result.stderr
+    assert host.running_revisions() == {A}
+    assert host.pointer("current") == A
+
+
 def test_failed_rollback_exits_21(host):
     host.publish(A)
     host.publish(B)

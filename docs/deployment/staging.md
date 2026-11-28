@@ -199,7 +199,7 @@ From a laptop with the same access (§11): `bash infra/staging/ci/remote.sh stat
    | `failed_phase` | Where to look |
    |---|---|
    | (exit 10, no record) | The **Deploy on the VM** step: an image is missing or its digest or revision does not match. Nothing changed. |
-   | `env` | Secret Manager access of the VM service account; instance metadata `ledgermesh-site-address` |
+   | `env` | Secret Manager access of the VM service account; instance metadata `ledgermesh-site-address`. Nothing was changed; the automatic rollback reuses the existing `/etc/ledgermesh/staging.env` (mode `0600`, all keys set) instead of reading Secret Manager again, so it does not fail at the same step. |
    | `images` | Pulling a recorded digest (registry reachable?) |
    | `data-tier`, `prepared-transactions` | `kafka.log`, `<service>-db.log`; is the data disk mounted? |
    | `migrations` | The `alembic` output in the deploy log. The schema stays at the last successful revision, and the restored release must work with it. |
