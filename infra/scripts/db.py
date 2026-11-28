@@ -33,6 +33,7 @@ SERVICES = {
     "wallet": ("wallet", "WALLET_DB_PORT", 54322),
     "catalog": ("catalog", "CATALOG_DB_PORT", 54323),
     "audit_ledger": ("audit_ledger", "AUDIT_LEDGER_DB_PORT", 54324),
+    "identity": ("identity", "IDENTITY_DB_PORT", 54325),
 }
 
 

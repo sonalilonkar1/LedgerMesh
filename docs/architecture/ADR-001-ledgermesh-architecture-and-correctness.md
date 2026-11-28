@@ -25,6 +25,7 @@ This ADR fixes the vocabulary, service boundaries, allowed communication paths, 
 | Rewards Catalog Service | Reward definitions, available inventory, inventory version, reservations, Catalog inbox/outbox | Read or update Wallet data |
 | Audit Ledger Service | Append-only transaction events, decisions, failures, compensations, and recovery actions | Act as the source of truth for balances or inventory |
 | Web Interface | User input and transaction-status display | Contain transaction coordination or business persistence logic |
+| Identity Service (added by §16, LM-052) | Users, sign-in link hashes, sessions, auth audit trail | See §16 |
 
 Each service owns its database or isolated database schema. No service may directly query or mutate another service's tables. Cross-service work occurs through versioned APIs or Kafka messages.
 
@@ -279,3 +280,16 @@ If the stretch goal is implemented:
 ## 15. Definition of done for LM-001
 
 LM-001 can be closed when this ADR is merged, all checklist items are approved, and any disputed decision is resolved in the pull-request discussion rather than left implicit.
+
+## 16. Addendum 2026-11-27: Identity Service (LM-052)
+
+LM-052 requires authentication with validated email addresses and no stored user secrets. It adds one service to the table in section 2 (the full row is below). Like the rest of this ADR, this section needs approval from all four team members (section 14).
+
+| Service | Owns | Must not do |
+|---|---|---|
+| Identity Service | Users (normalized email, verification time), hashes of single-use sign-in links, server-side sessions, sign-in rate-limit counters, and the append-only `auth_events` trail, in its own `identity` database | Read or update another service's data; take part in 2PC or Saga; store a token, session id or user secret in clear |
+
+- Other services and the web interface obtain the caller's principal (`user_id`, role `user` or `operator`) only through `GET /v1/sessions/introspect` (versioned contract `identity.v1.yaml`), never by reading the identity database.
+- The service is outside the redemption correctness path. It changes none of the invariants in section 10, emits no Kafka messages, and is not a 2PC participant or Saga step. A redemption's `user_id` is still the Wallet user identifier; linking it to an identity user is a later decision.
+- No existing service requires authentication as part of LM-052, so the guest demo and the 2PC-versus-Saga experiments run unchanged.
+- Details: [docs/authentication.md](../authentication.md).

@@ -5,6 +5,7 @@ description = "Distributed rewards system comparing Two-Phase Commit and Saga co
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.16,<2",
+    "email-validator>=2.2,<3",
     "fastapi>=0.115,<1",
     "httpx>=0.28,<1",
     "ledgermesh-messaging",

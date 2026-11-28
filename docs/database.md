@@ -8,6 +8,7 @@ Each service owns one PostgreSQL database (`infra/compose.yaml`) and the only co
 | Wallet | `services/wallet/app/db/schema.py` | `services/wallet/migrations/` |
 | Catalog | `services/catalog/app/db/schema.py` | `services/catalog/migrations/` |
 | Audit Ledger | `services/audit_ledger/app/db/schema.py` | `services/audit_ledger/migrations/` |
+| Identity | `services/identity/app/db/schema.py` | `services/identity/migrations/` |
 
 ## Tables
 
@@ -26,6 +27,11 @@ Each service owns one PostgreSQL database (`infra/compose.yaml`) and the only co
 | Audit Ledger | `audit_events` | Append-only record of every event, one row per `event_id` |
 | Coordinator, Wallet, Catalog | `inbox`, `outbox` | Transactional inbox and outbox from `libs/messaging` (LM-019) |
 | Audit Ledger | `inbox` | Deduplicates consumed events |
+| Identity | `users` | One row per normalized email address; `email_verified_at` is set by the first successful sign-in |
+| | `login_tokens` | SHA-256 hashes of single-use sign-in links with expiry, consumption and revocation times |
+| | `sessions` | SHA-256 hashes of session ids with idle and absolute expiry and revocation time |
+| | `rate_limit_counters` | Fixed-window attempt counts per hashed email or client IP |
+| | `auth_events` | Append-only sign-in audit trail; no tokens, session ids or full addresses |
 
 ## Safety rules enforced by the database
 
@@ -44,6 +50,10 @@ These hold even if application code has a bug, because PostgreSQL rejects the wr
 | A 2PC participant row is either an empty abort tombstone or carries its full request (`correlation_id`, `request_hash` and the user and points, or the reward and quantity), so a reused transaction id with a different request is detectable | `ck_participant_transactions_request_identity` |
 | Audit history cannot be rewritten | trigger rejects `UPDATE`, `DELETE` and `TRUNCATE` on `audit_events` |
 | An event is audited once | unique `audit_events.event_id` |
+| One account per mailbox, stored in canonical form | `uq_users_email`, `ck_users_email_normalized` |
+| At most one usable sign-in link per user | partial unique index `ux_login_tokens_one_active` |
+| A session's idle expiry never passes its absolute expiry | `ck_sessions_idle_within_absolute` |
+| Sign-in history cannot be rewritten | trigger rejects `UPDATE`, `DELETE` and `TRUNCATE` on `auth_events` |
 
 ## Running migrations
 
@@ -86,7 +96,7 @@ Both change data, so both refuse to run unless `LEDGERMESH_ENV` is `local` or `t
 | `reward-last-unit` | 500 | 1 | competing redemptions for the final unit |
 | `reward-sold-out` | 300 | 0 | sold-out rejection |
 
-These identifiers are stable. Tests and experiments may refer to them directly, and `test_seed_identifiers_are_stable` fails if one is renamed by accident. The Coordinator and Audit Ledger have no seed data; they start empty.
+These identifiers are stable. Tests and experiments may refer to them directly, and `test_seed_identifiers_are_stable` fails if one is renamed by accident. The Coordinator, Audit Ledger and Identity have no seed data; they start empty, so `db-baseline` also removes every local sign-in user and session.
 
 ## Changing a schema
 

@@ -3,8 +3,9 @@
 LM-003 provides a reproducible local stack containing:
 
 - One Apache Kafka broker in single-node KRaft mode
-- Four isolated PostgreSQL instances
-- Coordinator, Wallet, Catalog, and Audit Ledger FastAPI services
+- Five isolated PostgreSQL instances
+- Coordinator, Wallet, Catalog, Audit Ledger, and Identity FastAPI services
+- Mailpit, a local SMTP server and web inbox for sign-in emails (LM-052)
 - Health checks and dependency-aware startup ordering
 - Named volumes for broker and database data
 
@@ -22,7 +23,7 @@ From the repository root:
 make infra-up
 ```
 
-This builds the service image and runs Compose with `--wait`. Compose does not start an application service until its database and Kafka report healthy.
+This builds the service image and runs Compose with `--wait`. Compose does not start an application service until its dependencies report healthy: its database and Kafka for the four transaction services, and its database and Mailpit for Identity.
 
 Verify the complete stack:
 
@@ -55,11 +56,15 @@ make infra-reset
 | Wallet API | 8001 | 8001 |
 | Catalog API | 8002 | 8002 |
 | Audit Ledger API | 8003 | 8003 |
+| Identity API | 8005 | 8005 |
+| Mailpit SMTP | 1025 | 1025 |
+| Mailpit web inbox and API | 8025 | 8025 |
 | Kafka | 29092 | 29092 |
 | Coordinator PostgreSQL | 54321 | 5432 |
 | Wallet PostgreSQL | 54322 | 5432 |
 | Catalog PostgreSQL | 54323 | 5432 |
 | Audit Ledger PostgreSQL | 54324 | 5432 |
+| Identity PostgreSQL | 54325 | 5432 |
 
 Applications inside the Compose network connect to Kafka at `kafka:19092`. Programs running on the host connect at `localhost:29092`.
 
@@ -71,6 +76,7 @@ Applications inside the Compose network connect to Kafka at `kafka:19092`. Progr
 | Wallet | `localhost:54322` | `wallet` | `wallet` |
 | Catalog | `localhost:54323` | `catalog` | `catalog` |
 | Audit Ledger | `localhost:54324` | `audit_ledger` | `audit_ledger` |
+| Identity | `localhost:54325` | `identity` | `identity` |
 
 The local-development password defaults to `ledgermesh_dev`. These credentials are intentionally limited to the local Compose environment and must not be reused in a deployed environment.
 
@@ -121,6 +127,20 @@ changed. The value should be at least the maximum number of participant
 transactions that can simultaneously remain prepared, with operational
 headroom; reaching the limit makes new `PREPARE TRANSACTION` commands fail.
 
+## Local email (Mailpit)
+
+The Identity Service (LM-052) sends sign-in links by SMTP. Locally they go to
+[Mailpit](https://mailpit.axllent.org/), which accepts every message on port
+1025 and shows it at <http://localhost:8025> (`make mail-ui`). Nothing is
+delivered to real mailboxes, and Mailpit keeps at most 500 messages in memory,
+so they disappear when the container restarts. Its API (`/api/v1/...`) is what
+`make identity-e2e` uses to read the link. Deployed environments use a real
+SMTP provider configured from the secret store; see
+[docs/authentication.md](../docs/authentication.md#email-provider-setup-staging).
+
+The Identity database is wiped by `db-baseline` and `db-reset` like every
+other service database, which removes local sign-in users and sessions.
+
 ## Volumes
 
 Compose creates the following named volumes:
@@ -130,6 +150,7 @@ Compose creates the following named volumes:
 - `ledgermesh_wallet_db_data`
 - `ledgermesh_catalog_db_data`
 - `ledgermesh_audit_ledger_db_data`
+- `ledgermesh_identity_db_data`
 
 `make infra-down` preserves them. `make infra-reset` removes them.
 
@@ -182,7 +203,7 @@ Each tester should record the following in the LM-003 pull request:
 | Check | Expected result |
 |---|---|
 | `make infra-up` | Compose exits successfully and every container becomes healthy |
-| `make infra-status` | Kafka, four databases, and four services are running/healthy |
+| `make infra-status` | Kafka, five databases, five services, and Mailpit are running/healthy |
 | `make infra-smoke` | Script prints `LedgerMesh infrastructure smoke test passed.` |
 | `make infra-down` | All stack containers stop cleanly |
 

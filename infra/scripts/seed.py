@@ -69,8 +69,8 @@ REWARDS = (
     SeedReward("reward-sold-out", "Limited poster", point_cost=300, total_inventory=0),
 )
 
-# Only Wallet and Catalog own seeded business data; the Coordinator and Audit
-# Ledger start empty in the baseline.
+# Only Wallet and Catalog own seeded business data; the Coordinator, Audit
+# Ledger and Identity start empty in the baseline.
 SEEDED_SERVICES = ("wallet", "catalog")
 
 

@@ -21,6 +21,7 @@ LedgerMesh uses strict service ownership:
 - **Wallet Service** owns customer point balances, deductions, refunds, and Wallet idempotency records.
 - **Rewards Catalog Service** owns reward inventory, reservations, releases, and Catalog idempotency records.
 - **Audit Ledger Service** stores an append-only transaction history.
+- **Identity Service** owns users, single-use sign-in link hashes, server-side sessions and the auth audit trail (LM-052); it is outside the redemption path.
 - **Messaging Library** provides the shared Kafka envelope, publishing, inbox, and outbox infrastructure.
 
 No service directly reads or modifies another service's database.
@@ -52,6 +53,7 @@ LedgerMesh/
 │   ├── audit_ledger/
 │   ├── catalog/
 │   ├── coordinator/
+│   ├── identity/
 │   └── wallet/
 ├── tests/
 ├── CONTRIBUTING.md
@@ -109,6 +111,7 @@ A dependency deprecation warning from FastAPI/Starlette's test client may be dis
 | Wallet | `make run-wallet` | 8001 | `http://localhost:8001/health` |
 | Rewards Catalog | `make run-catalog` | 8002 | `http://localhost:8002/health` |
 | Audit Ledger | `make run-ledger` | 8003 | `http://localhost:8003/health` |
+| Identity (sign-in) | `make run-identity` | 8005 | `http://localhost:8005/health` |
 
 For example:
 
@@ -135,7 +138,11 @@ includes its LM-008 listing, reservation, release, and fulfillment API. See
 includes its LM-009 immutable append and transaction timeline API. See
 [the Audit Ledger service guide](services/audit_ledger/README.md). The Coordinator
 includes its LM-010 idempotent creation, durable status, and transition API. See
-[the Coordinator service guide](services/coordinator/README.md). The remaining
+[the Coordinator service guide](services/coordinator/README.md). The Identity
+Service provides LM-052 sign-in by email with single-use links, server-side
+sessions and guest/user/operator roles, without any stored user secret; the
+guest demo needs no sign-in. See [authentication](docs/authentication.md) and
+[the Identity service guide](services/identity/README.md). The remaining
 workflow coordination and observability are added through their assigned issues.
 
 ## Core Development Commands
@@ -155,6 +162,7 @@ uv run pytest services/coordinator/tests -q
 uv run pytest services/wallet/tests -q
 uv run pytest services/catalog/tests -q
 uv run pytest services/audit_ledger/tests -q
+uv run pytest services/identity/tests -q
 ```
 
 ## Messaging Library

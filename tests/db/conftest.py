@@ -21,7 +21,7 @@ from sqlalchemy.exc import OperationalError
 from infra.scripts.prepared_transactions import cleanup_prepared
 
 ROOT = Path(__file__).resolve().parents[2]
-SERVICES = ("coordinator", "wallet", "catalog", "audit_ledger")
+SERVICES = ("coordinator", "wallet", "catalog", "audit_ledger", "identity")
 SERVER_URL = os.environ.get(
     "LM_TEST_POSTGRES_URL",
     "postgresql+psycopg://wallet:ledgermesh_dev@localhost:54322/wallet",
