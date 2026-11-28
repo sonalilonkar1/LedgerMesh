@@ -30,6 +30,15 @@ which the coordinator answers with 404 unless `LEDGERMESH_ENV` is `local` or
 public `two_phase_commit` request would stay `REQUESTED` for ever, so the
 suite never sends one. 2PC is covered by `make test-2pc-integration`.
 
+**Not covered: Audit Ledger temporarily unavailable.** Issue #58 lists this
+failure case, but testing it means stopping the audit consumer on shared
+staging while other runs use it, so the hosted suite does not do it. A
+hosted test would have to show that a redemption still reaches its terminal
+state and that its audit events appear once the consumer is back. Until such
+a test exists, this case is unproven on staging. It should be tested against
+the local staging stack (`make staging-local-up`, then stop the
+`audit-consumer` container) or as an LM-036 failure experiment.
+
 ## Isolation: per-run fixtures
 
 Each run has a run id (6-40 lowercase letters and digits; the workflow uses
