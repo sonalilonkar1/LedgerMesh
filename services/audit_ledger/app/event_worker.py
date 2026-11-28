@@ -18,19 +18,28 @@ from ledgermesh_messaging import (
     InboxConsumer,
     PermanentError,
     RetryPolicy,
-    configure_logging,
     create_consumer,
     create_producer,
     create_retry_consumer,
     in_version_order,
+    start_metrics_server,
 )
+from ledgermesh_messaging.logs import configure_logging
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from services.audit_ledger.app.repository import PostgresAuditRepository, database_url, get_engine
+from services.audit_ledger.app.repository import (
+    PostgresAuditRepository,
+    database_url,
+    get_engine,
+)
 
 logger = logging.getLogger(__name__)
 CONSUMER_GROUP = REDEMPTION_EVENTS.consumer_group
-SUPPORTED_EVENT_TYPES = {"coordinator.transitioned", "redemption.committed", "redemption.aborted"}
+SUPPORTED_EVENT_TYPES = {
+    "coordinator.transitioned",
+    "redemption.committed",
+    "redemption.aborted",
+}
 
 
 class AuditEventHandler:
@@ -43,7 +52,7 @@ class AuditEventHandler:
         await session.run_sync(
             lambda sync: self.repository.append(envelope, connection=sync.connection())
         )
-        # The event's ids are already bound by InboxConsumer (LM-032).
+        # InboxConsumer has already bound the event and transaction context.
         logger.info(
             "audit event recorded",
             extra={"state": envelope.payload.get("to_status")},
@@ -78,13 +87,14 @@ def bootstrap_servers() -> str:
 
 
 async def run(stop: asyncio.Event) -> None:
-    policy = RetryPolicy.from_env()  # fails fast on an invalid LM_RETRY_* value
+    policy = RetryPolicy.from_env()
     engine = create_async_engine(database_url(), pool_pre_ping=True)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     consumer = create_consumer(bootstrap_servers(), CONSUMER_GROUP, REDEMPTION_EVENTS.name)
     retry_consumer = create_retry_consumer(bootstrap_servers(), REDEMPTION_EVENTS)
     producer = create_producer(bootstrap_servers())
     attempted = []
+    metrics = start_metrics_server("audit-ledger", 9104)
     try:
         for client in (producer, consumer, retry_consumer):
             attempted.append(client)
@@ -104,6 +114,7 @@ async def run(stop: asyncio.Event) -> None:
                 await client.stop()
             except Exception:
                 logger.exception("failed to stop %s during shutdown", type(client).__name__)
+        metrics.close()
         await engine.dispose()
 
 

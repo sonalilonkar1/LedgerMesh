@@ -1,9 +1,16 @@
 import asyncio
 
 import pytest
+from ledgermesh_messaging import (
+    EventEnvelope,
+    OutgoingMessage,
+    enqueue,
+    inbox,
+    outbox,
+    process_once,
+)
+from ledgermesh_messaging.metrics import render_metrics
 from sqlalchemy import func, select, update
-
-from ledgermesh_messaging import EventEnvelope, OutgoingMessage, enqueue, inbox, outbox, process_once
 
 from .conftest import counters, increment_and_reply, make_envelope, read_counter
 
@@ -116,7 +123,9 @@ def forward_to(topic: str | None):
     return handler
 
 
-async def deliver_until_quiet(session_factory, routes, *, deliveries: int, max_rounds: int = 10) -> int:
+async def deliver_until_quiet(
+    session_factory, routes, *, deliveries: int, max_rounds: int = 10
+) -> int:
     """Act as the message bus: deliver every unpublished outbox row ``deliveries``
     times to the consumer for its topic, until no unpublished rows remain.
     Returns the number of rounds needed."""
@@ -200,3 +209,45 @@ async def test_distinct_events_all_apply(session_factory):
     assert await read_counter(session_factory) == 20
     async with session_factory() as session:
         assert await session.scalar(select(counters.c.value)) == 20
+
+
+async def test_rejection_metrics_use_explicit_event_types_not_suffix_guessing(session_factory):
+    consumer = "explicit-rejection-metrics-test"
+
+    async def handler(_session, envelope):
+        business_rejection = make_envelope(
+            event_type="catalog.reservation_rejected",
+            transaction_id=envelope.transaction_id,
+            causation_id=envelope.event_id,
+            payload={"reason": "insufficient_inventory"},
+        )
+        compensation_rejection = make_envelope(
+            event_type="catalog.release_rejected",
+            transaction_id=envelope.transaction_id,
+            causation_id=envelope.event_id,
+            payload={"reason": "conflict"},
+        )
+        return [
+            OutgoingMessage("catalog.results", str(envelope.transaction_id), business_rejection),
+            OutgoingMessage(
+                "catalog.results", str(envelope.transaction_id), compensation_rejection
+            ),
+        ]
+
+    await process_once(
+        session_factory,
+        consumer,
+        make_envelope(),
+        handler,
+        rejection_event_types={"catalog.reservation_rejected"},
+    )
+
+    metrics = render_metrics()
+    assert (
+        f'ledgermesh_saga_rejections_total{{consumer="{consumer}",service="catalog",'
+        'reason="insufficient_inventory"} 1'
+    ) in metrics
+    assert (
+        f'ledgermesh_saga_rejections_total{{consumer="{consumer}",service="catalog",reason="conflict"}}'
+        not in metrics
+    )

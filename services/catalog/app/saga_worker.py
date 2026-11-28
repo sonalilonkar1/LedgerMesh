@@ -18,15 +18,20 @@ from ledgermesh_messaging import (
     InboxConsumer,
     OutboxPublisher,
     RetryPolicy,
-    configure_logging,
     create_consumer,
     create_producer,
     create_retry_consumer,
+    start_metrics_server,
 )
+from ledgermesh_messaging.logs import configure_logging
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from services.catalog.app.repository import PostgresCatalogRepository, database_url, get_engine
-from services.catalog.app.saga import CatalogSagaHandler
+from services.catalog.app.repository import (
+    PostgresCatalogRepository,
+    database_url,
+    get_engine,
+)
+from services.catalog.app.saga import RESERVATION_REJECTED, CatalogSagaHandler
 
 logger = logging.getLogger(__name__)
 CONSUMER_GROUP = CATALOG_COMMANDS.consumer_group
@@ -44,6 +49,7 @@ async def run(stop: asyncio.Event) -> None:
     consumer = create_consumer(bootstrap_servers(), CONSUMER_GROUP, CATALOG_COMMANDS.name)
     retry_consumer = create_retry_consumer(bootstrap_servers(), CATALOG_COMMANDS)
     attempted = []
+    metrics = start_metrics_server("catalog", 9102)
     try:
         for client in (producer, consumer, retry_consumer):
             # Track before awaiting start(), so partial startup is also cleaned up.
@@ -54,7 +60,14 @@ async def run(stop: asyncio.Event) -> None:
         handler = CatalogSagaHandler(PostgresCatalogRepository(get_engine()))
         # Both consumers share the inbox name, so a retried command is still a duplicate.
         main_consumer, retries = (
-            InboxConsumer(source, sessions, name=CONSUMER_GROUP, handler=handler, router=router)
+            InboxConsumer(
+                source,
+                sessions,
+                name=CONSUMER_GROUP,
+                handler=handler,
+                router=router,
+                rejection_event_types={RESERVATION_REJECTED},
+            )
             for source in (consumer, retry_consumer)
         )
         publisher = OutboxPublisher(sessions, producer, name="catalog")
@@ -65,6 +78,7 @@ async def run(stop: asyncio.Event) -> None:
                 await client.stop()
             except Exception:
                 logger.exception("failed to stop %s during shutdown", type(client).__name__)
+        metrics.close()
         await engine.dispose()
 
 

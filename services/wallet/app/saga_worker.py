@@ -30,15 +30,20 @@ from ledgermesh_messaging import (
     InboxConsumer,
     OutboxPublisher,
     RetryPolicy,
-    configure_logging,
     create_consumer,
     create_producer,
     create_retry_consumer,
+    start_metrics_server,
 )
+from ledgermesh_messaging.logs import configure_logging
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from services.wallet.app.repository import PostgresWalletRepository, database_url, get_engine
-from services.wallet.app.saga import WalletSagaHandler
+from services.wallet.app.repository import (
+    PostgresWalletRepository,
+    database_url,
+    get_engine,
+)
+from services.wallet.app.saga import DEDUCTION_REJECTED, WalletSagaHandler
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +65,7 @@ async def run(stop: asyncio.Event) -> None:
     # fails part-way is still stopped. Each stop is isolated, so a failure to stop
     # one client does not skip the others or the engine.
     attempted = []
+    metrics = start_metrics_server("wallet", 9101)
     try:
         for client in (producer, consumer, retry_consumer):
             attempted.append(client)
@@ -71,17 +77,30 @@ async def run(stop: asyncio.Event) -> None:
                 await client.stop()
             except Exception:
                 logger.exception("failed to stop %s during shutdown", type(client).__name__)
+        metrics.close()
         await engine.dispose()
 
 
 async def _serve(
-    stop: asyncio.Event, sessions, producer, consumer, retry_consumer, policy: RetryPolicy
+    stop: asyncio.Event,
+    sessions,
+    producer,
+    consumer,
+    retry_consumer,
+    policy: RetryPolicy,
 ) -> None:
     router = FailureRouter(producer, consumer=CONSUMER_GROUP, policy=policy)
     handler = WalletSagaHandler(PostgresWalletRepository(get_engine()))
     # Both consumers share the inbox name, so a retried command is still a duplicate.
     main_consumer, retries = (
-        InboxConsumer(source, sessions, name=CONSUMER_GROUP, handler=handler, router=router)
+        InboxConsumer(
+            source,
+            sessions,
+            name=CONSUMER_GROUP,
+            handler=handler,
+            router=router,
+            rejection_event_types={DEDUCTION_REJECTED},
+        )
         for source in (consumer, retry_consumer)
     )
     publisher = OutboxPublisher(sessions, producer, name="wallet")

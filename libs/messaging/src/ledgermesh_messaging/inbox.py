@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .envelope import EventEnvelope
+from .metrics import record_inbox_duplicate, record_saga_rejection
 from .outbox import OutgoingMessage, enqueue
 from .schema import inbox, outbox
 
@@ -30,6 +31,7 @@ async def process_once(
     handler: Handler,
     *,
     republish_on_duplicate: bool = False,
+    rejection_event_types: Collection[str] = frozenset(),
 ) -> ProcessResult:
     """Run ``handler`` for ``envelope`` at most once per ``consumer``.
 
@@ -47,7 +49,15 @@ async def process_once(
     original reply. Every replayed event is itself a duplicate for its
     receiver, so replay enabled throughout a workflow re-sends the whole
     downstream chain for each duplicate it sees.
+
+    Committed duplicate claims increment the process-local duplicate metric.
+    Rejection metrics are opt-in: callers provide the exact event types that
+    represent business rejections for their handler, keeping this library
+    independent of service event naming conventions.
     """
+    duplicate = False
+    messages: Sequence[OutgoingMessage] = ()
+    result_ids: tuple[UUID, ...] = ()
     async with session_factory() as session, session.begin():
         claimed = await session.scalar(
             pg_insert(inbox)
@@ -62,6 +72,7 @@ async def process_once(
         )
 
         if claimed is None:
+            duplicate = True
             stored = await session.scalar(
                 select(inbox.c.result_event_ids).where(
                     inbox.c.consumer == consumer, inbox.c.event_id == envelope.event_id
@@ -74,17 +85,28 @@ async def process_once(
                     .where(outbox.c.event_id.in_(result_ids))
                     .values(published_at=None)
                 )
-            return ProcessResult(duplicate=True, result_event_ids=result_ids)
+        else:
+            messages = await handler(session, envelope)
+            for message in messages:
+                await enqueue(session, message)
 
-        messages = await handler(session, envelope)
+            result_ids = tuple(message.envelope.event_id for message in messages)
+            if result_ids:
+                await session.execute(
+                    update(inbox)
+                    .where(inbox.c.consumer == consumer, inbox.c.event_id == envelope.event_id)
+                    .values(result_event_ids=[str(event_id) for event_id in result_ids])
+                )
+
+    # Metrics reflect committed work only; failed/rolled-back attempts are not
+    # counted as accepted duplicates or durable rejection outcomes.
+    if duplicate:
+        record_inbox_duplicate(consumer)
+    else:
         for message in messages:
-            await enqueue(session, message)
-
-        result_ids = tuple(message.envelope.event_id for message in messages)
-        if result_ids:
-            await session.execute(
-                update(inbox)
-                .where(inbox.c.consumer == consumer, inbox.c.event_id == envelope.event_id)
-                .values(result_event_ids=[str(event_id) for event_id in result_ids])
-            )
-        return ProcessResult(duplicate=False, result_event_ids=result_ids)
+            event_type = message.envelope.event_type
+            if event_type in rejection_event_types:
+                service = event_type.split(".", 1)[0]
+                reason = str(message.envelope.payload.get("reason", "unknown"))
+                record_saga_rejection(consumer, service, reason)
+    return ProcessResult(duplicate=duplicate, result_event_ids=result_ids)

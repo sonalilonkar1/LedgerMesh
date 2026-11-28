@@ -12,6 +12,7 @@ from .logs import (
     log_context,
     log_fault_injected,
 )
+from .metrics import MetricsServer, render_metrics, start_metrics_server
 from .outbox import OutgoingMessage, enqueue
 from .publisher import BatchResult, OutboxPublisher
 from .retry import (
@@ -86,6 +87,7 @@ __all__ = [
     "MissingCausationError",
     "MissingVersionError",
     "MissingWorkflowStepError",
+    "MetricsServer",
     "OutboxPublisher",
     "OutgoingMessage",
     "PermanentError",
@@ -126,5 +128,7 @@ __all__ = [
     "process_once",
     "require_causation",
     "retry_topic",
+    "render_metrics",
+    "start_metrics_server",
     "workflow_steps",
 ]

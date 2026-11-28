@@ -25,6 +25,7 @@ from ledgermesh_messaging import (
     create_consumer,
     create_producer,
     create_retry_consumer,
+    start_metrics_server,
 )
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -55,6 +56,7 @@ async def run(stop: asyncio.Event) -> None:
     )
     retry_consumer = create_retry_consumer(bootstrap_servers(), *RESULT_TOPICS)
     attempted = []
+    metrics = start_metrics_server("coordinator", 9103)
     try:
         for client in (producer, consumer, retry_consumer):
             attempted.append(client)
@@ -83,6 +85,7 @@ async def run(stop: asyncio.Event) -> None:
                 await client.stop()
             except Exception:
                 logger.exception("failed to stop %s", type(client).__name__)
+        metrics.close()
         await engine.dispose()
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from contextlib import suppress
 from typing import Any
 
@@ -65,11 +65,13 @@ class InboxConsumer:
         max_attempts: int = 5,
         retry_backoff: float = 0.2,
         router: FailureRouter | None = None,
+        rejection_event_types: Collection[str] = frozenset(),
     ) -> None:
         self._consumer = consumer
         self._session_factory = session_factory
         self._name = name
         self._handler = handler
+        self._rejection_event_types = frozenset(rejection_event_types)
         self._on_dead_letter = on_dead_letter
         self._router = router
         if router is None:
@@ -84,7 +86,13 @@ class InboxConsumer:
             self._backoff = router.policy.backoff
 
     async def _process(self, envelope: EventEnvelope) -> ProcessResult:
-        work = process_once(self._session_factory, self._name, envelope, self._handler)
+        work = process_once(
+            self._session_factory,
+            self._name,
+            envelope,
+            self._handler,
+            rejection_event_types=self._rejection_event_types,
+        )
         if self._timeout is None:
             return await work
         # A timeout cancels the attempt, which rolls its transaction back.
