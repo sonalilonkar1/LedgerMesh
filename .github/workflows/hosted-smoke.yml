@@ -16,7 +16,9 @@ name: Hosted smoke
 #
 # Deliberately no `staging-deploy` concurrency group: as a called workflow it
 # would wait for its caller, which holds that group, forever. Runs are
-# isolated by their run id instead.
+# isolated by their run id instead, and on the VM `deploy.sh fixtures` takes
+# the deploy lock, which waits (bounded) for a running deploy, promote or
+# rollback instead of making it fail.
 
 on:
   workflow_call:
@@ -63,8 +65,13 @@ jobs:
       RUN_NUMBER: ${{ github.run_id }}
       RUN_ATTEMPT: ${{ github.run_attempt }}
     steps:
+      # The tests come from the commit that is deployed, so they match its
+      # fixtures.py (the fixture contract with tests/hosted/_support.py)
+      # even when main has moved on. Without expected_revision: the
+      # workflow's own commit.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          ref: ${{ inputs.expected_revision }}
           persist-credentials: false
 
       - name: Plan the run

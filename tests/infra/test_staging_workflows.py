@@ -233,6 +233,15 @@ def test_hosted_smoke_reaches_the_vm_only_for_the_staging_url():
     )
 
 
+def test_hosted_smoke_runs_the_tests_of_the_deployed_commit():
+    # The suite must match the deployed release's fixtures.py, not main's tip.
+    (checkout,) = [
+        s for s in load(SMOKE)["jobs"]["smoke"]["steps"] if "checkout" in s.get("uses", "")
+    ]
+    assert checkout["with"]["ref"] == "${{ inputs.expected_revision }}"
+    assert checkout["with"]["persist-credentials"] is False
+
+
 def test_core_ci_runs_for_the_hosted_smoke_workflow():
     paths = yaml.safe_load((WORKFLOWS / "ci.yml").read_text())[True]["pull_request"]["paths"]
     assert ".github/workflows/hosted-smoke.yml" in paths
