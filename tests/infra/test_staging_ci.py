@@ -462,15 +462,20 @@ def deployment(tmp_path):
     install(
         bin_dir / "gh",
         f"""#!{sys.executable}
-import json, sys
+import json, os, sys
 body = json.loads(sys.stdin.read())
 open({str(log)!r}, "a").write(json.dumps({{"args": sys.argv[1:], "body": body}}) + "\\n")
+reject = os.environ.get("FAKE_REJECT", "")
 if "--jq" in sys.argv:
+    if reject == "all" or (reject == "sha" and body["ref"] != "main"):
+        message = os.environ.get("FAKE_REJECT_MESSAGE", "")
+        print("gh: " + message + " (HTTP 422)", file=sys.stderr)
+        sys.exit(1)
     print(4242)
 """,
     )
 
-    def run(*args: str):
+    def run(*args: str, **fake: str):
         result = subprocess.run(
             ["bash", str(CI / "github-deployment.sh"), *args],
             env={
@@ -479,6 +484,7 @@ if "--jq" in sys.argv:
                 "GITHUB_REPOSITORY": "sonalilonkar1/LedgerMesh",
                 "STAGING_URL": "https://34-105-1-2.sslip.io",
                 "RUN_URL": "https://github.com/sonalilonkar1/LedgerMesh/actions/runs/1",
+                **fake,
             },
             capture_output=True,
             text=True,
@@ -506,6 +512,43 @@ def test_deployment_is_recorded_for_the_exact_commit(deployment):
     assert call["body"]["environment"] == "staging"
     assert call["body"]["required_contexts"] == []
     assert call["body"]["auto_merge"] is False
+    assert call["body"]["payload"] == {"revision": "a" * 40}
+
+
+BRANCH_RULE = (
+    'Branch "aaaa" is not allowed to deploy to staging due to environment protection rules.'
+)
+
+
+def test_deployment_falls_back_to_main_when_the_branch_rule_rejects_the_sha(deployment):
+    result, calls = deployment(
+        "create",
+        "a" * 40,
+        "Deploy aaaa to staging",
+        FAKE_REJECT="sha",
+        FAKE_REJECT_MESSAGE=BRANCH_RULE,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "4242"
+    assert [call["body"]["ref"] for call in calls] == ["a" * 40, "main"]
+    assert calls[1]["body"]["payload"] == {"revision": "a" * 40}
+    assert calls[1]["body"]["description"] == "Deploy aaaa to staging"
+
+
+@pytest.mark.parametrize(
+    ("reject", "message"),
+    [("sha", "Bad credentials"), ("all", BRANCH_RULE)],
+    ids=["other-error", "main-rejected-too"],
+)
+def test_deployment_create_fails_closed(deployment, reject, message):
+    result, _ = deployment(
+        "create", "a" * 40, "Deploy", FAKE_REJECT=reject, FAKE_REJECT_MESSAGE=message
+    )
+
+    assert result.returncode == 1
+    assert "could not create the deployment" in result.stderr
+    assert result.stdout == ""
 
 
 def test_deployment_status_carries_the_url_and_the_run(deployment):

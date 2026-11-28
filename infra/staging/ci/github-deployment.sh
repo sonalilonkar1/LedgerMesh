@@ -32,22 +32,46 @@ case "$1" in
   create)
     [[ $# -eq 3 ]] || die "$usage"
     [[ "$2" =~ ^[0-9a-f]{40}$ ]] || die "invalid sha"
-    body="$(python3 -c '
+    # create_deployment <ref> <sha> <description>: prints the id; gh's error
+    # goes to $err_file.
+    err_file="$(mktemp)"
+    trap 'rm -f "$err_file"' EXIT
+    create_deployment() {
+      local body
+      body="$(python3 -c '
 import json, sys
 print(json.dumps({
     "ref": sys.argv[1],
     "environment": "staging",
-    "description": sys.argv[2],
+    "description": sys.argv[3],
+    # The exact revision, whatever ref GitHub accepted.
+    "payload": {"revision": sys.argv[2]},
     "auto_merge": False,
     # The commit was already gated by core-ci and the image workflow.
     "required_contexts": [],
     "production_environment": False,
     "transient_environment": False,
-}))' "$2" "$3")"
-    id="$(gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" --input - --jq .id <<<"$body")" \
-      || die "could not create the deployment"
-    [[ "$id" =~ ^[0-9]+$ ]] || die "unexpected deployment id"
-    echo "$id"
+}))' "$1" "$2" "$3")"
+      gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" --input - --jq .id \
+        <<<"$body" 2>"$err_file"
+    }
+    # The commit itself first, so GitHub shows exactly what was deployed. The
+    # environment's deployment branch rule (main only) can reject a bare SHA
+    # ("... is not allowed to deploy to staging due to environment protection
+    # rules"); then record it against `main`, whose branch rule it passes, and
+    # carry the exact SHA in the description and payload.revision. Any other
+    # error fails.
+    status=0
+    out="$(create_deployment "$2" "$2" "$3")" || status=$?
+    if [[ "$status" -ne 0 ]]; then
+      grep -q "not allowed to deploy" "$err_file" \
+        || die "could not create the deployment: $(cat "$err_file")"
+      echo "::notice::The staging environment's branch rule rejected ref $2; recording the deployment against main with revision $2" >&2
+      out="$(create_deployment main "$2" "$3")" \
+        || die "could not create the deployment: $(cat "$err_file")"
+    fi
+    [[ "$out" =~ ^[0-9]+$ ]] || die "unexpected deployment id"
+    echo "$out"
     ;;
   status)
     [[ $# -eq 4 ]] || die "$usage"
