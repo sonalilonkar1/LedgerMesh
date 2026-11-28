@@ -13,7 +13,7 @@ manifests are documented with their own issues.
 | API docs closed outside local/test | same middleware | `/docs`, `/redoc`, `/openapi.json` and `/docs/oauth2-redirect` follow the same rule |
 | No local database password in a deployment | `require_safe_database_url` (`safeguards.py:120`), called by every `database_url()` | Unless `LEDGERMESH_ENV` is `local` or `test`, a database URL must carry a non-empty password (in the userinfo or a `password` query parameter) that is not the Compose password `ledgermesh_dev`; an empty `POSTGRES_PASSWORD` counts as unset |
 | Refuse to start with local defaults | `check_startup_configuration` (`safeguards.py:156`), run by `install_safeguards` when `main.py` is imported | With `LEDGERMESH_ENV` set to anything but `local`/`test`, the service exits at startup if its database URL has no password or uses the development password, or the operator token is too short |
-| Safe error bodies | handlers registered by `install_safeguards` (`safeguards.py:360`) | Validation, HTTP and unhandled errors are `application/problem+json` with only `type`, `title`, `status`, `detail`: no submitted input, stack trace or SQL |
+| Safe error bodies | handlers registered by `install_safeguards` (`safeguards.py:363`) | Validation, HTTP and unhandled errors are `application/problem+json` with only `type`, `title`, `status`, `detail`: no submitted input, stack trace or SQL |
 | Bounded input | request models; `SafeguardMiddleware` | Numbers are bounded by their PostgreSQL column types; request bodies are limited to 1 MiB |
 | No `--reload` outside local | `Makefile` `run-*` targets | The only targets that use `--reload` default to `LEDGERMESH_ENV=local` and refuse any other value. Images (`infra/docker/start-service.sh`) and Compose never reload (checked by `tests/security/test_operational_config.py`) |
 | Secret scanning | `.github/workflows/security.yml`, `infra/scripts/secret_scan.sh` | gitleaks over the PR's own commits on every PR, and over every commit on every ref on `main`, weekly and on manual runs |
@@ -95,7 +95,7 @@ curl -H "X-LedgerMesh-Operator-Token: $LEDGERMESH_OPERATOR_TOKEN" \
 - Compared in constant time on SHA-256 digests (`operator_token_matches`,
   `safeguards.py:99`), so neither the token nor its length leaks through timing.
 - The token is never logged: no LedgerMesh code logs request headers. The unhandled-error
-  log records only the method and path (`safeguards.py:405-411`), and
+  log records only the method and path (`safeguards.py:408-414`), and
   `CorrelationMiddleware` reads only `X-Correlation-Id` and `X-Transaction-Id`
   (`libs/messaging/src/ledgermesh_messaging/logs.py:249-253`).
   `tests/security/test_safeguards.py` checks that a 500 carrying the token does not log it.
@@ -138,7 +138,7 @@ false`):
 | Invalid body, header, path or query | 422 | `urn:ledgermesh:<service>:invalid-request` | `detail` lists field locations and messages only. The submitted value and pydantic's `ctx` are never echoed |
 | Malformed JSON | 422 | same | |
 | Body over the limit | 413 | `about:blank` | rejected before any handler runs |
-| Unknown route, closed internal route, closed docs | 404 | `about:blank` | identical bodies |
+| Unknown route, closed internal route, closed docs | 404 | `about:blank` | identical bodies and headers, also with a trailing slash (no redirect that would reveal the route) |
 | Wrong method | 405 | `about:blank` | keeps the `Allow` header |
 | Unhandled exception | 500 | `urn:ledgermesh:<service>:internal-error` | generic `detail` with a correlation id, also returned in `X-Correlation-Id` |
 

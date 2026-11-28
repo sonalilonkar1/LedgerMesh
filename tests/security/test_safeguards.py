@@ -98,6 +98,21 @@ def test_internal_routes_and_docs_are_closed_outside_local_and_test(environment,
         assert response.headers.raw == unknown.headers.raw
 
 
+@pytest.mark.parametrize("value", [None, "staging"])
+def test_closed_routes_with_a_trailing_slash_are_not_redirected(environment, value):
+    # Without this, Starlette answers "/docs/" with a 307 to "/docs", while an
+    # unknown "/no-such-route/" is a 404: the redirect would reveal the route.
+    environment(value)
+    client = TestClient(make_app(), follow_redirects=False)
+    unknown = client.get("/no-such-route/")
+
+    for path in ("/docs/", "/redoc/", "/openapi.json/", "/docs/oauth2-redirect/", "/internal/"):
+        response = client.get(path)
+        assert_safe_problem(response, 404)
+        assert response.content == unknown.content
+        assert response.headers.raw == unknown.headers.raw
+
+
 @pytest.mark.parametrize("value", ["local", "test"])
 def test_internal_routes_and_docs_are_open_in_local_and_test(environment, value):
     environment(value)

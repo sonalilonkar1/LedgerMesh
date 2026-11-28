@@ -280,10 +280,13 @@ class SafeguardMiddleware:
         self.max_bytes = max_bytes or max_request_bytes()
 
     def _restricted(self, path: str) -> bool:
+        # Starlette redirects "/docs/" to "/docs" (307), which would reveal that a
+        # closed route exists, so trailing slashes are ignored here.
+        trimmed = path.rstrip("/") or "/"
         return (
-            path == INTERNAL_PATH_PREFIX
+            trimmed == INTERNAL_PATH_PREFIX
             or path.startswith(INTERNAL_PATH_PREFIX + "/")
-            or path in self.restricted_paths
+            or trimmed in self.restricted_paths
         )
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
