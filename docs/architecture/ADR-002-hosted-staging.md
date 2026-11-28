@@ -41,7 +41,7 @@ It must also be cheap enough for a course project, reproducible from the reposit
 ### 2.1 Inside the VM
 
 ```text
-Internet ──TCP 80/443──▶ caddy ──(edge network)──▶ coordinator / wallet / catalog / audit-ledger APIs
+Internet ──TCP 80/443──▶ caddy ──(proxy network)──▶ coordinator / wallet / catalog / audit-ledger APIs
                                                            │
                                               (backend network, internal: no egress)
                                                            │
@@ -50,7 +50,8 @@ Internet ──TCP 80/443──▶ caddy ──(edge network)──▶ coordinat
 ```
 
 - `backend` is an `internal` Docker network: Kafka, the databases and the workers have no route to the internet and nothing on it publishes a port.
-- `edge` connects Caddy to the four APIs only. Caddy cannot reach Kafka or any database.
+- `proxy` is also `internal` and connects Caddy to the four APIs only. Caddy cannot reach Kafka or any database.
+- `edge` holds only Caddy: it is the one network with internet egress (Caddy needs it for Let's Encrypt) and carries the published ports 80/443. The APIs therefore have no route to the internet or to the GCE metadata server, so a compromised API cannot obtain the VM service account's token, which can read every service's database password. As defence in depth, `vm-startup.sh` adds a `DOCKER-USER` iptables rule rejecting container traffic to `169.254.169.254`; `stack.sh verify egress` checks both.
 - The four Saga workers and the audit consumer are not in `infra/compose.yaml`; locally they run through the Make targets `run-coordinator-saga`, `run-wallet-saga`, `run-catalog-saga` and `run-audit-consumer`. Staging runs the same modules from the service images by overriding the command, as `infra/IMAGES.md` documents.
 - Every container has a restart policy, a memory and CPU limit, and `json-file` log rotation. The APIs, databases, Kafka and Caddy have health checks. The workers have no HTTP server, so their image health check is disabled and `infra/staging/stack.sh verify workers` checks that they keep running without restarts.
 

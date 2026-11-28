@@ -9,7 +9,9 @@
 #      /var/lib/ledgermesh through an fstab UUID entry;
 #   3. make Docker wait for that mount, so containers can never start on an
 #      empty directory of the boot disk;
-#   4. create the data directories and configure json-file log rotation.
+#   4. create the data directories and configure json-file log rotation;
+#   5. stop containers from reaching the GCE metadata server (defence in
+#      depth: only Caddy is on a network with egress, see compose.yaml).
 #
 # Output goes to the serial console and the journal:
 #   sudo journalctl -u google-startup-scripts.service
@@ -96,8 +98,16 @@ mountpoint -q "$DATA_DIR" || { log "$DATA_DIR is not mounted"; exit 1; }
 
 dropin_dir="/etc/systemd/system/docker.service.d"
 dropin="$dropin_dir/ledgermesh-data.conf"
+# Forwarded (container) traffic to the metadata server is rejected, so no
+# container can obtain the VM service account's token, which can read every
+# database password. The host's own traffic (render-env.sh) is not forwarded
+# and is unaffected. ExecStartPost re-adds the rule whenever Docker starts.
+METADATA_RULE=(DOCKER-USER -d 169.254.169.254/32 -j REJECT)
 dropin_content="[Unit]
-RequiresMountsFor=$DATA_DIR"
+RequiresMountsFor=$DATA_DIR
+
+[Service]
+ExecStartPost=/bin/sh -c 'iptables -C ${METADATA_RULE[*]} 2>/dev/null || iptables -I ${METADATA_RULE[*]}'"
 mkdir -p "$dropin_dir"
 if [[ ! -f "$dropin" || "$(cat "$dropin")" != "$dropin_content" ]]; then
   echo "$dropin_content" >"$dropin"
@@ -126,5 +136,13 @@ if [[ ! -f /etc/docker/daemon.json || "$(cat /etc/docker/daemon.json)" != "$daem
   systemctl restart docker
 fi
 systemctl enable --now docker
+
+# ---- 5. no container reaches the metadata server ------------------------------------
+
+if ! iptables -C "${METADATA_RULE[@]}" 2>/dev/null; then
+  log "blocking container traffic to the metadata server"
+  iptables -I "${METADATA_RULE[@]}"
+fi
+iptables -C "${METADATA_RULE[@]}" || { log "the metadata block rule is missing"; exit 1; }
 
 log "ready: docker $(docker version --format '{{.Server.Version}}'), $(docker compose version --short), data on $DATA_DIR"

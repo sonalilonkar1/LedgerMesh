@@ -10,8 +10,8 @@
 #                       LEDGERMESH_*_IMAGE variables.
 #   migrate             Run `alembic upgrade head` for the four services.
 #   topics              Run the LM-018 topic bootstrap (idempotent).
-#   verify <check>      prepared-transactions | topics | ports | db-isolation |
-#                       health | workers | all
+#   verify <check>      prepared-transactions | topics | ports | egress |
+#                       db-isolation | health | workers | all
 #   ps                  Show the containers.
 #   logs [service...]   Print recent logs (--tail, --follow).
 #   collect-logs <out.tgz>
@@ -331,6 +331,54 @@ verify_db_isolation() {
   done
 }
 
+# Runs inside each API container: any HTTP answer (even 403/404) from the GCE
+# metadata server means it is reachable; a connection error means blocked.
+METADATA_PY='
+import sys, urllib.error, urllib.request
+try:
+    urllib.request.urlopen("http://169.254.169.254/computeMetadata/v1/", timeout=3)
+except urllib.error.HTTPError:
+    pass
+except OSError:
+    sys.exit(0)
+print("FAIL reached the GCE metadata server")
+sys.exit(1)
+'
+
+verify_egress() {
+  # Only Caddy may sit on a Docker network with internet egress (it needs it
+  # for ACME), and no container may reach the metadata server: its token
+  # belongs to the VM service account, which reads every database password.
+  local name service network internal count=0 spec out status
+  while read -r name; do
+    [[ -z "$name" || "$name" == *-run-* ]] && continue
+    count=$((count + 1))
+    service="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$name")"
+    for network in $(docker inspect -f '{{ range $n, $c := .NetworkSettings.Networks }}{{ $n }} {{ end }}' "$name"); do
+      internal="$(docker network inspect -f '{{ .Internal }}' "$network")"
+      if [[ "$internal" != "true" && "$service" != "caddy" ]]; then
+        die "$name is on network $network, which has internet egress; only caddy may be"
+      fi
+    done
+  done <<<"$(project_containers)"
+  [[ "$count" -gt 0 ]] || die "no containers found for project $PROJECT"
+  echo "ok  only caddy is on a network with internet egress"
+  for spec in "${SERVICES[@]}"; do
+    service="$(field "$spec" 1)"
+    compose exec -T "$service" python -c "$METADATA_PY" \
+      || die "$service: metadata check failed (the server is reachable or the check could not run)"
+  done
+  # Caddy has egress; the VM's DOCKER-USER rule (vm-startup.sh) rejects its
+  # metadata traffic. Busybox wget prints "HTTP/" only when a server answered.
+  status=0
+  out="$(compose exec -T caddy wget -S -T 3 -O /dev/null http://169.254.169.254/computeMetadata/v1/ 2>&1)" \
+    || status=$?
+  if grep -q "HTTP/" <<<"$out"; then
+    die "caddy can reach the GCE metadata server (exit $status)"
+  fi
+  echo "ok  no container reaches the GCE metadata server"
+}
+
 container_health() {
   docker inspect -f '{{ if .State.Health }}{{ .State.Health.Status }}{{ else }}none{{ end }}' "$1"
 }
@@ -418,18 +466,20 @@ verify() {
     prepared-transactions) verify_prepared_transactions ;;
     topics) verify_topics ;;
     ports) verify_ports ;;
+    egress) verify_egress ;;
     db-isolation) verify_db_isolation ;;
     health) verify_health ;;
     workers) verify_workers ;;
     all)
       verify_health
       verify_ports
+      verify_egress
       verify_prepared_transactions
       verify_topics
       verify_db_isolation
       verify_workers
       ;;
-    *) die "verify needs one of: prepared-transactions topics ports db-isolation health workers all" ;;
+    *) die "verify needs one of: prepared-transactions topics ports egress db-isolation health workers all" ;;
   esac
 }
 

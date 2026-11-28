@@ -34,8 +34,8 @@ Automatic deployment from `main` is LM-049 and the hosted smoke suite is LM-050.
 ## 1. Architecture
 
 ```text
-Internet ──TCP 80/443──▶ caddy ──edge──▶ coordinator :8000, wallet :8001, catalog :8002, audit-ledger :8003
-                                                     │
+Internet ──TCP 80/443──▶ caddy ──proxy──▶ coordinator :8000, wallet :8001, catalog :8002, audit-ledger :8003
+        (edge: egress, Caddy only)   (internal)      │
                                          backend (internal: no egress, no ports)
                                                      │
               kafka :19092 ◀── coordinator-saga, wallet-saga, catalog-saga, audit-consumer
@@ -173,6 +173,7 @@ $S verify health         # Docker health of every container, then HTTPS /health 
 $S verify ports          # only caddy publishes host ports, and only 80/tcp and 443/tcp
 $S verify topics         # the 15 LM-018 topics with the right partition counts, no others; auto-create off
 $S verify prepared-transactions  # max_prepared_transactions > 0; count and age of pg_prepared_xacts
+$S verify egress         # only caddy is on a network with internet egress; no container reaches the GCE metadata server
 $S verify db-isolation   # each service's credentials connect to its own database and are rejected by the other three
 $S verify workers        # the four consumers stay running with no restarts for 20 s
 ```
@@ -292,6 +293,7 @@ Keep `caddy/` so the certificate is not requested again. `infra/scripts/seed.py`
 ## 10. Secrets and rotation
 
 - The four database passwords live only in Secret Manager. `render-env.sh` reads them at deploy time with the VM's service account and writes `/etc/ledgermesh/staging.env`, mode `0600`, owned by root. It never prints them. The file is never committed, copied into a log bundle, or baked into an image.
+- No container can read the secrets itself: only Caddy is on a Docker network with internet egress, and the startup script installs a `DOCKER-USER` iptables rule that rejects container traffic to the metadata server `169.254.169.254`, so no container can obtain the VM service account's token (`stack.sh verify egress` checks both).
 - Docker passes the passwords to containers as environment variables, so anyone with root or Docker access on the VM can read them: the named admins and, through OS Login admin, the deploy service account used by the GitHub workflows (§12).
 - There is no GHCR token: the packages are public. If they become private, add a secret `ledgermesh-staging-ghcr-read-token` holding a token with only `read:packages`, grant the VM service account access to it, and run `docker login ghcr.io` from it before pulling (see `infra/IMAGES.md`, "Pulling from a staging host").
 
@@ -383,7 +385,7 @@ It needs host ports 80 and 443 free (`LEDGERMESH_HTTP_PORT` and `LEDGERMESH_HTTP
 
 The web UI (`services/web`, PR #97) is not merged and staging does not depend on it. To add it after it merges:
 
-1. Add a `web` service to `infra/staging/compose.yaml` with `profiles: ["web"]`, its published image, the `edge` network only, and the same `restart`, `logging`, `deploy.resources` and `healthcheck` settings as the APIs. It must call the public API paths, not internal service URLs.
+1. Add a `web` service to `infra/staging/compose.yaml` with `profiles: ["web"]`, its published image, the `proxy` network only (internal: Caddy reaches it, it has no egress), and the same `restart`, `logging`, `deploy.resources` and `healthcheck` settings as the APIs. It must call the public API paths, not internal service URLs.
 2. Create `infra/staging/caddy.d/web.caddy` with a `handle` block for its paths, mount `./caddy.d:/etc/caddy/caddy.d:ro` into the `caddy` service, and uncomment `import /etc/caddy/caddy.d/*.caddy` in the Caddyfile. The import sits before the catch-all 404.
 3. Start it with `COMPOSE_PROFILES=web`. Update `tests/infra/test_staging_compose.py` and `test_staging_caddyfile.py` for the new service and routes.
 

@@ -173,13 +173,28 @@ def test_coordinator_saga_worker_can_reach_the_catalog():
     assert SERVICES["coordinator-saga"]["environment"]["CATALOG_URL"] == "http://catalog:8002"
 
 
-def test_private_network_has_no_egress_and_caddy_cannot_reach_data():
+def test_only_caddy_has_egress_and_caddy_cannot_reach_data():
     assert COMPOSE["networks"]["backend"] == {"internal": True}
-    assert SERVICES["caddy"]["networks"] == ["edge"]
+    assert COMPOSE["networks"]["proxy"] == {"internal": True}
+    assert COMPOSE["networks"]["edge"] == {}
+    assert set(SERVICES["caddy"]["networks"]) == {"edge", "proxy"}
     for name in ("kafka", *DATABASES, *WORKERS):
         assert SERVICES[name]["networks"] == ["backend"], name
+    # The APIs reach Caddy and the data tier only: no network with egress, so
+    # no route to the GCE metadata server and the VM service account's token.
     for name in APIS:
-        assert set(SERVICES[name]["networks"]) == {"backend", "edge"}
+        assert set(SERVICES[name]["networks"]) == {"backend", "proxy"}, name
+    on_egress = [name for name, svc in SERVICES.items() if "edge" in svc.get("networks", [])]
+    assert on_egress == ["caddy"]
+
+
+def test_vm_blocks_container_traffic_to_the_metadata_server():
+    startup = (STAGING / "vm-startup.sh").read_text()
+    assert "METADATA_RULE=(DOCKER-USER -d 169.254.169.254/32 -j REJECT)" in startup
+    # Applied on every boot and every Docker start, then checked.
+    assert 'iptables -I "${METADATA_RULE[@]}"' in startup
+    assert 'iptables -C "${METADATA_RULE[@]}" ||' in startup
+    assert "ExecStartPost=" in startup
 
 
 def test_caddy_is_pinned_by_digest_and_mounts_persistent_certificates():

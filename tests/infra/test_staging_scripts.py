@@ -164,15 +164,23 @@ print({{"ledgermesh-site-address": "34-105-1-2.sslip.io",
 # ---- stack.sh --------------------------------------------------------------------------
 
 # Fake docker. `docker compose ... logs` leaks every password into the output;
-# `docker inspect` answers port bindings from FAKE_BINDINGS (container -> list).
+# `docker inspect` answers port bindings from FAKE_BINDINGS (container -> list)
+# and networks from FAKE_NETWORKS (container -> list); FAKE_EXTERNAL lists the
+# networks that are not internal; `compose exec <service>` exits with
+# FAKE_EXEC[service] (default 0) and prints FAKE_EXEC_OUT[service].
 FAKE_DOCKER = f"""#!{sys.executable}
 import json, os, sys
 
 args = sys.argv[1:]
 passwords = json.loads(os.environ["FAKE_PASSWORDS"])
 containers = json.loads(os.environ.get("FAKE_BINDINGS", "{{}}"))
+networks = json.loads(os.environ.get("FAKE_NETWORKS", "{{}}"))
 if args[0] == "compose":
     rest = args[args.index("--env-file") + 2:]
+    if rest[0] == "exec":
+        service = rest[2]
+        print(json.loads(os.environ.get("FAKE_EXEC_OUT", "{{}}")).get(service, ""))
+        sys.exit(json.loads(os.environ.get("FAKE_EXEC", "{{}}")).get(service, 0))
     if rest[:2] == ["config", "--services"]:
         print("kafka\\nwallet\\ncaddy")
     elif rest[0] == "logs":
@@ -181,13 +189,19 @@ if args[0] == "compose":
         print("NAME STATUS")
     sys.exit(0)
 if args[0] == "ps":
-    for name in containers:
+    for name in containers or networks:
         print(name)
+    sys.exit(0)
+if args[:2] == ["network", "inspect"]:
+    external = os.environ.get("FAKE_EXTERNAL", "lmtest_edge").split()
+    print("false" if args[-1] in external else "true")
     sys.exit(0)
 if args[0] == "inspect":
     template, name = args[2], args[3]
     if "com.docker.compose.service" in template:
         print(name.split("-")[1])
+    elif "NetworkSettings.Networks" in template:
+        print(" ".join(networks[name]) + " ")
     elif "PortBindings" in template:
         print(" ".join(containers[name]))
     elif "NetworkMode" in template:
@@ -207,7 +221,12 @@ def stack(tmp_path):
     env_file = write_env(tmp_path / "staging.env")
     data_dir = tmp_path / "data"
 
-    def call(*args: str, bindings: dict[str, list[str]] | None = None, env_path: Path = env_file):
+    def call(
+        *args: str,
+        bindings: dict[str, list[str]] | None = None,
+        env_path: Path = env_file,
+        **fake: str,
+    ):
         return run(
             "stack.sh",
             "--env-file",
@@ -223,6 +242,7 @@ def stack(tmp_path):
                 "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
                 "FAKE_PASSWORDS": json.dumps(PASSWORDS),
                 "FAKE_BINDINGS": json.dumps(bindings or {}),
+                **fake,
             },
         )
 
@@ -270,6 +290,55 @@ def test_port_check_passes_when_only_caddy_publishes_80_and_443(stack):
 def test_port_check_fails_on_any_other_published_port(stack, bindings):
     result = stack("verify", "ports", bindings=bindings)
     assert result.returncode != 0
+
+
+NETWORKS = {
+    "lmtest-caddy-1": ["lmtest_edge", "lmtest_proxy"],
+    "lmtest-wallet-1": ["lmtest_backend", "lmtest_proxy"],
+    "lmtest-kafka-1": ["lmtest_backend"],
+}
+
+
+def test_egress_check_passes_when_only_caddy_has_egress_and_metadata_is_blocked(stack):
+    result = stack(
+        "verify",
+        "egress",
+        FAKE_NETWORKS=json.dumps(NETWORKS),
+        FAKE_EXEC=json.dumps({"caddy": 1}),
+        FAKE_EXEC_OUT=json.dumps({"caddy": "wget: can't connect to remote host"}),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "only caddy is on a network with internet egress" in result.stdout
+    assert "no container reaches the GCE metadata server" in result.stdout
+
+
+def test_egress_check_fails_when_an_api_is_on_a_network_with_egress(stack):
+    networks = {**NETWORKS, "lmtest-wallet-1": ["lmtest_backend", "lmtest_edge"]}
+    result = stack("verify", "egress", FAKE_NETWORKS=json.dumps(networks))
+    assert result.returncode != 0
+    assert "lmtest-wallet-1 is on network lmtest_edge" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("exec_status", "exec_out", "message"),
+    [
+        ({"wallet": 1}, {}, "wallet: metadata check failed"),
+        ({"caddy": 8}, {"caddy": "  HTTP/1.1 403 Forbidden"}, "caddy can reach"),
+    ],
+    ids=["api", "caddy"],
+)
+def test_egress_check_fails_when_a_container_reaches_the_metadata_server(
+    stack, exec_status, exec_out, message
+):
+    result = stack(
+        "verify",
+        "egress",
+        FAKE_NETWORKS=json.dumps(NETWORKS),
+        FAKE_EXEC=json.dumps(exec_status),
+        FAKE_EXEC_OUT=json.dumps(exec_out),
+    )
+    assert result.returncode != 0
+    assert message in result.stderr
 
 
 def test_stack_refuses_a_readable_env_file(stack, tmp_path):
