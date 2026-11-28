@@ -50,7 +50,7 @@ def digest_of(sha: str, service: str) -> str:
     return "sha256:" + (sha[:8] + format(SERVICES.index(service), "x") * 56)[:64]
 
 
-FAKE_DOCKER = f"""#!{sys.executable} -I -S
+FAKE_DOCKER = f"""#!{sys.executable} -IS
 import json, os, sys
 
 state_path = os.environ["FAKE_STATE"]
@@ -150,7 +150,7 @@ sys.exit(97)
 """
 
 # The bring-up, as stack.sh would do it, against the fake docker state.
-FAKE_STACK = f"""#!{sys.executable} -I -S
+FAKE_STACK = f"""#!{sys.executable} -IS
 import json, os, sys, tarfile, io
 
 args = sys.argv[1:]
