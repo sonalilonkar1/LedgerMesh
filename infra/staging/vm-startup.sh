@@ -4,7 +4,8 @@
 # provision.sh installs this as the instance's `startup-script` metadata, so
 # it runs as root on every boot. Every step is idempotent:
 #   1. install Docker Engine and the Compose plugin from Docker's apt
-#      repository, and the Google Cloud CLI only if it is missing;
+#      repository, and python3 and the Google Cloud CLI only if they are
+#      missing;
 #   2. format the data disk only if it has no filesystem, then mount it at
 #      /var/lib/ledgermesh through an fstab UUID entry;
 #   3. make Docker wait for that mount, so containers can never start on an
@@ -43,6 +44,13 @@ if ! command -v docker >/dev/null || ! docker compose version >/dev/null 2>&1; t
     >/etc/apt/sources.list.d/docker.list
   apt-get update
   apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+fi
+
+# deploy.sh (LM-049) keeps its release records as JSON with python3.
+if ! command -v python3 >/dev/null; then
+  log "installing python3"
+  apt-get update
+  apt-get install -y python3
 fi
 
 if ! command -v gcloud >/dev/null; then

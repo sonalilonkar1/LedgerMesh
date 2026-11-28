@@ -1,4 +1,4 @@
-# Hosted staging runbook (LM-048)
+# Hosted staging runbook (LM-048, LM-049)
 
 Staging is a single Google Compute Engine VM that runs the LedgerMesh images with Docker Compose behind Caddy. The decision, alternatives and cost estimate are in [ADR-002](../architecture/ADR-002-hosted-staging.md). ADR-001 wins on any conflict.
 
@@ -10,14 +10,14 @@ Staging is a single Google Compute Engine VM that runs the LedgerMesh images wit
 | Data | Disk `ledgermesh-data`, mounted at `/var/lib/ledgermesh`, snapshot daily, 7-day retention |
 | Files | `infra/staging/` (Compose file, Caddyfile and scripts) |
 
-Automatic deployment from `main` is LM-049 and the hosted smoke suite is LM-050. This runbook covers provisioning and operating the environment by hand.
+Every commit on `main` whose images are published is deployed automatically (LM-049, [§4](#4-deploy-and-roll-back)), smoke-tested through the public URL by the hosted smoke suite (LM-050), and rolled back automatically if anything fails. This runbook covers provisioning, deployment, rollback and operating the environment by hand.
 
 ## Contents
 
 1. [Architecture](#1-architecture)
 2. [Public API](#2-public-api)
 3. [Provision](#3-provision)
-4. [Deploy a commit by hand](#4-deploy-a-commit-by-hand)
+4. [Deploy and roll back](#4-deploy-and-roll-back)
 5. [Verify](#5-verify)
 6. [Stop, start and cost](#6-stop-start-and-cost)
 7. [Inspect logs and failures](#7-inspect-logs-and-failures)
@@ -52,7 +52,8 @@ Internet ──TCP 80/443──▶ caddy ──proxy──▶ coordinator :8000,
   | `kafka/` | Kafka log directory (owned by UID 1000, the `apache/kafka` user) |
   | `postgres/<service>/` | One PostgreSQL data directory per service |
   | `caddy/data`, `caddy/config` | Certificates and the ACME account, kept so restarts do not request new certificates |
-  | `releases/`, `deploy-logs/` | Reserved for LM-049 release records |
+  | `releases/` | Release records, bundles, `current`, `last-known-good` and `history.jsonl` (LM-049, [§4.2](#42-release-records-and-last-known-good)) |
+  | `deploy-logs/` | One log per deploy, promote and rollback, and the failing release's redacted log bundle |
 
 - **Settings:** `LEDGERMESH_ENV=staging`, so the Coordinator's `/internal/*` routes return 404 at the application too. `RUN_MIGRATIONS=false`; migrations run as a separate step. Kafka has `auto.create.topics.enable=false`. Every database runs with `max_prepared_transactions=100`.
 
@@ -122,45 +123,125 @@ It ends with `ledgermesh-startup: ready: docker …`.
 
 **For LM-049**, run once afterwards: `bash infra/staging/bootstrap-wif.sh` (use `--dry-run` first). See [§12](#12-github-staging-environment).
 
-## 4. Deploy a commit by hand
+## 4. Deploy and roll back
 
-LM-049 automates this. By hand, pick a commit on `main` whose **Service images** workflow published all four images (`infra/IMAGES.md`).
+### 4.1 Automatic deploy from `main`
+
+`.github/workflows/deploy-staging.yml` runs when the **Service images** workflow (`.github/workflows/images.yml`) completes for `main`, and by hand (**Actions → Deploy staging → Run workflow**, from `main`, with a full commit SHA on `main`). Only one staging change runs at a time (concurrency group `staging-deploy`, never cancelled mid-way; the manual rollback workflow uses the same group). On the VM, every `deploy.sh` command that changes state takes a lock in `/var/lib/ledgermesh/releases/.lock`. A second invocation waits for it with backoff, for up to `--lock-timeout` seconds (default 300), and then fails. Short operations such as `promote`, or a manually started smoke run's fixture setup, therefore queue instead of failing a deployment. A lock whose process is gone is removed.
+
+| Job | What it does |
+|---|---|
+| **Gate** | `infra/staging/ci/gate.sh`. For a `workflow_run`: the Service images run must have succeeded, been triggered by `core-ci` (`event == workflow_run`) for `main` in this repository, and all four `publish / publish ledgermesh-<image>` jobs must have succeeded. If `core-ci` failed, the publish jobs were skipped but the run still "succeeded": the gate ends green with `deploy=false` and a notice. The commit deployed is the one named in the run's title, `Service images <sha>` (`run-name` in `images.yml`), which is the commit `core-ci` tested and the run built. The run's `head_sha` is not used: for a `workflow_run`-triggered run it is `main`'s tip when the run was queued, so after quick merges it names a newer commit whose images may not exist yet. The commit must also still be `main`'s tip: image runs for consecutive commits run in parallel and can finish in any order, and an older commit's run ends with `deploy=false` and a notice instead of replacing a newer release (the tip's own run deploys it). For a manual run: the run must be on `main`; any published commit on `main` may be deployed, older ones included (recovery). In both cases the commit must be an ancestor of `origin/main` and contain `infra/staging/deploy.sh`, and the four GHCR digests are looked up with `infra/scripts/ghcr_digest.sh`. |
+| **Deploy** | Records a GitHub deployment for the exact SHA (`in_progress`), authenticates to Google Cloud with Workload Identity Federation (no stored key), and runs `infra/staging/ci/remote.sh deploy <sha> --no-promote`: it uploads `infra/staging` exactly as committed at `<sha>` (`git archive`), checks its sha256 on the VM, and runs `sudo bash deploy.sh deploy …` over IAP SSH with OS Login. Then `remote.sh status --expect <sha>`. |
+| **Hosted smoke** | Calls `.github/workflows/hosted-smoke.yml` (LM-050) with `base_url` = `STAGING_URL` and `expected_revision` = the SHA. |
+| **Promote** | `deploy.sh promote <sha>`: the release becomes last-known-good. Marks the GitHub deployment `success` with the staging URL. |
+| **Restore last known good** | Runs if any job after the gate failed or was cancelled: collects a redacted log bundle (`deploy.sh logs`) as the artifact `staging-deploy-logs-<sha>-<attempt>` (kept 14 days), runs `deploy.sh rollback last-known-good --after-failed <sha>`, shows `status`, and marks the GitHub deployment `failure`. The run stays red. If the failed SHA is itself last-known-good (an idempotent redeploy of the live release that then failed smoke), nothing older is restored: `deploy.sh` logs that and records `smoke_failed_on_last_known_good` in `history.jsonl`, and the deployment's description says the release is still live. Restore an older SHA with the manual rollback if needed. |
+
+`deploy.sh deploy` on the VM, step by step:
+
+1. **Images.** Pulls `ghcr.io/sonalilonkar1/ledgermesh-{coordinator,wallet,catalog,audit-ledger}:<sha>`, reads each registry digest, and checks it equals the digest the gate looked up and that the image's `LEDGERMESH_REVISION` is `<sha>`. If any image is missing or wrong it exits **10** before anything changes: the running release keeps running.
+2. **Record.** Copies the uploaded bundle to `releases/<sha>/bundle/`, writes `releases/<sha>/images.env` with the digest-pinned references (`…@sha256:…`), and starts `releases/<sha>/release.json` (`status: deploying`, previous release, actor, run URL, start time).
+3. **Bring-up**, with that bundle's `stack.sh up` and the pinned images: render `/etc/ledgermesh/staging.env` from Secret Manager; start Kafka and the databases (`compose up --wait`, bounded by `--wait-timeout`, default 300 s); check `max_prepared_transactions`; run `alembic upgrade head` for each service; run the LM-018 topic bootstrap (`ledgermesh-topics`) before any consumer starts and check the 15 topics; start the APIs and Caddy (`--wait`, bounded); start the four workers; run every check (`verify all`: health through Caddy over HTTPS, ports, prepared transactions, topics, database isolation, workers stable for 20 s).
+4. **Revision.** Every API and worker container must run exactly the recorded image reference with `LEDGERMESH_REVISION=<sha>`.
+5. **Done.** `status: healthy`, `current` points at `<sha>`, `/opt/ledgermesh/staging` links to its bundle. The workflow promotes it after the smoke suite; by hand, `deploy` promotes it immediately unless `--no-promote` is given.
+
+If anything in steps 2 to 4 fails, `deploy.sh` saves the failing containers' logs (`deploy-logs/<sha>-<time>-failed.tgz`, passwords redacted), restores the last-known-good release from **its own** bundle and image digests, re-pulling by digest if needed, with **no rebuild, no migrations and no topic bootstrap**, and exits **20**. It exits **21** if the restore failed too, and **22** on the very first deploy, when there is nothing to restore.
+
+**Idempotent.** Deploying the SHA that is already running again is safe: images are already present, migrations and the topic bootstrap are no-ops, Compose leaves unchanged containers alone, and the record's `attempts` goes up by one.
+
+**Why promote after the smoke suite.** If the release were last-known-good as soon as it was healthy, a smoke failure could only "restore" the release that just failed. Promoting after the smoke suite means a smoke failure restores the previous good release.
+
+**Migrations must stay backward compatible** with the previous release (add first, remove in a later release): a rollback runs the previous image against the newer schema, and never migrates down.
+
+**Skipped commits.** GitHub keeps only the newest pending run per concurrency group, so after several quick merges an intermediate commit may never be deployed; the newest one is. Image runs can also finish out of order; the gate then skips the older commit (see **Gate** above), so staging never moves back to an older commit by itself.
+
+**Pull requests can never deploy:** the workflow has no `pull_request` trigger; the gate checks the triggering run's event and repository (a fork's pull request can have a branch called `main`); the Workload Identity provider only accepts tokens for `refs/heads/main` of `sonalilonkar1/LedgerMesh` (§12); and the `staging` environment allows only `main`. A `workflow_run` workflow only runs once its file is on the default branch, so nothing deploys before this workflow is merged.
+
+### 4.2 Release records and last known good
+
+On the VM, under `/var/lib/ledgermesh/releases/` (on the persistent disk, so they survive VM recreation):
+
+| Path | Contents |
+|---|---|
+| `<sha>/release.json` | `sha`, `status`, `actor`, `run_url`, `url`, `started_at`, `healthy_at`, `finished_at`, `promoted_at` (UTC), `attempts`, `images` and `digests` per service, `previous_last_known_good`, `failed_phase`, `rolled_back_to` |
+| `<sha>/images.env` | The four digest-pinned image references (no secrets) |
+| `<sha>/bundle/` | `infra/staging` as deployed: Compose file, Caddyfile, scripts |
+| `current` | The SHA that should be running |
+| `last-known-good` | The SHA a failure restores |
+| `history.jsonl` | One line per event: `deploy_started`, `healthy`, `promoted`, `deploy_failed`, `rollback_started`, `rolled_back`, `rollback_failed` |
+
+`status` values: `deploying`, `healthy` (up and verified, not yet promoted), `promoted` (last-known-good), `failed`, `failed_rolled_back`, `smoke_failed_rolled_back`, `rollback_failed`, `failed_no_rollback`.
 
 ```bash
-SHA=<full 40-character commit sha>
-ZONE=us-west1-b
-
-# Copy this checkout's infra/staging to the VM.
-gcloud compute scp --recurse --tunnel-through-iap --zone "$ZONE" \
-  infra/staging ledgermesh-staging:/tmp/ledgermesh-staging
-gcloud compute ssh ledgermesh-staging --zone "$ZONE" --tunnel-through-iap
+gcloud compute ssh ledgermesh-staging --zone us-west1-b --tunnel-through-iap
+sudo bash /opt/ledgermesh/staging/deploy.sh status          # current, last known good, every container's image and revision
+sudo cat /var/lib/ledgermesh/releases/<sha>/release.json
+sudo tail -n 20 /var/lib/ledgermesh/releases/history.jsonl
 ```
 
-On the VM:
+From a laptop with the same access (§11): `bash infra/staging/ci/remote.sh status`.
+
+`deploy.sh` keeps the images of the newest three releases plus the current and last-known-good ones and removes older ones (`--keep`); a rollback to an older release pulls its images again by digest.
+
+### 4.3 When a deploy fails
+
+1. Open the failed **Deploy staging** run. The **Restore last known good** job shows whether the restore worked and what is running now (`remote.sh status`).
+2. Download the artifact `staging-deploy-logs-<sha>-<attempt>`. It holds:
+   - `summary.txt`: current and last-known-good SHAs;
+   - `releases/<sha>.json` (look at `failed_phase`) and `releases/history.jsonl`;
+   - `deploy-logs/<sha>-<time>.log`: the deploy's own output, including `stack.sh`'s phases and the failing command's output;
+   - `deploy-logs/<sha>-<time>-failed/`: every container's logs, `ps.txt` and `containers.txt` as they were **before** the rollback;
+   - `now/`: the containers' logs after the rollback.
+
+   Every database password is replaced by `[REDACTED]`, and the bundle is not written if one would remain.
+3. Read the phase:
+
+   | `failed_phase` | Where to look |
+   |---|---|
+   | (exit 10, no record) | The **Deploy on the VM** step: an image is missing or its digest or revision does not match. Nothing changed. |
+   | `env` | Secret Manager access of the VM service account; instance metadata `ledgermesh-site-address`. Nothing was changed; the automatic rollback reuses the existing `/etc/ledgermesh/staging.env` (mode `0600`, all keys set) instead of reading Secret Manager again, so it does not fail at the same step. |
+   | `images` | Pulling a recorded digest (registry reachable?) |
+   | `data-tier`, `prepared-transactions` | `kafka.log`, `<service>-db.log`; is the data disk mounted? |
+   | `migrations` | The `alembic` output in the deploy log. The schema stays at the last successful revision, and the restored release must work with it. |
+   | `topics` | The `ledgermesh-topics` output in the deploy log; `kafka.log` |
+   | `services` | The service's log and `containers.txt` (health status); `compose up --wait` timed out or a container became unhealthy |
+   | `workers`, `verify` | The `verify` output in the deploy log: which check failed; the worker's log if it restarted |
+   | `revision` | A container is not running the recorded image (see the `FAIL` lines) |
+   | smoke failed (`smoke_failed_rolled_back`) | The **Hosted smoke** job's test output |
+
+4. If the restore failed too (`rollback_failed`, exit 21), staging may be down: follow §7 on the VM and roll back by hand (§4.4) to an older release.
+
+### 4.4 Roll back
+
+**Workflow:** **Actions → Roll back staging → Run workflow** on `main`, `target`:
+
+- `previous`: the newest release that was last-known-good, other than the one running now;
+- `last-known-good`;
+- a full commit SHA that staging ran and promoted before (`deploy.sh status`, `history.jsonl`).
+
+It resolves the target on the VM, restores it from its own bundle and image digests (no rebuild, no migrations, no topic bootstrap), checks every container's revision, runs the hosted smoke suite, and records a GitHub deployment for that SHA. The restored release becomes last-known-good. If the smoke suite fails, the run is red and nothing else is rolled back: pick another target.
+
+**By hand** (an admin, §11):
 
 ```bash
-sudo install -d -m 0755 /opt/ledgermesh
-sudo rm -rf /opt/ledgermesh/staging
-sudo mv /tmp/ledgermesh-staging /opt/ledgermesh/staging
-
-# Secrets from Secret Manager -> /etc/ledgermesh/staging.env (root only, 0600).
-sudo bash /opt/ledgermesh/staging/render-env.sh
-
-sudo bash /opt/ledgermesh/staging/stack.sh --sha "$SHA" up
+bash infra/staging/ci/remote.sh rollback previous          # or last-known-good, or <sha>
+bash infra/staging/ci/remote.sh status --expect <sha>
 ```
 
-`stack.sh up`:
+A release that never became last-known-good (for example one that failed) cannot be a target.
 
-1. starts Kafka and the four databases and waits until they are healthy;
-2. checks `max_prepared_transactions > 0` on every database;
-3. runs `alembic upgrade head` for each service in a one-off container of that service's image, with that service's own `DATABASE_URL`;
-4. runs the LM-018 topic bootstrap (`ledgermesh-topics --bootstrap-servers kafka:19092 --replication-factor 1`, the messaging library's console script for `ledgermesh_messaging.topics`) and checks the 15 topics;
-5. starts the APIs and Caddy with `docker compose up --wait` (bounded by `--wait-timeout`, default 300 s), then the four workers (Compose's `--wait` rejects containers whose health check is disabled, so they are checked by `verify workers` instead);
-6. runs every check in [§5](#5-verify).
+### 4.5 Deploy by hand
 
-It stops at the first failure. Running it again for the same SHA is safe: migrations and the topic bootstrap are no-ops, and Compose leaves unchanged containers alone.
+From a checkout of `main` with full history, as an admin (§11). The commit's images must be published.
 
-Migrations must stay backward compatible with the previous image (add first, remove in a later release), because the previous image cannot run against, or migrate down from, a schema revision it does not know.
+```bash
+bash infra/staging/ci/remote.sh deploy <sha> --actor <your GitHub login>   # promotes when healthy
+bash infra/staging/ci/remote.sh status --expect <sha>
+```
+
+Add `--no-promote` to promote later with `remote.sh promote <sha>`. `GCP_PROJECT_ID`, `GCP_ZONE` and `STAGING_VM_NAME` (or `--project`, `--zone`, `--vm`) select the VM; the defaults are `deven-cloud-lab`, `us-west1-b` and `ledgermesh-staging`.
+
+`stack.sh` can still be run directly on the VM (`sudo bash /opt/ledgermesh/staging/stack.sh …`, §5 and §7), but `stack.sh up` does not write release records, so the next failed deploy would not know about it. Prefer `deploy.sh`.
 
 ## 5. Verify
 
@@ -286,9 +367,9 @@ Keep `caddy/` so the certificate is not requested again. `infra/scripts/seed.py`
 |---|---|
 | Container crash | Docker restarts it (`unless-stopped`). |
 | VM reboot or stop/start | The startup script remounts the disk; Docker starts after the mount and restarts every container. Verify with `stack.sh verify all`. |
-| VM deleted or broken | The data disk survives (`auto-delete=no`). Re-run `provision.sh up` (it recreates the VM and attaches the existing disk; the startup script finds the filesystem and does not format it), then deploy the last known good SHA as in §4. |
+| VM deleted or broken | The data disk survives (`auto-delete=no`), and with it the release records. Re-run `provision.sh up` (it recreates the VM and attaches the existing disk; the startup script finds the filesystem and does not format it), then `remote.sh rollback last-known-good` (§4.4), which pulls the recorded images by digest. |
 | Data disk lost or corrupted | Create a disk from the newest snapshot: `gcloud compute disks create ledgermesh-data --zone us-west1-b --source-snapshot <snapshot> --type pd-balanced`, then re-run `provision.sh up` and deploy. Data written after that snapshot is lost. |
-| Wrong release deployed | Deploy the previous SHA as in §4 (LM-049 automates rollback). Migrations are not rolled back. |
+| Wrong release deployed | Run **Roll back staging** with `previous` (§4.4). Migrations are not rolled back. |
 
 ## 10. Secrets and rotation
 
@@ -304,12 +385,16 @@ NEW="$(openssl rand -hex 32)"
 printf '%s' "$NEW" | gcloud secrets versions add ledgermesh-staging-wallet-db-password --data-file -
 ```
 
-Then on the VM, change the role's password inside that database and redeploy, because `POSTGRES_PASSWORD` is only applied when the data directory is first created. `\password` prompts for the value without echoing it or saving it in shell history:
+Then change the role's password inside that database and redeploy, because `POSTGRES_PASSWORD` is only applied when the data directory is first created. On the VM (`\password` prompts for the value without echoing it or saving it in shell history):
 
 ```bash
 $DC exec wallet-db psql -U wallet -d wallet      # then: \password wallet
-sudo bash /opt/ledgermesh/staging/render-env.sh
-sudo bash /opt/ledgermesh/staging/stack.sh --sha <running sha> up
+```
+
+Then, from your laptop, redeploy the running release; it re-renders the env file and recreates the containers whose `DATABASE_URL` changed:
+
+```bash
+bash infra/staging/ci/remote.sh deploy <running sha> --actor <your GitHub login>
 ```
 
 Between the `ALTER` and the redeploy the running containers still hold the old password, so do this while staging is idle.
@@ -353,6 +438,13 @@ so workflows from forks, pull requests and other branches cannot obtain Google c
 
 The deploy service account `ledgermesh-deployer` has no Secret Manager role. Its permissions are IAP SSH to port 22 on the VM, OS Login **admin** on the VM, Compute metadata reads, and acting as the VM's service account. OS Login admin means root (sudo) on the VM, and root can use the VM's service account, which can read the four database password secrets. **Treat the deploy credentials, and anyone who can change a workflow on `main` that runs in `staging`, as able to read the staging database passwords.**
 
+How the LM-049 workflows use the environment:
+
+- Every job that reaches the VM (`deploy`, `promote`, `rollback` in `deploy-staging.yml`, and `rollback-staging.yml`) declares `environment: {name: staging, deployment: false}`. That gives it the variables above and applies the `main`-only branch rule, without GitHub creating an automatic deployment, which would name the workflow's own commit rather than the one deployed. The workflows record the deployment themselves for the exact SHA (`infra/staging/ci/github-deployment.sh`, `deployments: write`): `in_progress`, then `success` with `STAGING_URL` after the smoke suite, or `failure`. The environment page therefore shows which commit is live. `github-deployment.sh` first creates the deployment with `ref` = the exact SHA. GitHub applies the environment's deployment branch rule to deployments created through the API too, and may reject a bare SHA because it is not the branch `main` ("is not allowed to deploy to staging due to environment protection rules"). In that case the script records the deployment against `ref: main` instead. The exact SHA is then in the deployment's description (`Deploy <sha12> to staging`) and in `payload.revision`, and the commit GitHub shows next to it is `main`'s tip when the deployment was created. For automatic deploys that is the same commit, because the gate deploys only `main`'s tip. For a manual deploy or rollback of an older commit, it is not. Any other API error fails the job.
+- Custom deployment protection rules are not compatible with `deployment: false`; do not add one. Required reviewers would still apply, and would make every deploy wait for approval.
+- The hosted smoke workflow (LM-050) is called with `id-token: write` so it can create its run fixtures over IAP.
+- The job permissions are declared in the workflows (`contents: read` by default; `actions: read` and `packages: read` for the gate; `id-token: write` and `deployments: write` only where needed), so the repository's default `GITHUB_TOKEN` setting does not need to change.
+
 ## 13. Teardown
 
 ```bash
@@ -379,6 +471,16 @@ make staging-local-down      # data stays in artifacts/staging/data
 make staging-local-reset     # deletes it
 ```
 
+The deploy, rollback and release-record logic of §4 runs locally too, with the same `deploy.sh` and images already tagged on this machine (`--image-source local`; records in `artifacts/staging/data/releases`):
+
+```bash
+make staging-images-local                          # tags ghcr.io/sonalilonkar1/ledgermesh-*:<HEAD sha>
+make staging-local-deploy                          # deploy.sh deploy <HEAD sha>, promoted when healthy
+make staging-local-deploy STAGING_SHA=<other sha>  # any other locally tagged revision
+make staging-local-status
+make staging-local-rollback STAGING_TARGET=previous   # or last-known-good, or a SHA
+```
+
 It needs host ports 80 and 443 free (`LEDGERMESH_HTTP_PORT` and `LEDGERMESH_HTTPS_PORT` override them, and `stack.sh --https-port` must match). Differences from the VM: images are not `linux/amd64` on Apple silicon, TLS uses Caddy's local CA, secrets come from a file instead of Secret Manager, and there is no cloud firewall or IAP.
 
 ## 15. Optional web UI
@@ -387,7 +489,7 @@ The web UI (`services/web`, PR #97) is not merged and staging does not depend on
 
 1. Add a `web` service to `infra/staging/compose.yaml` with `profiles: ["web"]`, its published image, the `proxy` network only (internal: Caddy reaches it, it has no egress), and the same `restart`, `logging`, `deploy.resources` and `healthcheck` settings as the APIs. It must call the public API paths, not internal service URLs.
 2. Create `infra/staging/caddy.d/web.caddy` with a `handle` block for its paths, mount `./caddy.d:/etc/caddy/caddy.d:ro` into the `caddy` service, and uncomment `import /etc/caddy/caddy.d/*.caddy` in the Caddyfile. The import sits before the catch-all 404.
-3. Start it with `COMPOSE_PROFILES=web`. Update `tests/infra/test_staging_compose.py` and `test_staging_caddyfile.py` for the new service and routes.
+3. Start it with `COMPOSE_PROFILES=web`. `deploy.sh` keeps the whole `infra/staging` directory, including `caddy.d/`, in each release bundle, so a rollback restores the matching gateway configuration. Update `tests/infra/test_staging_compose.py` and `test_staging_caddyfile.py` for the new service and routes.
 
 ## 16. Known limitations
 
@@ -395,4 +497,9 @@ The web UI (`services/web`, PR #97) is not merged and staging does not depend on
 - Inside its own PostgreSQL instance each service user owns its database, because the images run migrations with the runtime `DATABASE_URL`. Cross-service isolation is by separate instances and passwords (`verify db-isolation`). A separate migration role is a follow-up.
 - Prepared-transaction age and count are checked by `stack.sh verify prepared-transactions` (it fails when the oldest is older than 300 s, configurable with `--prepared-max-age`), but there is no paging alert yet (`infra/README.md` asks for one).
 - Logs stay on the VM in rotated `json-file` logs; there is no central log store. `collect-logs` produces a redacted bundle for sharing.
+- Deploys are not zero-downtime: containers whose image changed are recreated in place, and Caddy is recreated on every new release (its Caddyfile path is in the release bundle). Certificates persist on the data disk.
+- A rollback never migrates down, so every migration must work with the previous release (§4.1). A release that fails in its migration step leaves the schema at its last successful revision.
+- The first deploy has nothing to roll back to (exit 22); fix forward or run **Roll back staging** once a good release exists.
+- `deploy.sh status` and the deploy workflow check the running revision on the VM, because `/health` does not report one (`services/*/app/main.py`).
+- After quick successive merges only the newest pending deploy runs (GitHub concurrency); intermediate commits are skipped.
 - `sslip.io` is a third-party DNS service. If it is unavailable the URL does not resolve, although the VM keeps running; a team-owned domain removes that dependency (ADR-002 §6).

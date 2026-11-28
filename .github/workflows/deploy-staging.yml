@@ -1,0 +1,303 @@
+name: Deploy staging
+
+# LM-049: deploy every commit on main whose images were published to the
+# hosted staging VM, smoke-test it through the public URL, and restore the
+# last known good release automatically if anything fails.
+#
+#   gate     -> is this a published commit on main? which digests?
+#   deploy   -> infra/staging/deploy.sh deploy <sha> --no-promote on the VM
+#               (it already restores last-known-good itself on a failed bring-up)
+#   smoke    -> .github/workflows/hosted-smoke.yml (LM-050) against the URL
+#   promote  -> mark <sha> last-known-good
+#   rollback -> on any failure: keep a secret-free log artifact and restore
+#               last-known-good from its recorded digests (no rebuild)
+#
+# Pull requests can never deploy: there is no pull_request trigger, the gate
+# checks the triggering run's event and repository, the Workload Identity
+# provider only accepts tokens for refs/heads/main of this repository
+# (infra/staging/bootstrap-wif.sh), and the `staging` environment allows only
+# main. See docs/deployment/staging.md.
+
+on:
+  workflow_run:
+    workflows: ["Service images"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full 40-character commit SHA on main whose images are published
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+# One staging change at a time, never cancelled half-way. GitHub keeps only
+# the newest pending run per group, so after several quick merges an
+# intermediate commit may be skipped and the newest one deployed. Image runs
+# can also finish out of order: the gate deploys a workflow_run's commit only
+# while it is still main's tip, so an older commit never replaces a newer one.
+concurrency:
+  group: staging-deploy
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+    outputs:
+      deploy: ${{ steps.gate.outputs.deploy }}
+      sha: ${{ steps.gate.outputs.sha }}
+      digests: ${{ steps.gate.outputs.digests }}
+    steps:
+      # The default ref is main's tip for both events; full history to check
+      # that the commit is on main and to archive its infra/staging later.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Decide what to deploy
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          INPUT_SHA: ${{ inputs.sha }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          # "Service images <sha it built>" (run-name in images.yml); the
+          # run's head_sha is main's tip when it was queued, not that commit.
+          RUN_TITLE: ${{ github.event.workflow_run.display_title }}
+        run: bash infra/staging/ci/gate.sh
+
+  deploy:
+    name: Deploy
+    needs: gate
+    if: needs.gate.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # The environment supplies the variables and the main-only branch rule.
+    # The GitHub deployment is recorded by github-deployment.sh for the exact
+    # commit (an automatic one would name the workflow's own commit).
+    environment:
+      name: staging
+      deployment: false
+    permissions:
+      contents: read
+      id-token: write
+      deployments: write
+    outputs:
+      url: ${{ steps.config.outputs.url }}
+      deployment_id: ${{ steps.record.outputs.id }}
+    env:
+      SHA: ${{ needs.gate.outputs.sha }}
+      DIGESTS: ${{ needs.gate.outputs.digests }}
+      STAGING_URL: ${{ vars.STAGING_URL }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_ZONE: ${{ vars.GCP_ZONE }}
+      STAGING_VM_NAME: ${{ vars.STAGING_VM_NAME }}
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the staging environment's variables
+        id: config
+        run: |
+          set -euo pipefail
+          for name in STAGING_URL GCP_PROJECT_ID GCP_ZONE STAGING_VM_NAME GCP_WORKLOAD_IDENTITY_PROVIDER GCP_DEPLOY_SERVICE_ACCOUNT; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::The 'staging' environment has no variable $name (docs/deployment/staging.md, GitHub staging environment)" >&2
+              exit 1
+            fi
+          done
+          if [[ ! "$STAGING_URL" =~ ^https://[A-Za-z0-9.-]+/?$ ]]; then
+            echo "::error::STAGING_URL must be https://<host>" >&2
+            exit 1
+          fi
+          echo "url=${STAGING_URL%/}" >> "$GITHUB_OUTPUT"
+
+      - name: Record the GitHub deployment
+        id: record
+        run: |
+          set -euo pipefail
+          id="$(bash infra/staging/ci/github-deployment.sh create "$SHA" "Deploy ${SHA:0:12} to staging")"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          bash infra/staging/ci/github-deployment.sh status "$id" in_progress "Deploying ${SHA:0:12}"
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Deploy on the VM
+        env:
+          ACTOR: ${{ github.actor }}
+        run: |
+          bash infra/staging/ci/remote.sh deploy "$SHA" \
+            --actor "$ACTOR" --run-url "$RUN_URL" --digests "$DIGESTS" --no-promote
+
+      - name: Check the running revision
+        run: bash infra/staging/ci/remote.sh status --expect "$SHA"
+
+  smoke:
+    name: Hosted smoke
+    needs: [gate, deploy]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/hosted-smoke.yml
+    with:
+      base_url: ${{ needs.deploy.outputs.url }}
+      expected_revision: ${{ needs.gate.outputs.sha }}
+
+  promote:
+    name: Promote to last known good
+    needs: [gate, deploy, smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: staging
+      deployment: false
+    permissions:
+      contents: read
+      id-token: write
+      deployments: write
+    env:
+      SHA: ${{ needs.gate.outputs.sha }}
+      DEPLOYMENT_ID: ${{ needs.deploy.outputs.deployment_id }}
+      STAGING_URL: ${{ needs.deploy.outputs.url }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_ZONE: ${{ vars.GCP_ZONE }}
+      STAGING_VM_NAME: ${{ vars.STAGING_VM_NAME }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Mark the release last known good
+        run: bash infra/staging/ci/remote.sh promote "$SHA"
+
+      - name: Mark the GitHub deployment successful
+        run: |
+          bash infra/staging/ci/github-deployment.sh status "$DEPLOYMENT_ID" success \
+            "${SHA:0:12} is live and passed the hosted smoke tests"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Staging is running \`$SHA\`"
+            echo "- URL: $STAGING_URL"
+            echo "- Release record: \`/var/lib/ledgermesh/releases/$SHA/release.json\` on the VM"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  rollback:
+    name: Restore last known good
+    needs: [gate, deploy, smoke, promote]
+    # Any failure (or cancellation) after the gate approved a deploy.
+    if: >-
+      always() &&
+      needs.gate.outputs.deploy == 'true' &&
+      (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: staging
+      deployment: false
+    permissions:
+      contents: read
+      id-token: write
+      deployments: write
+    env:
+      SHA: ${{ needs.gate.outputs.sha }}
+      DEPLOYMENT_ID: ${{ needs.deploy.outputs.deployment_id }}
+      STAGING_URL: ${{ vars.STAGING_URL }}
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_ZONE: ${{ vars.GCP_ZONE }}
+      STAGING_VM_NAME: ${{ vars.STAGING_VM_NAME }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      # First, while the failing containers may still be there. The bundle
+      # also holds deploy.sh's own failure bundle, taken before its rollback.
+      - name: Collect secret-free logs
+        id: logs
+        run: bash infra/staging/ci/remote.sh logs "staging-deploy-logs.tgz" --sha "$SHA"
+
+      # If the failed SHA is itself last-known-good (an idempotent redeploy
+      # of the live release that then failed smoke), nothing older is
+      # restored; the description below says so instead of claiming a restore.
+      - name: Restore last known good (recorded digests, no rebuild, no migrations)
+        id: restore
+        if: always()
+        run: |
+          set -euo pipefail
+          status=0
+          lkg="$(bash infra/staging/ci/remote.sh resolve last-known-good | tail -n 1)" || status=$?
+          if [[ "$status" -eq 0 && "$lkg" == "$SHA" ]]; then
+            echo "same=true" >> "$GITHUB_OUTPUT"
+          fi
+          bash infra/staging/ci/remote.sh rollback last-known-good --after-failed "$SHA"
+
+      - name: Show what is running now
+        if: always()
+        run: bash infra/staging/ci/remote.sh status
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: staging-deploy-logs-${{ needs.gate.outputs.sha }}-${{ github.run_attempt }}
+          path: staging-deploy-logs.tgz
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Mark the GitHub deployment failed
+        if: always() && env.DEPLOYMENT_ID != ''
+        env:
+          RESTORE: ${{ steps.restore.outcome }}
+          SAME: ${{ steps.restore.outputs.same }}
+        run: |
+          if [[ "$RESTORE" == "success" && "$SAME" == "true" ]]; then
+            description="${SHA:0:12} failed but is itself last known good: still live, nothing older restored"
+          elif [[ "$RESTORE" == "success" ]]; then
+            description="${SHA:0:12} failed; last known good release restored"
+          else
+            description="${SHA:0:12} failed and the restore failed: see the run"
+          fi
+          bash infra/staging/ci/github-deployment.sh status "$DEPLOYMENT_ID" failure "$description"

@@ -77,3 +77,12 @@ with `--dry-run` and a fake `gcloud`, run `render-env.sh` and `stack.sh` with
 fake `gcloud`, `curl` and `docker`, and scan the staging files for committed
 credentials. The live checks are `infra/staging/stack.sh verify all` against a
 running stack; see `docs/deployment/staging.md`.
+
+The LM-049 deploy tooling is tested the same way. `test_staging_deploy.py` runs
+the real `deploy.sh` against a fake Docker host and a fake `stack.sh` that can
+fail in any phase: deploy, idempotent redeploy, missing or mismatched images,
+automatic rollback, manual rollback, promotion, the lock, image retention and
+password redaction. `test_staging_ci.py` covers the workflow helpers in
+`infra/staging/ci/` (gate, IAP remote, GitHub deployments) with fake `gh`,
+`gcloud` and `sudo`, and `test_staging_workflows.py` checks the deploy and
+rollback workflows' triggers, pins, permissions and the hosted smoke contract.

@@ -1,4 +1,8 @@
 name: Service images
+# The commit this run builds. A workflow_run-triggered run's head_sha is
+# main's tip when it was queued, not the commit core-ci tested, so
+# deploy-staging.yml (LM-049) reads the revision from this title.
+run-name: Service images ${{ github.event.workflow_run.head_sha || github.sha }}
 
 # LM-047: build, scan and publish immutable service images to GHCR.
 #

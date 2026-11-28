@@ -37,6 +37,15 @@
 #   --follow                Follow logs.
 #   --prepared-max-age <s>  Fail when a prepared transaction is older (default 300).
 #   --worker-window <s>     How long workers must stay up without restarting (default 20).
+#   --phase-file <path>     Write the name of each `up` phase to this file as it
+#                           starts, so a caller (deploy.sh, LM-049) can record
+#                           which phase failed.
+#   --skip-migrations       `up` only: do not run migrations. Used when rolling
+#                           back: an older image cannot `upgrade head` from a
+#                           newer schema revision it does not know.
+#   --skip-topics           `up` only: do not run the topic bootstrap, and only
+#                           check that this release's topics exist (a newer
+#                           release may have added more). Used when rolling back.
 #
 # Compatible with bash 3.2 (macOS) as well as the VM's bash.
 set -euo pipefail
@@ -60,6 +69,9 @@ TAIL=2000
 FOLLOW=0
 PREPARED_MAX_AGE=300
 WORKER_WINDOW=20
+PHASE_FILE=""
+SKIP_MIGRATIONS=0
+SKIP_TOPICS=0
 
 # service:module:port:db-service:db-user:db-name:image-variable
 SERVICES=(
@@ -82,8 +94,16 @@ log() {
   echo "stack: $*" >&2
 }
 
+phase() {
+  # Record the `up` phase that is starting (see --phase-file).
+  log "phase: $1"
+  if [[ -n "$PHASE_FILE" ]]; then
+    echo "$1" >"$PHASE_FILE"
+  fi
+}
+
 usage() {
-  sed -n '2,42p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,50p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 field() {
@@ -107,6 +127,9 @@ while [[ $# -gt 0 ]]; do
     --follow) FOLLOW=1; shift ;;
     --prepared-max-age) [[ $# -ge 2 ]] || die "$1 needs a value"; PREPARED_MAX_AGE="$2"; shift 2 ;;
     --worker-window) [[ $# -ge 2 ]] || die "$1 needs a value"; WORKER_WINDOW="$2"; shift 2 ;;
+    --phase-file) [[ $# -ge 2 ]] || die "$1 needs a value"; PHASE_FILE="$2"; shift 2 ;;
+    --skip-migrations) SKIP_MIGRATIONS=1; shift ;;
+    --skip-topics) SKIP_TOPICS=1; shift ;;
     -h | --help) usage; exit 0 ;;
     *) ARGS+=("$1"); shift ;;
   esac
@@ -252,6 +275,8 @@ for t in ALL_TOPICS: print(t.name, t.partitions)')"
   done <<<"$expected"
   while read -r name partitions; do
     [[ -z "$name" ]] && continue
+    # After a rollback a newer release's topics may remain; they are harmless.
+    [[ "$SKIP_TOPICS" == 1 ]] && continue
     echo "$expected" | awk -v n="$name" '$1 == n { f = 1 } END { exit !f }' \
       || die "unexpected topic $name (auto-created or not defined by LM-018)"
   done <<<"$actual"
@@ -522,19 +547,32 @@ case "$COMMAND" in
   up)
     resolve_images required
     prepare_dirs
-    log "starting the data tier"
+    phase data-tier
     compose up -d --wait --wait-timeout "$WAIT_TIMEOUT" "${DATA_TIER[@]}"
+    phase prepared-transactions
     verify_prepared_transactions
-    run_migrations
-    run_topics
+    if [[ "$SKIP_MIGRATIONS" == 1 ]]; then
+      log "skipping migrations (--skip-migrations)"
+    else
+      phase migrations
+      run_migrations
+    fi
+    phase topics
+    if [[ "$SKIP_TOPICS" == 1 ]]; then
+      log "skipping the topic bootstrap (--skip-topics)"
+    else
+      run_topics
+    fi
     verify_topics
-    log "starting the APIs and the gateway"
+    phase services
     compose up -d --wait --wait-timeout "$WAIT_TIMEOUT" --remove-orphans "${DATA_TIER[@]}" "${GATEWAY_TIER[@]}"
     # `compose up --wait` rejects containers whose health check is disabled,
     # so the workers start without it; `verify workers` checks them below.
-    log "starting the workers"
+    phase workers
     compose up -d "${WORKERS[@]}"
+    phase verify
     verify all
+    phase complete
     log "stack is up and verified"
     ;;
   migrate) resolve_images required; run_migrations ;;
