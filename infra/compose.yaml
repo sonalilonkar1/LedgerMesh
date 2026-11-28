@@ -151,6 +151,7 @@ services:
       - "${WALLET_PORT:-8001}:8001"
     environment:
       SERVICE_NAME: wallet
+      LEDGERMESH_ENV: local
       DATABASE_URL: postgresql+psycopg://wallet:${POSTGRES_PASSWORD:-ledgermesh_dev}@wallet-db:5432/wallet
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
     depends_on:
@@ -173,6 +174,7 @@ services:
       - "${CATALOG_PORT:-8002}:8002"
     environment:
       SERVICE_NAME: catalog
+      LEDGERMESH_ENV: local
       DATABASE_URL: postgresql+psycopg://catalog:${POSTGRES_PASSWORD:-ledgermesh_dev}@catalog-db:5432/catalog
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
     depends_on:
@@ -195,6 +197,7 @@ services:
       - "${AUDIT_LEDGER_PORT:-8003}:8003"
     environment:
       SERVICE_NAME: audit-ledger
+      LEDGERMESH_ENV: local
       DATABASE_URL: postgresql+psycopg://audit_ledger:${POSTGRES_PASSWORD:-ledgermesh_dev}@audit-ledger-db:5432/audit_ledger
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
     depends_on:

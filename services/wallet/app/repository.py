@@ -25,6 +25,7 @@ from functools import lru_cache
 from typing import Protocol
 from uuid import UUID
 
+from ledgermesh_messaging.safeguards import DEV_DATABASE_PASSWORD, require_safe_database_url
 from sqlalchemy import Connection, Engine, create_engine, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.exc import IntegrityError
@@ -84,10 +85,13 @@ class WalletRepository(Protocol):
 
 
 def database_url() -> str:
-    if override := os.environ.get("WALLET_DATABASE_URL") or os.environ.get("DATABASE_URL"):
-        return override
-    password = os.environ.get("POSTGRES_PASSWORD", "ledgermesh_dev")
-    return f"postgresql+psycopg://wallet:{password}@wallet-db:5432/wallet"
+    url = os.environ.get("WALLET_DATABASE_URL") or os.environ.get("DATABASE_URL")
+    if not url:
+        # An empty POSTGRES_PASSWORD counts as unset (LM-042).
+        password = os.environ.get("POSTGRES_PASSWORD") or DEV_DATABASE_PASSWORD
+        url = f"postgresql+psycopg://wallet:{password}@wallet-db:5432/wallet"
+    # LM-042: the Compose development password is refused outside local/test.
+    return require_safe_database_url(url, setting="WALLET_DATABASE_URL")
 
 
 @lru_cache

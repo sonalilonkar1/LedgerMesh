@@ -46,6 +46,7 @@ The result is the redemption's full history across all four services, in order. 
 - Any field whose name looks like a secret (`password`, `secret`, `token`, `authorization`, `api_key`, `credential`, `cookie`, `database_url`, `dsn`, `private_key`) is written as `[REDACTED]`, including inside nested mappings. `fencing_token` is the one exception, because it isn't a secret.
 - Credentials inside URLs (`postgresql://user:password@host`) are masked to `user:***@host` in messages, fields and tracebacks.
 - Request and message bodies are never logged.
+- Error responses never carry internals. An unhandled error is logged at `ERROR` with its traceback and a `correlation_id`; the generic `500` response returns the same id in its body and in `X-Correlation-Id`, so the log line can be found from what the caller saw (LM-042, [security guide](security.md)).
 
 ## Failure injection
 

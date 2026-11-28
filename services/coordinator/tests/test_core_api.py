@@ -170,7 +170,9 @@ def test_get_returns_current_mode_and_state():
     assert response.json() == created
 
 
-def test_transition_history_is_read_only_and_visible():
+def test_transition_history_is_read_only_and_visible(monkeypatch):
+    # LM-042: like every /internal route, the history is open only in local/test.
+    monkeypatch.setenv("LEDGERMESH_ENV", "test")
     client, repository = client_and_repository()
     created = client.post(
         "/v1/redemptions",

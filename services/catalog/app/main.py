@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from ledgermesh_messaging import CorrelationMiddleware, configure_logging
+from ledgermesh_messaging.safeguards import install_safeguards
 
 from services.catalog.app.errors import CatalogError
 from services.catalog.app.models import (
@@ -20,7 +21,7 @@ from services.catalog.app.models import (
 )
 from services.catalog.app.participant import PostgresCatalogParticipantRepository
 from services.catalog.app.participant_service import CatalogParticipantService
-from services.catalog.app.repository import PostgresCatalogRepository, get_engine
+from services.catalog.app.repository import PostgresCatalogRepository, database_url, get_engine
 from services.catalog.app.service import CatalogService
 
 SERVICE_NAME = "catalog"
@@ -28,6 +29,9 @@ configure_logging(SERVICE_NAME)  # LM-032: JSON logs with shared field names
 
 app = FastAPI(title="LedgerMesh Rewards Catalog Service", version="0.1.0")
 app.add_middleware(CorrelationMiddleware)
+
+# LM-042: internal routes and docs closed outside local/test, safe error bodies.
+install_safeguards(app, SERVICE_NAME, database_url=database_url)
 
 
 @lru_cache

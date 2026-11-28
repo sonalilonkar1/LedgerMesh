@@ -21,7 +21,9 @@ State changes are deliberately not exposed through HTTP. Only Coordinator
 workflow code can call the repository transition operation. This prevents an
 untrusted client from walking a transaction through valid-looking states and
 reporting success without the corresponding Wallet and Catalog effects. The
-internal history endpoint is read-only.
+internal history endpoint is read-only and, like every `/internal` route, answers
+`404` unless `LEDGERMESH_ENV` is `local` or `test` or the request carries the
+operator token (LM-042, [security guide](../../docs/security.md)).
 
 ## State validation
 
@@ -139,7 +141,9 @@ curl -X POST \
 ```
 
 The manual execution endpoint is available only when `LEDGERMESH_ENV` is
-explicitly `local` or `test`; hosted/public deployments return `404`. The
+explicitly `local` or `test`; hosted/public deployments return `404` unless the
+request carries the operator token (`X-LedgerMesh-Operator-Token`, see
+[the security guide](../../docs/security.md)). The
 recovery worker introduced by LM-016 starts and resumes durable transactions
 without exposing this control endpoint publicly.
 
@@ -216,8 +220,10 @@ curl -X POST http://localhost:8000/internal/v1/2pc/recovery/run
 ```
 
 Hosted, staging, and production configurations return `404` for both operator
-routes. The periodic recovery worker calls the recovery service directly and
-does not depend on either HTTP endpoint.
+routes unless the request carries the operator token from
+`LEDGERMESH_OPERATOR_TOKEN` ([security guide](../../docs/security.md)). The
+periodic recovery worker calls the recovery service directly and does not
+depend on either HTTP endpoint.
 
 | Variable | Default in Compose | Purpose |
 |---|---:|---|

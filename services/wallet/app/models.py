@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
+from ledgermesh_messaging.safeguards import POSTGRES_BIGINT_MAX
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -13,7 +14,8 @@ class StrictModel(BaseModel):
 
 class DeductRequest(StrictModel):
     transaction_id: UUID
-    points: int = Field(gt=0)
+    # LM-042: bounded by the BIGINT column, so an oversized value is a 422.
+    points: int = Field(gt=0, le=POSTGRES_BIGINT_MAX)
     event_id: UUID | None = None
 
 
@@ -39,7 +41,7 @@ class WalletOperationResult(WalletBalance):
 class WalletPrepareRequest(StrictModel):
     correlation_id: UUID
     user_id: str = Field(min_length=1)
-    points: int = Field(gt=0)
+    points: int = Field(gt=0, le=POSTGRES_BIGINT_MAX)
 
 
 class ParticipantResponse(StrictModel):

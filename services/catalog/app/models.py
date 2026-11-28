@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
+from ledgermesh_messaging.safeguards import POSTGRES_BIGINT_MAX, POSTGRES_INTEGER_MAX
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -11,15 +12,17 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+# LM-042: numbers are bounded by their database columns (INTEGER quantities,
+# BIGINT versions and costs), so an oversized value is a 422, not a 500.
 class ReserveRequest(StrictModel):
     transaction_id: UUID
-    quantity: int = Field(gt=0)
+    quantity: int = Field(gt=0, le=POSTGRES_INTEGER_MAX)
     event_id: UUID | None = None
 
 
 class ReleaseRequest(StrictModel):
     transaction_id: UUID
-    quantity: int = Field(gt=0)
+    quantity: int = Field(gt=0, le=POSTGRES_INTEGER_MAX)
     event_id: UUID | None = None
 
 
@@ -59,9 +62,9 @@ class ReservationResult(StrictModel):
 class CatalogPrepareRequest(StrictModel):
     correlation_id: UUID
     reward_id: str = Field(min_length=1)
-    quantity: int = Field(gt=0)
-    expected_reward_version: int = Field(ge=0)
-    expected_point_cost: int = Field(gt=0)
+    quantity: int = Field(gt=0, le=POSTGRES_INTEGER_MAX)
+    expected_reward_version: int = Field(ge=0, le=POSTGRES_BIGINT_MAX)
+    expected_point_cost: int = Field(gt=0, le=POSTGRES_BIGINT_MAX)
 
 
 class ParticipantResponse(StrictModel):

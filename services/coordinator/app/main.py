@@ -7,6 +7,11 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from ledgermesh_messaging import CorrelationMiddleware, configure_logging
+from ledgermesh_messaging.safeguards import (
+    OPERATOR_TOKEN_HEADER,
+    install_safeguards,
+    restricted_access_allowed,
+)
 
 from services.coordinator.app.errors import CoordinatorError
 from services.coordinator.app.models import (
@@ -22,7 +27,11 @@ from services.coordinator.app.recovery import (
     TwoPhaseCommitRecovery,
     recovery_enabled,
 )
-from services.coordinator.app.repository import PostgresCoordinatorRepository, get_engine
+from services.coordinator.app.repository import (
+    PostgresCoordinatorRepository,
+    database_url,
+    get_engine,
+)
 from services.coordinator.app.service import CoordinatorService
 from services.coordinator.app.two_phase_commit import TwoPhaseCommitWorkflow, default_workflow
 
@@ -46,6 +55,9 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="LedgerMesh Redemption Coordinator", version="0.1.0", lifespan=lifespan)
 app.add_middleware(CorrelationMiddleware)
+
+# LM-042: internal routes and docs closed outside local/test, safe error bodies.
+install_safeguards(app, SERVICE_NAME, database_url=database_url)
 
 
 @lru_cache
@@ -79,12 +91,13 @@ IdempotencyKey = Annotated[
 ]
 
 
-def require_local_internal_routes() -> None:
-    if os.environ.get("LEDGERMESH_ENV") not in {"local", "test"}:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+def require_internal_access(request: Request) -> None:
+    # SafeguardMiddleware already closes /internal; this keeps each route explicit.
+    if not restricted_access_allowed(request.headers.get(OPERATOR_TOKEN_HEADER)):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
 
 
-InternalRouteDependency = Annotated[None, Depends(require_local_internal_routes)]
+InternalRouteDependency = Annotated[None, Depends(require_internal_access)]
 
 
 @app.exception_handler(CoordinatorError)
@@ -142,7 +155,9 @@ def get_redemption(
     tags=["internal"],
 )
 def list_redemption_transitions(
-    transaction_id: UUID, service: CoordinatorServiceDependency
+    transaction_id: UUID,
+    service: CoordinatorServiceDependency,
+    _internal: InternalRouteDependency,
 ) -> list[TransitionView]:
     return service.list_transitions(transaction_id)
 
