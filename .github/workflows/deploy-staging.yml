@@ -259,10 +259,20 @@ jobs:
         id: logs
         run: bash infra/staging/ci/remote.sh logs "staging-deploy-logs.tgz" --sha "$SHA"
 
+      # If the failed SHA is itself last-known-good (an idempotent redeploy
+      # of the live release that then failed smoke), nothing older is
+      # restored; the description below says so instead of claiming a restore.
       - name: Restore last known good (recorded digests, no rebuild, no migrations)
         id: restore
         if: always()
-        run: bash infra/staging/ci/remote.sh rollback last-known-good --after-failed "$SHA"
+        run: |
+          set -euo pipefail
+          status=0
+          lkg="$(bash infra/staging/ci/remote.sh resolve last-known-good | tail -n 1)" || status=$?
+          if [[ "$status" -eq 0 && "$lkg" == "$SHA" ]]; then
+            echo "same=true" >> "$GITHUB_OUTPUT"
+          fi
+          bash infra/staging/ci/remote.sh rollback last-known-good --after-failed "$SHA"
 
       - name: Show what is running now
         if: always()
@@ -281,8 +291,11 @@ jobs:
         if: always() && env.DEPLOYMENT_ID != ''
         env:
           RESTORE: ${{ steps.restore.outcome }}
+          SAME: ${{ steps.restore.outputs.same }}
         run: |
-          if [[ "$RESTORE" == "success" ]]; then
+          if [[ "$RESTORE" == "success" && "$SAME" == "true" ]]; then
+            description="${SHA:0:12} failed but is itself last known good: still live, nothing older restored"
+          elif [[ "$RESTORE" == "success" ]]; then
             description="${SHA:0:12} failed; last known good release restored"
           else
             description="${SHA:0:12} failed and the restore failed: see the run"

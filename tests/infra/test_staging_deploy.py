@@ -570,6 +570,23 @@ def test_rollback_after_a_smoke_failure(host):
     assert "--skip-migrations" in up_calls(host)[-1]["args"]
 
 
+def test_rollback_after_the_last_known_good_itself_failed_smoke_says_so(host):
+    # An idempotent redeploy of the live, last-known-good A failed smoke.
+    host.publish(A)
+    assert host.deploy(A).returncode == 0
+    assert host.deploy(A, "--no-promote").returncode == 0
+    status_before = host.release(A)["status"]
+
+    result = host.run("rollback", "last-known-good", "--after-failed", A)
+
+    assert result.returncode == 0, result.stderr
+    assert "is itself the last-known-good release; nothing older is restored" in result.stderr
+    assert host.pointer("current") == host.pointer("last-known-good") == A
+    assert host.release(A)["status"] == status_before
+    assert host.release(A)["status"] != "smoke_failed_rolled_back"
+    assert host.history()[-1]["event"] == "smoke_failed_on_last_known_good"
+
+
 def test_rollback_when_the_deploy_already_restored_is_a_no_op(host):
     host.publish(A)
     host.publish(B)

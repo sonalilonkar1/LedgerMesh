@@ -835,6 +835,14 @@ cmd_rollback() {
   start_log "rollback"
   sha="$(resolve_target "$target")"
   current="$(read_pointer current)"
+  if [[ -n "$AFTER_FAILED" && "$AFTER_FAILED" == "$sha" ]]; then
+    # An idempotent redeploy of the last-known-good release failed the smoke
+    # suite: there is nothing older to restore under this target. Say so
+    # instead of reporting a restore; an older SHA can be restored with
+    # rollback-staging.yml.
+    log "the failed release $sha is itself the $target release; nothing older is restored and $sha stays live"
+    history_add event=smoke_failed_on_last_known_good "sha=$sha" "target=$target" "actor=$ACTOR"
+  fi
   if [[ "$current" == "$sha" ]] && check_running "$sha" quiet >>"$LOG"; then
     log "$sha is already running and verified; nothing to do"
     if [[ -n "$AFTER_FAILED" && "$AFTER_FAILED" != "$sha" && -f "$(release_json "$AFTER_FAILED")" ]]; then
@@ -848,7 +856,7 @@ cmd_rollback() {
   if ! rollback_to "$sha" "$AFTER_FAILED"; then
     exit 21
   fi
-  if [[ -n "$AFTER_FAILED" && -f "$(release_json "$AFTER_FAILED")" ]]; then
+  if [[ -n "$AFTER_FAILED" && "$AFTER_FAILED" != "$sha" && -f "$(release_json "$AFTER_FAILED")" ]]; then
     # It reached healthy but failed later (the hosted smoke suite).
     case "$(record_get "$AFTER_FAILED" healthy_at)" in
       "") ;;
